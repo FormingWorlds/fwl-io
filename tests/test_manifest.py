@@ -96,7 +96,13 @@ def test_missing_registry_gives_actionable_error(tmp_path):
 def test_shared_manifest_ships_and_parses():
     path = shared_manifest_path()
     assert path.is_file()
-    assert load_manifest(path) == []
+    datasets = {ds.key: ds for ds in load_manifest(path)}
+    baraffe = datasets['stellar_evolution_tracks.Baraffe']
+    assert baraffe.subdir == 'stellar_evolution_tracks/Baraffe'
+    assert baraffe.required_by == ('mors',)
+    registry = baraffe.registry()  # the committed registry ships with the package
+    assert len(registry) == 31
+    assert registry['BHAC15-M0p010.txt'] == 'md5:7b2927f8cb983680692280344eee1d9a'
 
 
 class _FakeEntryPoint:
