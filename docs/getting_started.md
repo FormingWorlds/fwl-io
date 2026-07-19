@@ -6,6 +6,8 @@
 pip install fwl-io
 ```
 
+The distribution and the command are named `fwl-io`; the Python import is `fwl_io`, since Python does not allow hyphens in module names.
+
 fwl-io requires Python 3.11 or newer. For development installs see [Installation](How-to/installation.md).
 
 ## Configure the data root

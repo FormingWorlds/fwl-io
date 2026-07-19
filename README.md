@@ -25,6 +25,8 @@ Models in the PROTEUS framework depend on reference data hosted on Zenodo (with 
 pip install fwl-io
 ```
 
+The distribution and the command are named `fwl-io`; the Python import is `fwl_io`, since Python does not allow hyphens in module names.
+
 ## Usage
 
 ```python
