@@ -32,7 +32,6 @@ classifiers = [
 dependencies = [
     "pooch>=1.8",
     "requests>=2.31",
-    "platformdirs>=3.0",
 ]
 
 [project.urls]
@@ -53,6 +52,7 @@ fwl-io = "fwl_io.cli:main"
 fwl-io-shared = "fwl_io.manifest:shared_manifest_path"
 
 [tool.setuptools_scm]
+fallback_version = "0.0.0"
 
 [tool.setuptools.package-data]
 fwl_io = ["data/*.toml", "data/*.txt"]

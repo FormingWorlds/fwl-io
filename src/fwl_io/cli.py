@@ -1,4 +1,8 @@
-"""Command-line interface: ``fwl-io sync | list | fetch``."""
+"""Command-line interface: ``fwl-io sync | list | fetch``.
+
+Failures from the package's own error types exit with status 1 and a
+one-line message on stderr instead of a traceback.
+"""
 
 from __future__ import annotations
 
@@ -9,22 +13,28 @@ from fwl_io import __version__
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
-    from fwl_io.sync import sync_manifest
+    from fwl_io.sync import ZENODO_API, sync_manifest
 
-    for registry in sync_manifest(args.manifest):
+    for registry in sync_manifest(args.manifest, api_base=args.api_base or ZENODO_API):
         print(f'wrote {registry}')
     return 0
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
-    from fwl_io.manifest import discover_manifests
+    from fwl_io.manifest import _discover
 
-    for provider, datasets in sorted(discover_manifests().items()):
+    found, errors = _discover()
+    for provider, datasets in sorted(found.items()):
         print(f'[{provider}]')
         for ds in datasets:
             consumers = ', '.join(ds.required_by) or '-'
-            print(f'  {ds.key:50s} {ds.subdir:45s} required_by: {consumers}')
-    return 0
+            registry_note = (
+                '' if ds.registry_path and ds.registry_path.is_file() else '  [NO REGISTRY]'
+            )
+            print(f'  {ds.key:50s} {ds.subdir:45s} required_by: {consumers}{registry_note}')
+    for provider, message in sorted(errors.items()):
+        print(f'[{provider}] FAILED TO LOAD: {message}', file=sys.stderr)
+    return 1 if errors else 0
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
@@ -49,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sync = sub.add_parser('sync', help='regenerate committed registries from the Zenodo API')
     p_sync.add_argument('manifest', help='path to a manifest.toml')
+    p_sync.add_argument('--api-base', default=None, help=argparse.SUPPRESS)
     p_sync.set_defaults(func=_cmd_sync)
 
     p_list = sub.add_parser('list', help='list datasets from all installed manifests')
@@ -60,7 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch.set_defaults(func=_cmd_fetch)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary: message, not traceback
+        print(f'fwl-io: {exc}', file=sys.stderr)
+        return 1
 
 
 if __name__ == '__main__':

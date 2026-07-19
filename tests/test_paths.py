@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from fwl_io.paths import is_offline, resolve_cache_root, resolve_data_root
+from fwl_io.paths import MissingDataRootError, is_offline, resolve_cache_root, resolve_data_root
 
 pytestmark = pytest.mark.unit
 
@@ -20,11 +20,9 @@ def test_env_root_used_when_no_explicit(tmp_path, monkeypatch):
     assert root.is_dir()
 
 
-def test_platform_default_when_unset(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        'platformdirs.user_data_dir', lambda name: str(tmp_path / 'platform' / name)
-    )
-    assert resolve_data_root() == (tmp_path / 'platform' / 'fwl_data').absolute()
+def test_unset_root_raises_instead_of_inventing_a_default():
+    with pytest.raises(MissingDataRootError, match='FWL_DATA'):
+        resolve_data_root()
 
 
 def test_cache_root_requires_existing_directory(tmp_path, monkeypatch):

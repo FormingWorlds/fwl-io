@@ -1,6 +1,6 @@
 import pytest
 
-from fwl_io.manifest import load_manifest, shared_manifest_path
+from fwl_io.manifest import discover_manifests, load_manifest, shared_manifest_path
 
 pytestmark = pytest.mark.unit
 
@@ -46,15 +46,43 @@ def test_absolute_subdir_rejected(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
-def test_dataset_without_any_doi_rejected(tmp_path):
-    bad = '[g.d]\nsubdir = "g/d"\n'
-    with pytest.raises(ValueError, match='at least one of'):
+@pytest.mark.parametrize('subdir', ['../outside', 'a/../../b', 'a\\\\b'])
+def test_traversal_subdir_rejected(tmp_path, subdir):
+    bad = f'[g.d]\nsubdir = "{subdir}"\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError):
         load_manifest(_write(tmp_path, bad))
 
 
-def test_non_doi_value_rejected(tmp_path):
-    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "https://zenodo.org/records/1"\n'
+def test_dataset_without_zenodo_rejected(tmp_path):
+    bad = '[g.d]\nsubdir = "g/d"\ndataverse = "10.34894/XYZ"\n'
+    with pytest.raises(ValueError, match='Zenodo version DOI is required'):
+        load_manifest(_write(tmp_path, bad))
+
+
+@pytest.mark.parametrize(
+    'value', ['https://zenodo.org/records/1', '10.1234/other.repo', '10.5281/zenodo.abc']
+)
+def test_non_zenodo_doi_rejected(tmp_path, value):
+    bad = f'[g.d]\nsubdir = "g/d"\nzenodo = "{value}"\n'
+    with pytest.raises(ValueError, match='not a Zenodo DOI'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_bad_dataverse_doi_rejected(tmp_path):
+    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\ndataverse = "not-a-doi"\n'
     with pytest.raises(ValueError, match='is not a DOI'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_dataset_with_subtable_rejected_not_silently_dropped(tmp_path):
+    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n[g.d.meta]\nauthor = "someone"\n'
+    with pytest.raises(ValueError, match='must not contain sub-tables'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_array_of_tables_rejected_not_silently_dropped(tmp_path):
+    bad = '[[g.d]]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='arrays of tables'):
         load_manifest(_write(tmp_path, bad))
 
 
@@ -69,3 +97,29 @@ def test_shared_manifest_ships_and_parses():
     path = shared_manifest_path()
     assert path.is_file()
     assert load_manifest(path) == []
+
+
+class _FakeEntryPoint:
+    def __init__(self, name, target):
+        self.name = name
+        self._target = target
+
+    def load(self):
+        return self._target
+
+
+def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
+    good_manifest = _write(tmp_path, GOOD)
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    eps = [
+        _FakeEntryPoint('good-model', lambda: good_manifest),
+        _FakeEntryPoint('broken-model', broken),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found = discover_manifests()
+    assert set(found) == {'good-model'}
+    assert len(found['good-model']) == 2
