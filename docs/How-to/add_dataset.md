@@ -1,0 +1,52 @@
+# Add a dataset
+
+Follow these steps to make a new dataset fetchable through fwl-io.
+
+## 1. Deposit the files on Zenodo
+
+Upload the files to Zenodo and note the **version DOI** of the deposit, the DOI of the specific version you just created, of the form `10.5281/zenodo.<record-id>`.
+
+!!! warning "Version DOI, not concept DOI"
+
+    Every Zenodo deposit has two DOIs: the version DOI of each specific deposit and a concept DOI that always resolves to the newest deposit. Manifests must pin the version DOI. `fwl-io sync` rejects concept DOIs, because data that silently updates underneath pinned code is exactly the failure mode fwl-io exists to prevent. Publishing a new version of the data means minting a new version DOI and updating the manifest deliberately.
+
+## 2. Declare the dataset in a manifest
+
+Choose the manifest:
+
+- Data consumed by **several models** goes into the shared manifest in the fwl-io repository (`src/fwl_io/data/shared_manifest.toml`).
+- Data consumed by **one model** goes into that model's own manifest, shipped with the model package (see [Migrate a model](migrate_model.md)).
+
+Add a table for the dataset:
+
+```toml
+[interior_lookup_tables.MgSiO3_Wolf_Bower_2018]
+name = "Wolf & Bower (2018) MgSiO3 equation of state"
+subdir = "interior_lookup_tables/MgSiO3_Wolf_Bower_2018"
+zenodo = "10.5281/zenodo.1234567"
+required_by = ["aragog", "zalmoxis", "spider"]
+```
+
+`subdir` is the location below `FWL_DATA`, matching the existing tree layout. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
+
+## 3. Generate the registry
+
+```bash
+fwl-io sync path/to/manifest.toml
+```
+
+This queries the Zenodo record and writes a registry file next to the manifest (`interior_lookup_tables.MgSiO3_Wolf_Bower_2018.registry.txt`) containing every file name and checksum. Commit the manifest change and the registry file together; the checksums are then reviewed like any other change.
+
+## 4. Mirror to Dataverse (optional but encouraged)
+
+Mirror the deposit to Dataverse and add its DOI:
+
+```toml
+dataverse = "10.34894/ABCDEF"
+```
+
+The mirror must host **byte-identical** copies of the originals; disable Dataverse's tabular ingest for mirrored deposits, since ingest re-encodes tabular files and changes their bytes. Checksums always come from the Zenodo record.
+
+## 5. Ship it
+
+For the shared manifest, open a PR on fwl-io. For a model manifest, open a PR on the model; make sure the manifest and its registry files are included in the model's package data, or fetching fails at runtime on user machines.

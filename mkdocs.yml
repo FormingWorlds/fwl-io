@@ -1,0 +1,147 @@
+site_name: fwl-io
+site_url: https://proteus-framework.org/fwl-io
+repo_url: https://github.com/FormingWorlds/fwl-io
+repo_name: GitHub
+
+copyright: '&copy; 2023-2026 <a href="https://formingworlds.space">Forming Worlds Lab</a>'
+
+nav:
+  - Home:
+      - About: index.md
+      - Getting started: getting_started.md
+
+  - How-to guides:
+      - Installation: How-to/installation.md
+      - Add a dataset: How-to/add_dataset.md
+      - Migrate a model to fwl-io: How-to/migrate_model.md
+      - Run on clusters: How-to/clusters.md
+
+  - Explanations:
+      - Design decisions: Explanations/design.md
+      - Manifests and registries: Explanations/manifests.md
+
+  - Reference:
+      - CLI reference: Reference/cli.md
+      - Environment variables: Reference/environment.md
+      - API reference:
+          - Overview: Reference/api/index.md
+          - Fetching: Reference/api/fetch.md
+          - Manifests: Reference/api/manifest.md
+          - Registries: Reference/api/registry.md
+          - Sync: Reference/api/sync.md
+          - Paths: Reference/api/paths.md
+
+  - Community:
+      - Code of Conduct: Community/CODE_OF_CONDUCT.md
+      - Contributing: Community/CONTRIBUTING.md
+
+  - Source code:
+      - GitHub repository: https://github.com/FormingWorlds/fwl-io
+
+  - Issues:
+      - GitHub issues: https://github.com/FormingWorlds/fwl-io/issues
+
+  - Other PROTEUS modules:
+      - "\U0001F517 PROTEUS": https://proteus-framework.org/PROTEUS/
+      - "\U0001F517 CALLIOPE": https://proteus-framework.org/CALLIOPE/
+      - "\U0001F517 MORS": https://proteus-framework.org/MORS/
+      - "\U0001F517 JANUS": https://proteus-framework.org/JANUS/
+      - "\U0001F517 ZEPHYRUS": https://proteus-framework.org/ZEPHYRUS/
+      - "\U0001F517 AGNI": https://www.h-nicholls.space/AGNI/
+
+plugins:
+  - search
+  - tags
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          inventories:
+            - https://docs.python.org/3/objects.inv
+          options:
+            docstring_style: numpy
+            docstring_options:
+              ignore_init_summary: yes
+            docstring_section_style: table
+            show_submodules: no
+            show_source: true
+            show_symbol_type_heading: true
+            show_root_heading: true
+            show_root_toc_entry: true
+            show_docstring_attributes: true
+            show_root_full_path: false
+            members_order: alphabetical
+            merge_init_into_class: yes
+            filters: ["!^_"]
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  features:
+    - navigation.tabs
+    - navigation.footer
+    - navigation.tabs.sticky
+    - content.code.copy
+    - content.tabs.link
+
+  # Fonts are self-hosted via stylesheets/fonts/fonts.css
+  font: false
+
+  # Default assets (the header stays dark in both schemes, so one glyph serves both)
+  favicon: assets/favicon.svg
+  logo: assets/glyph_phase_dark.png
+
+  # The toggle icon shows the current mode, matching the project website
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: lucide/moon
+        name: Switch to light mode
+
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: lucide/sun
+        name: Switch to dark mode
+
+extra_css:
+  - stylesheets/extra.css
+  - stylesheets/layout.css
+  - stylesheets/widths.css
+  - stylesheets/footnotes.css
+
+extra_javascript:
+  - javascripts/header-links.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - markdown_include.include:
+      base_path: docs
+  - pymdownx.extra
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - footnotes
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra:
+  generator: false
+  social:
+    - icon: material/web
+      link: https://proteus-framework.org/
+      name: PROTEUS website
+    - icon: material/email
+      link: mailto:proteus_dev@formingworlds.space
+      name: Mail PROTEUS developers
+    - icon: fontawesome/brands/github
+      link: https://github.com/FormingWorlds/fwl-io
+      name: fwl-io on GitHub
