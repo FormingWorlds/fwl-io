@@ -33,10 +33,10 @@ The distribution and the command are named `fwl-io`; the Python import is `fwl_i
 from fwl_io import create_fetcher, fetch_for
 
 eos = create_fetcher(
-    subdir='interior_lookup_tables/MgSiO3_demo',
+    subdir='interior/eos/mgsio3_demo',
     zenodo='10.5281/zenodo.1234567',
     dataverse='10.34894/ABCDEF',
-    registry='interior_lookup_tables.MgSiO3_demo.registry.txt',
+    registry='interior.eos.mgsio3_demo.registry.txt',
 )
 path = eos.fetch('density.dat')      # cached, verified, atomic
 paths = fetch_for('aragog')          # everything a model requires
