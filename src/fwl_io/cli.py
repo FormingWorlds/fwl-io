@@ -40,9 +40,9 @@ def _cmd_list(args: argparse.Namespace) -> int:
 def _cmd_fetch(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetch_for
 
-    fetched = fetch_for(args.module, data_root=args.data_root)
+    fetched = fetch_for(args.model, data_root=args.data_root)
     if not fetched:
-        print(f'no datasets declare required_by = {args.module!r}', file=sys.stderr)
+        print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
         return 1
     for key, paths in sorted(fetched.items()):
         print(f'{key}: {len(paths)} file(s)')
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list.set_defaults(func=_cmd_list)
 
     p_fetch = sub.add_parser('fetch', help='fetch every dataset a model requires')
-    p_fetch.add_argument('module', help='model name matched against required_by')
+    p_fetch.add_argument('model', help='model name matched against required_by')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_fetch.set_defaults(func=_cmd_fetch)
 

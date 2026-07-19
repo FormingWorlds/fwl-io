@@ -1,4 +1,4 @@
-"""Dataset manifests: declaration, discovery, and module-level fetching.
+"""Dataset manifests: declaration, discovery, and model-level fetching.
 
 Datasets are declared in TOML manifests. fwl-io ships one manifest for
 datasets shared by several models (spectral files, multi-consumer lookup
@@ -177,7 +177,7 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     return found
 
 
-def fetch_for(module: str, data_root: str | Path | None = None) -> dict[str, list[Path]]:
+def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list[Path]]:
     """Fetch every dataset a given model requires; return paths per dataset.
 
     All matching datasets are attempted; failures are collected and raised
@@ -186,19 +186,19 @@ def fetch_for(module: str, data_root: str | Path | None = None) -> dict[str, lis
 
     Parameters
     ----------
-    module : str
+    model : str
         Model name matched (case-insensitively) against ``required_by``.
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
     """
     from fwl_io.fetch import create_fetcher
 
-    module = module.lower()
+    model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
     for datasets in discover_manifests().values():
         for ds in datasets:
-            if module not in tuple(r.lower() for r in ds.required_by):
+            if model not in tuple(r.lower() for r in ds.required_by):
                 continue
             try:
                 fetcher = create_fetcher(
@@ -214,7 +214,7 @@ def fetch_for(module: str, data_root: str | Path | None = None) -> dict[str, lis
     if failures:
         detail = '\n'.join(f'  {key}: {msg}' for key, msg in sorted(failures.items()))
         raise RuntimeError(
-            f'{len(failures)} dataset(s) failed for module {module!r} '
+            f'{len(failures)} dataset(s) failed for model {model!r} '
             f'({len(fetched)} succeeded):\n{detail}'
         )
     return fetched

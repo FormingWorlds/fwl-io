@@ -183,3 +183,16 @@
 .md-header__title[data-md-component="header-title"]:hover {
   opacity: 0.7;
 }
+/* Primary buttons: the dark scheme reuses the primary color as the page
+   background, so the pill inverts to the light foreground tone there. */
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  background-color: var(--md-primary-bg-color);
+  border-color: var(--md-primary-bg-color);
+  color: var(--pt-void);
+}
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary:hover,
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary:focus {
+  background-color: var(--pt-ice);
+  border-color: var(--pt-ice);
+  color: var(--pt-void);
+}
