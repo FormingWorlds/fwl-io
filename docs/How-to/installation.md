@@ -6,12 +6,6 @@
 pip install fwl-io
 ```
 
-Until the first PyPI release lands, install from the repository instead:
-
-```bash
-pip install git+https://github.com/FormingWorlds/fwl-io.git
-```
-
 Requires Python 3.11 or newer. The runtime dependencies are [pooch](https://www.fatiando.org/pooch/) and [requests](https://requests.readthedocs.io/).
 
 ## Development install

@@ -6,12 +6,6 @@
 pip install fwl-io
 ```
 
-Until the first PyPI release lands, install from the repository instead:
-
-```bash
-pip install git+https://github.com/FormingWorlds/fwl-io.git
-```
-
 fwl-io requires Python 3.11 or newer. For development installs see [Installation](How-to/installation.md).
 
 ## Configure the data root
