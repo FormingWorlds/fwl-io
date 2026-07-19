@@ -44,6 +44,13 @@ develop = [
     "pytest-cov",
     "ruff",
 ]
+docs = [
+    "zensical",
+    "markdown-include",
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
 
 [project.scripts]
 fwl-io = "fwl_io.cli:main"
