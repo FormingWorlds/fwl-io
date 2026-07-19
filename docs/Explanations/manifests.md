@@ -5,9 +5,9 @@
 A manifest is a TOML file with one table per dataset. A table is recognized as a dataset by the presence of the `subdir` key; tables without `subdir` are grouping levels.
 
 ```toml
-[interior_lookup_tables.MgSiO3_Wolf_Bower_2018]
+[interior.eos.wolf_bower_2018]
 name = "Wolf & Bower (2018) MgSiO3 equation of state"    # optional display name
-subdir = "interior_lookup_tables/MgSiO3_Wolf_Bower_2018" # location below FWL_DATA
+subdir = "interior/eos/wolf_bower_2018"                  # location below FWL_DATA
 zenodo = "10.5281/zenodo.1234567"                        # required, version DOI
 dataverse = "10.34894/ABCDEF"                            # optional mirror DOI
 required_by = ["aragog", "zalmoxis", "spider"]           # models that need it
@@ -43,14 +43,44 @@ For every requested file:
 
 ## The FWL_DATA layout
 
-`subdir` values reuse the existing tree layout, so migrating a model never moves data. The top-level directories in use today:
+This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directories until their consumers migrate, so both forms coexist during the transition (the live Baraffe dataset still sits at its legacy path for exactly this reason).
 
-| Directory | Contents | Consumers |
-|---|---|---|
-| `spectral_files/<set>/<bands>/` | SOCRATES k-table spectral files (for example `Frostflow/48`) | AGNI, JANUS, PROTEUS |
-| `stellar_evolution_tracks/` | Stellar evolution track grids (`Baraffe/`, `Spada/`) | MORS |
-| `stellar_spectra/` | Stellar spectra (solar reference, named stars) | PROTEUS |
-| `interior_lookup_tables/` | Interior equation-of-state and phase-boundary tables | Aragog, SPIDER, PROTEUS |
-| `zalmoxis_eos/` | Structure-model equation-of-state tables | Zalmoxis, PROTEUS |
+The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both.
 
-The authoritative enumeration of current datasets and their locations is `DATA_SOURCE_MAP` in PROTEUS `src/proteus/utils/data.py` together with each model's download code; as models migrate, their manifests become the authoritative source for their own entries.
+Naming rules for dataset directories: all lowercase snake_case; for datasets identified by a publication, author tag first and year second, then any descriptor (`baraffe_2015`, `zeng_2019`, `dk09_1tpa_elec_free`); datasets without a citation use their plain source or product name (`solar`, `phoenix`, `muscles`).
+
+Below its dataset directory, every dataset resolves into a version directory `r<zenodo-record-id>` derived from its manifest pin, so updated deposits land beside superseded ones instead of overwriting them. Version resolution is not yet implemented; it is tracked in [#12](https://github.com/FormingWorlds/fwl-io/issues/12) and is a prerequisite for the first model migration.
+
+```
+FWL_DATA/
+  atmos_clim/
+    spectral_files/<set>/<bands>/r<recid>/
+    surface_albedos/hammond_2024/r<recid>/
+  atmos_chem/                        # chemistry networks and cross-sections
+  interior/
+    eos/<dataset>/r<recid>/
+    melting_curves/<dataset>/r<recid>/
+  star/
+    tracks/<dataset>/r<recid>/
+    spectra/<dataset>/r<recid>/
+  observe/
+    exoplanet_reference/r<recid>/
+    mass_radius/zeng_2019/r<recid>/
+  outgas/  escape/  orbit/           # created when their first dataset lands
+```
+
+The tree holds **immutable fetched reference data only**: anything generated at runtime (derived tables, interpolation caches, solver caches) belongs in run output or cache directories, never below `FWL_DATA`. This keeps a shared read-only cache trustworthy as a whole.
+
+Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates (a relocate command for cleaning local trees immediately is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13)). The mapping from the legacy locations:
+
+| Legacy location (live today) | Target location |
+|---|---|
+| `spectral_files/<Set>/<bands>` | `atmos_clim/spectral_files/<set>/<bands>/r<recid>` |
+| `surface_albedos/Hammond24` | `atmos_clim/surface_albedos/hammond_2024/r<recid>` |
+| `interior_lookup_tables/1TPa-dK09-elec-free` | `interior/eos/dk09_1tpa_elec_free/r<recid>` |
+| `interior_lookup_tables/Melting_curves` | `interior/melting_curves/<dataset>/r<recid>` |
+| `zalmoxis_eos/EOS_PALEOS_*` | `interior/eos/paleos_*/r<recid>` |
+| `stellar_evolution_tracks/{Spada,Baraffe}` | `star/tracks/{spada_2013,baraffe_2015}/r<recid>` |
+| `stellar_spectra/{solar,PHOENIX,MUSCLES,Named}` | `star/spectra/{solar,phoenix,muscles,named}/r<recid>` |
+| `mass_radius/Zeng2019` | `observe/mass_radius/zeng_2019/r<recid>` |
+| `planet_reference/Exoplanets` | `observe/exoplanet_reference/r<recid>` |

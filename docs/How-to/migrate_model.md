@@ -16,12 +16,12 @@ The model depends on fwl-io, never on PROTEUS. `zenodo-get` and `osfclient` can 
 
 ## 2. Write the model's manifest
 
-Add a manifest file inside the package, for example `src/mors/data/manifest.toml`, declaring every dataset the model downloads today, with the same `subdir` locations the model already uses below `FWL_DATA` (the layout does not change):
+Add a manifest file inside the package, for example `src/mors/data/manifest.toml`, declaring every dataset the model downloads today. Migration is the moment a model's data paths change: declare each dataset at its place in the [FWL_DATA target layout](../Explanations/manifests.md#the-fwl_data-layout), not at the legacy location the model used before:
 
 ```toml
-[stellar_evolution_tracks.Spada]
-name = "Spada et al. stellar evolution tracks"
-subdir = "stellar_evolution_tracks/Spada"
+[star.tracks.spada_2013]
+name = "Spada et al. (2013) stellar evolution tracks"
+subdir = "star/tracks/spada_2013"
 zenodo = "10.5281/zenodo.1234567"
 required_by = ["mors"]
 ```
@@ -79,9 +79,9 @@ import importlib.resources
 from fwl_io import create_fetcher
 
 tracks = create_fetcher(
-    subdir='stellar_evolution_tracks/Spada',
+    subdir='star/tracks/spada_2013',
     zenodo='10.5281/zenodo.1234567',
-    registry=importlib.resources.files('mors.data') / 'stellar_evolution_tracks.Spada.registry.txt',
+    registry=importlib.resources.files('mors.data') / 'star.tracks.spada_2013.registry.txt',
 )
 tracks.fetch('track_0100.dat')
 ```

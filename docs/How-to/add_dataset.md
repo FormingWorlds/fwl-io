@@ -20,14 +20,14 @@ Choose the manifest:
 Add a table for the dataset:
 
 ```toml
-[interior_lookup_tables.MgSiO3_Wolf_Bower_2018]
+[interior.eos.wolf_bower_2018]
 name = "Wolf & Bower (2018) MgSiO3 equation of state"
-subdir = "interior_lookup_tables/MgSiO3_Wolf_Bower_2018"
+subdir = "interior/eos/wolf_bower_2018"
 zenodo = "10.5281/zenodo.1234567"
 required_by = ["aragog", "zalmoxis", "spider"]
 ```
 
-`subdir` is the location below `FWL_DATA`, matching the existing tree layout. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
+`subdir` is the location below `FWL_DATA`, following the [target layout](../Explanations/manifests.md#the-fwl_data-layout); new datasets always use it. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
 
 ## 3. Generate the registry
 
