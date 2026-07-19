@@ -6,6 +6,8 @@
 pip install fwl-io
 ```
 
+The distribution and the command are named `fwl-io`; the Python import is `fwl_io`, since Python does not allow hyphens in module names.
+
 Requires Python 3.11 or newer. The runtime dependencies are [pooch](https://www.fatiando.org/pooch/) and [requests](https://requests.readthedocs.io/).
 
 ## Development install
