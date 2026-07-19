@@ -1,0 +1,21 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'  # weekly, Monday 03:17 UTC
+  workflow_dispatch:
+
+jobs:
+  live-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package
+        run: pip install -e ".[develop]"
+      - name: Run slow tier (live Zenodo checks)
+        run: pytest -m slow

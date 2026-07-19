@@ -1,6 +1,12 @@
 # fwl-io
 
+[![CI](https://github.com/FormingWorlds/fwl-io/actions/workflows/ci.yml/badge.svg)](https://github.com/FormingWorlds/fwl-io/actions/workflows/ci.yml)
+[![Documentation](https://github.com/FormingWorlds/fwl-io/actions/workflows/docs.yaml/badge.svg)](https://proteus-framework.org/fwl-io/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
+
 Shared data-download utilities for the [PROTEUS](https://github.com/FormingWorlds/PROTEUS) ecosystem: manifest-driven, mirrored, offline-first fetching of the reference data used by the FormingWorlds models.
+
+**Status**: version 0, released for inspection and feedback by the collaboration. The API is not yet frozen; suggestions are welcome as [issues](https://github.com/FormingWorlds/fwl-io/issues). Documentation: [proteus-framework.org/fwl-io](https://proteus-framework.org/fwl-io/).
 
 ## What it does
 
