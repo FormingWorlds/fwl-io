@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fwl-io"
+dynamic = ["version"]
+description = "Shared data-download utilities for the PROTEUS ecosystem: manifest-driven, mirrored, offline-first fetching of reference data"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Tim Lichtenberg", email = "tim.lichtenberg@rug.nl"},
+]
+keywords = [
+    "Astronomy",
+    "Exoplanets",
+    "Model-coupling",
+    "Data-management",
+]
+license = {text = "Apache 2.0 License"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "pooch>=1.8",
+    "requests>=2.31",
+    "platformdirs>=3.0",
+]
+
+[project.urls]
+Repository = "https://github.com/FormingWorlds/fwl-io"
+Issues = "https://github.com/FormingWorlds/fwl-io/issues"
+
+[project.optional-dependencies]
+develop = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+fwl-io = "fwl_io.cli:main"
+
+[project.entry-points."fwl_io.manifests"]
+fwl-io-shared = "fwl_io.manifest:shared_manifest_path"
+
+[tool.setuptools_scm]
+
+[tool.setuptools.package-data]
+fwl_io = ["data/*.toml", "data/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "unit: fast, isolated tests of a single function or class (no network, no subprocess)",
+    "smoke: quick checks that the package wiring works together (no network)",
+    "integration: multi-component tests; may use a local test server (no external network)",
+    "slow: long-running tests, excluded from PR CI",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "single"
