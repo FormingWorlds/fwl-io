@@ -42,8 +42,13 @@ def _extract_files(record: dict) -> dict[str, str]:
     return {}
 
 
-def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str]:
-    """Return the name-to-checksum mapping of a pinned Zenodo record."""
+def fetch_zenodo_record(doi: str, api_base: str = ZENODO_API) -> dict:
+    """Return the full Zenodo API record for a pinned version DOI.
+
+    A concept DOI is rejected: the API resolves it to the newest deposit (the
+    returned record id differs from the requested one, or equals the concept
+    record id), which would let the data change underneath pinned code.
+    """
     recid = zenodo_record_id(doi)
     response = requests.get(f'{api_base}/{recid}', timeout=30)
     response.raise_for_status()
@@ -55,10 +60,15 @@ def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str
             f'{doi} is a concept DOI (the API resolves it to the newest deposit, '
             f'record {returned_id}); pin the version DOI of a specific deposit instead'
         )
+    return record
 
+
+def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str]:
+    """Return the name-to-checksum mapping of a pinned Zenodo record."""
+    record = fetch_zenodo_record(doi, api_base=api_base)
     entries = _extract_files(record)
     if not entries:
-        raise ValueError(f'Zenodo record {recid} lists no files')
+        raise ValueError(f'Zenodo record {zenodo_record_id(doi)} lists no files')
     return entries
 
 

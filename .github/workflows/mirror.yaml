@@ -1,0 +1,55 @@
+name: Mirror a Zenodo deposit to Dataverse
+
+# Manually triggered: a maintainer runs this to mirror one pinned Zenodo
+# deposit into the Proteus Framework collection on DataverseNL. The Dataverse
+# API token is a protected environment secret, so it lives only in CI and is
+# never distributed; access is controlled by who may run this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      zenodo_doi:
+        description: "Zenodo version DOI to mirror (10.5281/zenodo.<record-id>)"
+        required: true
+      collection:
+        description: "Dataverse collection alias"
+        required: true
+        default: "Proteus_Fr"
+      dry_run:
+        description: "Download and map metadata only; make no Dataverse changes"
+        type: boolean
+        default: false
+      publish:
+        description: "Publish the created dataset (uncheck to leave it a draft)"
+        type: boolean
+        default: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment: dataverse
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Mirror the deposit
+        env:
+          DATAVERSE_TOKEN: ${{ secrets.DATAVERSE_TOKEN }}
+          DATAVERSE_CONTACT_EMAIL: ${{ secrets.DATAVERSE_CONTACT_EMAIL }}
+          # Bind the user inputs to environment variables rather than
+          # interpolating them into the shell script, so a crafted DOI or
+          # collection name cannot inject commands into a job that holds the token.
+          ZENODO_DOI: ${{ inputs.zenodo_doi }}
+          COLLECTION: ${{ inputs.collection }}
+        run: |
+          fwl-io mirror "${ZENODO_DOI}" \
+            --collection "${COLLECTION}" \
+            --contact-email "${DATAVERSE_CONTACT_EMAIL}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.publish && '' || '--no-publish' }}
