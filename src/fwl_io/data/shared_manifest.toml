@@ -16,15 +16,7 @@
 # model's own manifest and expose it through the "fwl_io.manifests"
 # entry-point group. This file is only for data consumed by several models
 # (spectral files, multi-consumer lookup tables).
-
-# The Baraffe tracks are consumed by MORS only; they are hosted here as the
-# first live dataset until MORS ships its own manifest with its migration,
-# which will move this table into the MORS package. This covers the Baraffe
-# half of the MORS stellar tracks; the Spada grid (Zenodo record 15729101, a
-# single 60 MB tarball that MORS extracts after download) is deferred until
-# archive extraction lands (fwl-io issue #2).
-[stellar_evolution_tracks.Baraffe]
-name = "Baraffe et al. (2015) stellar evolution tracks (BHAC15)"
-subdir = "stellar_evolution_tracks/Baraffe"
-zenodo = "10.5281/zenodo.15729114"
-required_by = ["mors"]
+#
+# No dataset is shared across several models yet, so this manifest declares
+# none. The Baraffe stellar tracks now ship with the MORS package, which owns
+# their manifest and registry.

@@ -102,16 +102,21 @@ def test_missing_registry_gives_actionable_error(tmp_path):
 
 
 @pytest.mark.smoke
-def test_shared_manifest_ships_and_parses():
+def test_shared_manifest_ships_and_parses_empty():
+    """The shared manifest ships with the package and parses cleanly.
+
+    It declares no datasets yet: nothing is consumed by several models, and the
+    Baraffe tracks now ship with the MORS package. A comment-only manifest is a
+    valid one, and parsing it must yield an empty dataset list rather than
+    raising.
+    """
     path = shared_manifest_path()
     assert path.is_file()
-    datasets = {ds.key: ds for ds in load_manifest(path)}
-    baraffe = datasets['stellar_evolution_tracks.Baraffe']
-    assert baraffe.subdir == 'stellar_evolution_tracks/Baraffe'
-    assert baraffe.required_by == ('mors',)
-    registry = baraffe.registry()  # the committed registry ships with the package
-    assert len(registry) == 31
-    assert registry['BHAC15-M0p010.txt'] == 'md5:7b2927f8cb983680692280344eee1d9a'
+    # The file still carries content (the machinery header), so an empty parse
+    # is a deliberate no-datasets result, not a truncated or missing file.
+    assert path.read_text().strip()
+    datasets = load_manifest(path)
+    assert datasets == []
 
 
 class _FakeEntryPoint:

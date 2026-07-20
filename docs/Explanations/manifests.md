@@ -43,7 +43,7 @@ For every requested file:
 
 ## The FWL_DATA layout
 
-This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. The live Baraffe dataset keeps its legacy subdir name `stellar_evolution_tracks/Baraffe` until MORS migrates, but its files now resolve one level deeper, into the `r<record-id>` version directory below that subdir. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; a command that relocates such trees in place is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13).
+This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; a command that relocates such trees in place is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13).
 
 The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both.
 
