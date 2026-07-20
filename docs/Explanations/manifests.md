@@ -43,13 +43,13 @@ For every requested file:
 
 ## The FWL_DATA layout
 
-This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directories until their consumers migrate, so both forms coexist during the transition (the live Baraffe dataset still sits at its legacy path for exactly this reason).
+This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. The live Baraffe dataset keeps its legacy subdir name `stellar_evolution_tracks/Baraffe` until MORS migrates, but its files now resolve one level deeper, into the `r<record-id>` version directory below that subdir. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; a command that relocates such trees in place is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13).
 
 The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both.
 
 Naming rules for dataset directories: all lowercase snake_case; for datasets identified by a publication, author tag first and year second, then any descriptor (`baraffe_2015`, `zeng_2019`, `dk09_1tpa_elec_free`); datasets without a citation use their plain source or product name (`solar`, `phoenix`, `muscles`).
 
-Below its dataset directory, every dataset resolves into a version directory `r<zenodo-record-id>` derived from its manifest pin, so updated deposits land beside superseded ones instead of overwriting them. Version resolution is not yet implemented; it is tracked in [#12](https://github.com/FormingWorlds/fwl-io/issues/12) and is a prerequisite for the first model migration.
+Below its dataset directory, every dataset resolves into a version directory `r<zenodo-record-id>` derived from its manifest pin, so updated deposits land beside superseded ones instead of overwriting them. Fetching a dataset as a whole (the model-facing `fetch_for`) writes a `.fwl-io.json` stamp into its version directory, recording the schema version, the pinned DOI, the file checksums, and the fetch date, so a completed dataset directory or a shared read-only cache is self-describing.
 
 ```
 FWL_DATA/

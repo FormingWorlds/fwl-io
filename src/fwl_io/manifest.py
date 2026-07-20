@@ -36,11 +36,22 @@ from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from pathlib import Path
 
+from fwl_io.doi import ZENODO_DOI_PATTERN, zenodo_record_id
 from fwl_io.registry import load_registry
 
 log = logging.getLogger(__name__)
 
-ZENODO_DOI_PATTERN = re.compile(r'^(doi:)?10\.5281/zenodo\.(\d+)$')
+# Re-exported so existing importers keep working; the parser lives in doi.
+__all__ = [
+    'Dataset',
+    'ZENODO_DOI_PATTERN',
+    'discover_manifests',
+    'fetch_for',
+    'load_manifest',
+    'shared_manifest_path',
+    'zenodo_record_id',
+]
+
 _GENERIC_DOI_PATTERN = re.compile(r'^(doi:)?10\.\S+$')
 
 

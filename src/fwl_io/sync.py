@@ -21,18 +21,14 @@ from pathlib import Path
 
 import requests
 
-from fwl_io.manifest import ZENODO_DOI_PATTERN, Dataset, load_manifest
+from fwl_io.doi import zenodo_record_id
+from fwl_io.manifest import Dataset, load_manifest
 from fwl_io.registry import write_registry
 
+# Re-exported for backwards compatibility; the parser now lives in manifest.
+__all__ = ['fetch_zenodo_registry', 'sync_dataset', 'sync_manifest', 'zenodo_record_id']
+
 ZENODO_API = 'https://zenodo.org/api/records'
-
-
-def zenodo_record_id(doi: str) -> str:
-    """Extract the numeric record id from a Zenodo DOI."""
-    match = ZENODO_DOI_PATTERN.match(doi.strip())
-    if not match:
-        raise ValueError(f'{doi!r} is not a Zenodo DOI of the form 10.5281/zenodo.<id>')
-    return match.group(2)
 
 
 def _extract_files(record: dict) -> dict[str, str]:

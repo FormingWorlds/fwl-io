@@ -1,6 +1,15 @@
+import json
+
+import pooch
 import pytest
 
-from fwl_io.manifest import discover_manifests, load_manifest, shared_manifest_path
+from fwl_io.manifest import (
+    Dataset,
+    discover_manifests,
+    fetch_for,
+    load_manifest,
+    shared_manifest_path,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -129,3 +138,48 @@ def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
     found = discover_manifests()
     assert set(found) == {'good-model'}
     assert len(found['good-model']) == 2
+
+
+def _seed_versioned_dataset(root, subdir, recid, files, required_by):
+    """Place files under root/subdir/r<recid>/ and return a matching Dataset."""
+    version_dir = root / subdir / f'r{recid}'
+    version_dir.mkdir(parents=True)
+    registry = {}
+    for name, payload in files.items():
+        (version_dir / name).write_bytes(payload)
+        registry[name] = 'sha256:' + pooch.file_hash(str(version_dir / name), alg='sha256')
+    registry_path = root / f'{subdir.replace("/", ".")}.registry.txt'
+    registry_path.write_text('\n'.join(f'{n} {h}' for n, h in registry.items()) + '\n')
+    return version_dir, Dataset(
+        key=subdir.replace('/', '.'),
+        name=subdir,
+        subdir=subdir,
+        zenodo=f'10.5281/zenodo.{recid}',
+        required_by=required_by,
+        registry_path=registry_path,
+    )
+
+
+def test_fetch_for_stamps_each_required_dataset_and_skips_others(tmp_path, monkeypatch):
+    """fetch_for fetches and stamps only the datasets a model requires."""
+    data_root = tmp_path / 'data'
+    wanted_dir, wanted = _seed_versioned_dataset(
+        data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n', 'b.dat': b'BB\n'}, ('mymodel',)
+    )
+    _, other = _seed_versioned_dataset(
+        data_root, 'interior/eos/demo', '222', {'c.dat': b'C\n'}, ('someone_else',)
+    )
+
+    monkeypatch.setattr('fwl_io.manifest.discover_manifests', lambda: {'prov': [wanted, other]})
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # all files pre-seeded; no network
+
+    fetched = fetch_for('mymodel', data_root=data_root)
+
+    # Only the required dataset is returned, at its versioned paths.
+    assert set(fetched) == {wanted.key}
+    assert sorted(p.name for p in fetched[wanted.key]) == ['a.dat', 'b.dat']
+    # The production path writes the stamp for the required dataset only.
+    stamp = wanted_dir / '.fwl-io.json'
+    assert stamp.is_file()
+    assert json.loads(stamp.read_text())['record_id'] == '111'
+    assert not (data_root / 'interior/eos/demo/r222/.fwl-io.json').exists()
