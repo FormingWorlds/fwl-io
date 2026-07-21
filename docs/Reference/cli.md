@@ -34,7 +34,7 @@ DATAVERSE_TOKEN=... fwl-io mirror <zenodo-doi> --collection <alias> \
     [--no-publish] [--dry-run]
 ```
 
-Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
+Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. A contact email (`--contact-email`) is required to create a dataset, and `--subject` must be one of Dataverse's citation subjects; only `--dry-run` is exempt from both. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
 
 ## fwl-io --version
 

@@ -105,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_mirror.add_argument('--contact-name', default='PROTEUS Framework', help='dataset contact')
     p_mirror.add_argument(
-        '--contact-email', default='', help='dataset contact email (required to publish)'
+        '--contact-email',
+        default='',
+        help='dataset contact email (required to create; only --dry-run is exempt)',
     )
     p_mirror.add_argument(
         '--subject', default='Astronomy and Astrophysics', help='Dataverse subject'
