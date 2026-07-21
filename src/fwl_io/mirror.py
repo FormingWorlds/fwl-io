@@ -100,8 +100,8 @@ def zenodo_record_to_citation(
 
     The title, authors, and description are taken from the Zenodo record so
     the mirror is a faithful copy; the description records the source DOI so a
-    reader can trace the mirror back to its primary. ``subject`` must be one of
-    Dataverse's controlled-vocabulary values.
+    reader can trace the mirror back to its primary. ``subject`` is a Dataverse
+    citation subject; the target server validates it at create time, not here.
     """
     metadata = record.get('metadata', {})
     doi = record.get('doi') or metadata.get('doi', '')
@@ -283,6 +283,9 @@ def mirror_to_dataverse(
     DataverseError
         If a Dataverse native-API request fails, including a server-side
         rejection of the citation metadata (for example an unknown subject).
+    DownloadError
+        If a Zenodo file fails its checksum or cannot be downloaded; raised by
+        the fetcher (``fwl_io.fetch``) before any Dataverse write.
     """
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
@@ -291,8 +294,9 @@ def mirror_to_dataverse(
     # the server stays authoritative across installations and vocabulary changes.
     if not dry_run and not contact_email:
         raise ValueError(
-            'a contact email is required to create a Dataverse dataset; '
-            'provide one (--contact-email) or preview without writing (--dry-run / dry_run=True)'
+            'a contact email is required to create a Dataverse dataset; provide one '
+            '(--contact-email / contact_email=...) or preview without writing '
+            '(--dry-run / dry_run=True)'
         )
 
     recid = zenodo_record_id(zenodo_doi)

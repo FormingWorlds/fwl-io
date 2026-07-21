@@ -55,6 +55,7 @@ def _serve_zenodo_record(root, recid, files):
 
 class _DataverseHandler(BaseHTTPRequestHandler):
     calls: list[dict] = []
+    fail_on_create: bool = False  # set by a test to force a create-time server rejection
     fail_on_add: bool = False  # set by a test to force an upload failure
     fail_on_delete: bool = False  # set by a test to force a rollback failure
     omit_persistent_id: bool = False  # set by a test to drop the create response id
@@ -87,6 +88,14 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 -- BaseHTTPRequestHandler API
         parsed = self._record('POST')
         if parsed.path.endswith('/datasets'):
+            if self.fail_on_create:
+                # Mimic a real Dataverse citation-validation rejection (e.g. an
+                # unknown subject), which the live server returns as a 400.
+                self._reply(
+                    400,
+                    {'status': 'ERROR', 'message': "Value 'X' does not exist in type 'subject'"},
+                )
+                return
             data = {} if self.omit_persistent_id else {'persistentId': 'doi:10.34894/DEMO01'}
             self._reply(200, {'status': 'OK', 'data': data})
         elif parsed.path.endswith('/add'):
@@ -112,6 +121,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
 def dataverse_server():
     """Run a mock Dataverse native-API server; yield (base_url, calls)."""
     _DataverseHandler.calls = []
+    _DataverseHandler.fail_on_create = False
     _DataverseHandler.fail_on_add = False
     _DataverseHandler.fail_on_delete = False
     _DataverseHandler.omit_persistent_id = False
@@ -263,6 +273,27 @@ def test_subject_is_carried_into_the_create_body(http_server, dataverse_server):
     assert fields['subject']['value'] == ['Physics']
     assert fields['subject']['value'] != ['Astronomy and Astrophysics']
     assert fields['subject']['typeClass'] == 'controlledVocabulary'
+
+
+def test_create_rejection_aborts_without_upload_or_rollback(http_server, dataverse_server):
+    """A server-rejected create (e.g. an unknown subject) raises and mints nothing.
+
+    The subject is validated server-side, so a bad value fails at create. Because
+    the create fails before a persistentId exists, there is nothing to upload,
+    publish, or roll back: the only Dataverse call is the create, with no /add,
+    no publish, and no DELETE. This pins the documented DataverseError path that
+    the mock cannot otherwise reach (it accepts any create body by default).
+    """
+    from fwl_io.mirror import DataverseError
+
+    _DataverseHandler.fail_on_create = True
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server, subject='Planetary Science')
+    _, calls = dataverse_server
+    paths = [c['path'] for c in calls]
+    # Only the create was attempted; no orphan draft, so nothing to clean up.
+    assert paths == ['/api/dataverses/Proteus_Fr/datasets']
+    assert not any(c['method'] == 'DELETE' for c in calls)
 
 
 @pytest.mark.unit
@@ -663,6 +694,27 @@ def test_cli_mirror_forwards_subject_and_contact_email(monkeypatch):
     assert captured['subject'] == 'Physics'
     assert captured['subject'] != 'Astronomy and Astrophysics'  # not the argparse default
     assert captured['contact_email'] == 'curator@example.org'
+
+
+@pytest.mark.unit
+def test_cli_mirror_refuses_a_real_run_without_contact_email(monkeypatch, capsys):
+    """A real run (token set, not --dry-run) with no --contact-email is refused at the CLI.
+
+    The email guard fires before any network call, so this is hermetic. The
+    surfaced message must name the CLI flag the user actually has, so the check
+    is on ``--contact-email`` appearing in stderr, which also pins the wording.
+    """
+    from fwl_io.cli import main
+
+    monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
+    rc = main(['mirror', '10.5281/zenodo.55', '--collection', 'Proteus_Fr'])
+    assert rc == 1
+    err = capsys.readouterr().err
+    # Actionable for a CLI user: the flag is named, not only the API keyword.
+    assert '--contact-email' in err
+    # Discrimination: this is the contact-email guard, not the token guard.
+    assert 'contact email' in err.lower()
+    assert 'DATAVERSE_TOKEN' not in err
 
 
 @pytest.mark.unit
