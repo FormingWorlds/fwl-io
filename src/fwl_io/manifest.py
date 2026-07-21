@@ -14,6 +14,11 @@ Manifest schema, one table per dataset, identified by its ``subdir`` key::
     zenodo = "10.5281/zenodo.1234567"       # version DOI, never a concept DOI
     dataverse = "10.34894/ABCDEF"           # optional download mirror
     required_by = ["aragog", "zalmoxis", "spider"]
+    extract = "tar"                         # optional: unpack a single-archive deposit
+
+A deposit packaged as one archive declares ``extract = "tar"`` or ``"zip"``; its
+registry lists the archive, and the fetcher downloads and checksum-verifies it,
+then extracts the members into the dataset directory (the archive is not kept).
 
 Every dataset requires a Zenodo version DOI: the committed registry is
 generated from the Zenodo record, so Dataverse is a download mirror, not an
@@ -36,6 +41,7 @@ from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from pathlib import Path
 
+from fwl_io.archive import ARCHIVE_KINDS
 from fwl_io.doi import ZENODO_DOI_PATTERN, zenodo_record_id
 from fwl_io.registry import load_registry
 
@@ -66,6 +72,7 @@ class Dataset:
     dataverse: str | None = None
     required_by: tuple[str, ...] = field(default_factory=tuple)
     registry_path: Path | None = None
+    extract: str | None = None
 
     def registry(self) -> dict[str, str]:
         """Return the committed name-to-hash registry for this dataset."""
@@ -143,6 +150,11 @@ def load_manifest(path: str | Path) -> list[Dataset]:
             )
         if dataverse and not _GENERIC_DOI_PATTERN.match(dataverse):
             raise ValueError(f'dataset {key!r}: dataverse value {dataverse!r} is not a DOI')
+        extract = table.get('extract')
+        if extract is not None and extract not in ARCHIVE_KINDS:
+            raise ValueError(
+                f'dataset {key!r}: extract value {extract!r} must be one of {ARCHIVE_KINDS}'
+            )
         datasets.append(
             Dataset(
                 key=key,
@@ -152,6 +164,7 @@ def load_manifest(path: str | Path) -> list[Dataset]:
                 dataverse=dataverse,
                 required_by=tuple(table.get('required_by', ())),
                 registry_path=path.parent / f'{key}.registry.txt',
+                extract=extract,
             )
         )
     return datasets
@@ -218,6 +231,7 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
                     dataverse=ds.dataverse,
                     registry=ds.registry(),
                     data_root=data_root,
+                    extract=ds.extract,
                 )
                 fetched[ds.key] = fetcher.fetch_all()
             except Exception as exc:  # noqa: BLE001 -- aggregate and re-raise below
