@@ -143,13 +143,19 @@ class DataverseClient:
         return {'X-Dataverse-key': self.token}
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
-        response = requests.request(
-            method,
-            f'{self.base_url}{path}',
-            headers=self._headers,
-            timeout=self.timeout,
-            **kwargs,
-        )
+        try:
+            response = requests.request(
+                method,
+                f'{self.base_url}{path}',
+                headers=self._headers,
+                timeout=self.timeout,
+                **kwargs,
+            )
+        except requests.RequestException as exc:
+            # A transport failure (connection error, timeout, DNS) talking to
+            # Dataverse is a failed native-API request too; surface it as a
+            # DataverseError so callers have one Dataverse error type to catch.
+            raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
         if not response.ok:
             raise DataverseError(
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}'
@@ -282,8 +288,11 @@ def mirror_to_dataverse(
         Zenodo record lists no files, or if a file name nests below the dataset
         directory (Dataverse flattens on the basename, so it would collide).
     DataverseError
-        If a Dataverse native-API request fails, including a server-side
-        rejection of the citation metadata (for example an unknown subject).
+        If a Dataverse native-API request fails, whether the server rejects it
+        (for example an unknown subject in the citation metadata) or the HTTP
+        transport itself fails (connection error or timeout). A transport failure
+        during upload or publish can leave a draft that the rollback then tries
+        to delete.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
@@ -291,6 +300,7 @@ def mirror_to_dataverse(
         If the Zenodo record itself cannot be fetched, for example an HTTP 404
         for a valid-format but nonexistent version DOI, or a network failure;
         propagated from ``fetch_zenodo_record`` before any Dataverse write.
+        (Transport failures on the Dataverse side are wrapped as DataverseError.)
     """
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.

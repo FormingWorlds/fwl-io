@@ -325,6 +325,32 @@ def test_dataverse_error_on_failed_request():
 
 
 @pytest.mark.unit
+def test_transport_failure_becomes_a_dataverse_error():
+    """A network failure talking to Dataverse is wrapped as DataverseError, not leaked raw.
+
+    So a caller has a single Dataverse error type to catch: a ConnectionError
+    from the underlying request must surface as DataverseError, and the original
+    cause must be chained for debugging.
+    """
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+
+    def boom(*args, **kwargs):
+        raise requests.ConnectionError('name resolution failed')
+
+    requests.request = boom
+    try:
+        with pytest.raises(DataverseError, match='failed') as exc_info:
+            client.create_dataset('coll', {'datasetVersion': {}})
+        # The transport error is chained, not swallowed, so the cause survives.
+        assert isinstance(exc_info.value.__cause__, requests.ConnectionError)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
 def test_citation_maps_zenodo_metadata_faithfully():
     """The citation block carries the Zenodo title, authors, and source note."""
     record = {
