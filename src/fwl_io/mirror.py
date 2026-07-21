@@ -42,30 +42,6 @@ log = logging.getLogger(__name__)
 # against the target installation before relying on it for tabular content.
 _NO_INGEST_PARAM = 'noVarDetect'
 
-# Dataverse's citation ``subject`` is a controlled vocabulary; a value outside it
-# is rejected by the server at create time, the same way a missing type attribute
-# is. Validating up front turns that into a fast local error instead of a failure
-# after the deposit (and its DOI) is minted. Sourced from the citation metadata
-# block at dataverse.nl (/api/metadatablocks/citation).
-_SUBJECT_VOCABULARY = frozenset(
-    {
-        'Agricultural Sciences',
-        'Arts and Humanities',
-        'Astronomy and Astrophysics',
-        'Business and Management',
-        'Chemistry',
-        'Computer and Information Science',
-        'Earth and Environmental Sciences',
-        'Engineering',
-        'Law',
-        'Mathematical Sciences',
-        'Medicine, Health and Life Sciences',
-        'Physics',
-        'Social Sciences',
-        'Other',
-    }
-)
-
 
 class DataverseError(RuntimeError):
     """A Dataverse native-API request failed."""
@@ -274,9 +250,13 @@ def mirror_to_dataverse(
     token : str
         Dataverse API token.
     contact_name, contact_email : str
-        Dataset contact recorded in the Dataverse citation metadata.
+        Dataset contact recorded in the Dataverse citation metadata. A contact
+        email is required for any real create (draft or published); only a dry
+        run is exempt.
     subject : str
-        A Dataverse controlled-vocabulary subject.
+        A Dataverse citation subject. The value is validated by the server when
+        the dataset is created; a value outside the target installation's
+        controlled vocabulary is rejected there, not locally.
     publish : bool
         Publish the created dataset so its files are downloadable.
     dry_run : bool
@@ -293,24 +273,26 @@ def mirror_to_dataverse(
     -------
     str | None
         The Dataverse persistent id (DOI) of the mirror, or None on a dry run.
+
+    Raises
+    ------
+    ValueError
+        If a real create is requested without a contact email, if the Zenodo
+        record lists no files, or if a file name nests below the dataset
+        directory (Dataverse flattens on the basename, so it would collide).
+    DataverseError
+        If a Dataverse native-API request fails, including a server-side
+        rejection of the citation metadata (for example an unknown subject).
     """
-    # Publishing is public and permanent; a published dataset with no contact is
-    # not something to ship, so require a contact email up front rather than fail
-    # after a draft (and its DOI) has already been minted. A dry run never
-    # publishes, so it is exempt.
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
+    # The subject is validated by the server when the dataset is created: an
+    # unknown value fails the create there rather than being checked locally, so
+    # the server stays authoritative across installations and vocabulary changes.
     if not dry_run and not contact_email:
         raise ValueError(
             'a contact email is required to create a Dataverse dataset; '
-            'pass one or use dry_run=True'
-        )
-    # Reject a subject outside the controlled vocabulary before any download or
-    # deposit, so a typo fails fast rather than as a server error mid-run.
-    if subject not in _SUBJECT_VOCABULARY:
-        raise ValueError(
-            f'subject {subject!r} is not a Dataverse citation subject; '
-            f'choose one of {sorted(_SUBJECT_VOCABULARY)}'
+            'provide one (--contact-email) or preview without writing (--dry-run / dry_run=True)'
         )
 
     recid = zenodo_record_id(zenodo_doi)

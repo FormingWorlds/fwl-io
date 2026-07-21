@@ -243,37 +243,26 @@ def test_empty_record_rejected(http_server, dataverse_server):
     assert calls == []
 
 
-def test_subject_outside_vocabulary_is_rejected(http_server, dataverse_server):
-    """A subject outside the controlled vocabulary fails before any download or deposit."""
-    base_url, root = http_server
-    dv_url, calls = dataverse_server
-    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n'})
-    with pytest.raises(ValueError, match='not a Dataverse citation subject'):
-        mirror_to_dataverse(
-            '10.5281/zenodo.55',
-            dataverse_url=dv_url,
-            collection='Proteus_Fr',
-            token='t',
-            contact_name='x',
-            contact_email='y@z',
-            subject='Planetary Science',  # plausible but not in the citation vocabulary
-            api_base=f'{base_url}api/records',
-            base_urls=[base_url],
-        )
-    # Discrimination: rejected up front, so no deposit is created and the failure
-    # is a local error, not a mid-run server rejection after files upload.
-    assert calls == []
-    # A vocabulary value, by contrast, reaches the create call and is sent as-is.
-    result, calls2 = _mirror(http_server, dataverse_server, subject='Physics')
+def test_subject_is_carried_into_the_create_body(http_server, dataverse_server):
+    """The requested subject reaches the create call verbatim; the server vets it there.
+
+    The mirror does not second-guess the subject locally (the target installation
+    is authoritative), so the value must flow through unchanged. A non-default
+    value is used so the assertion discriminates against the argparse default.
+    """
+    result, calls = _mirror(http_server, dataverse_server, subject='Physics')
     assert result == 'doi:10.34894/DEMO01'
-    create = next(c for c in calls2 if c['path'].endswith('/datasets'))
-    subjects = {
-        f['typeName']: f['value']
+    create = next(c for c in calls if c['path'].endswith('/datasets'))
+    fields = {
+        f['typeName']: f
         for f in json.loads(create['body'])['datasetVersion']['metadataBlocks']['citation'][
             'fields'
         ]
     }
-    assert subjects['subject'] == ['Physics']
+    # The exact value is sent, as a controlledVocabulary list, not the default.
+    assert fields['subject']['value'] == ['Physics']
+    assert fields['subject']['value'] != ['Astronomy and Astrophysics']
+    assert fields['subject']['typeClass'] == 'controlledVocabulary'
 
 
 @pytest.mark.unit
@@ -641,6 +630,39 @@ def test_cli_mirror_forwards_no_publish(monkeypatch):
     main(['mirror', '10.5281/zenodo.55', '--collection', 'C', '--no-publish'])
     assert captured['publish'] is False
     assert captured['dry_run'] is False
+
+
+@pytest.mark.unit
+def test_cli_mirror_forwards_subject_and_contact_email(monkeypatch):
+    """--subject and --contact-email reach the mirror, not silently dropped.
+
+    --subject fails open: without forwarding, the argparse default is sent, the
+    server accepts it, and a dataset is mirrored with the wrong subject and no
+    error. The non-default values here make the assertions discriminate against
+    the defaults, so a dropped forward turns the test red.
+    """
+    import fwl_io.mirror as mirror_mod
+    from fwl_io.cli import main
+
+    captured = {}
+    monkeypatch.setattr(mirror_mod, 'mirror_to_dataverse', lambda doi, **k: captured.update(**k))
+    monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
+
+    main(
+        [
+            'mirror',
+            '10.5281/zenodo.55',
+            '--collection',
+            'C',
+            '--subject',
+            'Physics',
+            '--contact-email',
+            'curator@example.org',
+        ]
+    )
+    assert captured['subject'] == 'Physics'
+    assert captured['subject'] != 'Astronomy and Astrophysics'  # not the argparse default
+    assert captured['contact_email'] == 'curator@example.org'
 
 
 @pytest.mark.unit

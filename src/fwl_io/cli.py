@@ -110,7 +110,9 @@ def main(argv: list[str] | None = None) -> int:
         help='dataset contact email (required to create; only --dry-run is exempt)',
     )
     p_mirror.add_argument(
-        '--subject', default='Astronomy and Astrophysics', help='Dataverse subject'
+        '--subject',
+        default='Astronomy and Astrophysics',
+        help='Dataverse citation subject (the server rejects a value outside its vocabulary)',
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
     p_mirror.add_argument(

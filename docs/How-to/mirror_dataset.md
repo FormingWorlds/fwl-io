@@ -36,3 +36,5 @@ fwl-io mirror 10.5281/zenodo.15729114 --collection Proteus_Fr --dry-run
 ```
 
 This downloads the files and builds the citation metadata, then stops before any Dataverse write, so it needs no token.
+
+A real local run (with or without `--no-publish`) does create a Dataverse dataset, so it needs both a token and a contact email: pass `--contact-email` and set `DATAVERSE_TOKEN`. Only the dry run above is exempt. The GitHub Actions workflow supplies both from the `dataverse` environment secrets, so its runs already satisfy this.
