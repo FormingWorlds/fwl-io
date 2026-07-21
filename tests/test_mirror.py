@@ -334,7 +334,66 @@ def test_citation_defaults_author_when_creators_missing():
     }
     # Dataverse requires at least one author; a placeholder is supplied rather
     # than an empty list that the API would reject.
-    assert fields['author'] == [{'authorName': {'value': 'Unknown'}}]
+    assert len(fields['author']) == 1
+    assert fields['author'][0]['authorName']['value'] == 'Unknown'
+    # No affiliation is invented for the placeholder author.
+    assert 'authorAffiliation' not in fields['author'][0]
+
+
+@pytest.mark.unit
+def test_citation_fields_declare_typeclass_and_multiple():
+    """Each field, and each compound sub-field, carries the Dataverse type metadata.
+
+    The native API requires ``typeClass`` and ``multiple`` on every field and
+    on every sub-field of a compound field; a field sent with only a name and
+    value is rejected by the server. This pins that contract so the mapping
+    cannot regress to the bare ``{'typeName', 'value'}`` shape.
+    """
+    record = {
+        'id': 12,
+        'doi': '10.5281/zenodo.12',
+        'metadata': {
+            'title': 'Typed tracks',
+            'creators': [{'name': 'Doe, Jane', 'affiliation': 'Example University'}],
+            'description': 'A demo dataset.',
+        },
+    }
+    citation = zenodo_record_to_citation(
+        record,
+        contact_name='PROTEUS',
+        contact_email='c@x.org',
+        subject='Astronomy and Astrophysics',
+    )
+    fields = citation['datasetVersion']['metadataBlocks']['citation']['fields']
+    by_name = {f['typeName']: f for f in fields}
+    # Every top-level field declares the right typeClass and a multiple flag.
+    expected_class = {
+        'title': 'primitive',
+        'author': 'compound',
+        'datasetContact': 'compound',
+        'dsDescription': 'compound',
+        'subject': 'controlledVocabulary',
+    }
+    for name, klass in expected_class.items():
+        assert by_name[name]['typeClass'] == klass, name
+        assert isinstance(by_name[name]['multiple'], bool), name
+    # A single-valued field and a repeatable field differ in the multiple flag,
+    # so the flag is set from the field's nature, not left at one default.
+    assert by_name['title']['multiple'] is False
+    assert by_name['author']['multiple'] is True
+    assert by_name['subject']['multiple'] is True
+    # Compound sub-fields one level down must be fully typed too, which is what
+    # the create-dataset call needs and what a bare {'value': ...} would omit.
+    author_name = by_name['author']['value'][0]['authorName']
+    assert author_name['typeName'] == 'authorName'
+    assert author_name['typeClass'] == 'primitive'
+    assert author_name['multiple'] is False
+    contact_email = by_name['datasetContact']['value'][0]['datasetContactEmail']
+    assert contact_email['typeClass'] == 'primitive'
+    assert contact_email['value'] == 'c@x.org'
+    description = by_name['dsDescription']['value'][0]['dsDescriptionValue']
+    assert description['typeClass'] == 'primitive'
+    assert description['multiple'] is False
 
 
 def test_failed_upload_rolls_back_the_draft(http_server, dataverse_server):

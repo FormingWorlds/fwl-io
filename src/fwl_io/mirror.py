@@ -47,16 +47,26 @@ class DataverseError(RuntimeError):
     """A Dataverse native-API request failed."""
 
 
+def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
+    """Wrap a scalar as a Dataverse ``primitive`` field.
+
+    The native API requires each field, and each sub-field of a compound
+    field, to declare its ``typeClass`` and ``multiple`` flag next to the
+    value; a field carrying only a name and value is rejected server-side.
+    """
+    return {'typeName': type_name, 'typeClass': 'primitive', 'multiple': multiple, 'value': value}
+
+
 def _creators_to_authors(creators: list[dict]) -> list[dict]:
-    """Map Zenodo record creators onto Dataverse author fields."""
+    """Map Zenodo record creators onto Dataverse compound author fields."""
     authors = []
     for creator in creators or []:
-        author = {'authorName': {'value': creator.get('name', 'Unknown')}}
+        author = {'authorName': _primitive('authorName', creator.get('name', 'Unknown'))}
         affiliation = creator.get('affiliation')
         if affiliation:
-            author['authorAffiliation'] = {'value': affiliation}
+            author['authorAffiliation'] = _primitive('authorAffiliation', affiliation)
         authors.append(author)
-    return authors or [{'authorName': {'value': 'Unknown'}}]
+    return authors or [{'authorName': _primitive('authorName', 'Unknown')}]
 
 
 def zenodo_record_to_citation(
@@ -80,28 +90,39 @@ def zenodo_record_to_citation(
     source_note = f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
 
     fields = [
-        {'typeName': 'title', 'value': title},
+        _primitive('title', title),
         {
             'typeName': 'author',
+            'typeClass': 'compound',
+            'multiple': True,
             'value': _creators_to_authors(metadata.get('creators', [])),
         },
         {
             'typeName': 'datasetContact',
+            'typeClass': 'compound',
+            'multiple': True,
             'value': [
                 {
-                    'datasetContactName': {'value': contact_name},
-                    'datasetContactEmail': {'value': contact_email},
+                    'datasetContactName': _primitive('datasetContactName', contact_name),
+                    'datasetContactEmail': _primitive('datasetContactEmail', contact_email),
                 }
             ],
         },
         {
             'typeName': 'dsDescription',
+            'typeClass': 'compound',
+            'multiple': True,
             'value': [
-                {'dsDescriptionValue': {'value': description}},
-                {'dsDescriptionValue': {'value': source_note}},
+                {'dsDescriptionValue': _primitive('dsDescriptionValue', description)},
+                {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note)},
             ],
         },
-        {'typeName': 'subject', 'value': [subject]},
+        {
+            'typeName': 'subject',
+            'typeClass': 'controlledVocabulary',
+            'multiple': True,
+            'value': [subject],
+        },
     ]
     return {'datasetVersion': {'metadataBlocks': {'citation': {'fields': fields}}}}
 
