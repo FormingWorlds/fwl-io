@@ -530,7 +530,7 @@ def test_failed_publish_rolls_back_the_draft(http_server, dataverse_server):
     from fwl_io.mirror import DataverseError
 
     _DataverseHandler.fail_on_publish = True
-    with pytest.raises(DataverseError):
+    with pytest.raises(DataverseError, match='publish rejected'):
         _mirror(http_server, dataverse_server)
     _, calls = dataverse_server
     # Both files uploaded and a publish was attempted, then the draft was deleted.
@@ -539,6 +539,29 @@ def test_failed_publish_rolls_back_the_draft(http_server, dataverse_server):
     deletes = [c for c in calls if c['method'] == 'DELETE']
     assert len(deletes) == 1
     assert deletes[0]['query'].get('persistentId') == ['doi:10.34894/DEMO01']
+
+
+def test_failed_publish_keeps_the_original_error_when_rollback_also_fails(
+    http_server, dataverse_server
+):
+    """A publish failure is preserved even when the rollback delete also fails.
+
+    With both the publish and the cleanup delete rejected, the original publish
+    error must propagate (not the delete error), and a rollback delete must still
+    have been attempted. This is the publish-origin analogue of the upload-origin
+    "original error wins" case, guarding the shared rollback if publish ever gets
+    its own block.
+    """
+    from fwl_io.mirror import DataverseError
+
+    _DataverseHandler.fail_on_publish = True
+    _DataverseHandler.fail_on_delete = True
+    # The propagated error is the publish rejection, not the delete failure.
+    with pytest.raises(DataverseError, match='publish rejected'):
+        _mirror(http_server, dataverse_server)
+    _, calls = dataverse_server
+    # A rollback delete was attempted even though it too failed.
+    assert any(c['method'] == 'DELETE' for c in calls)
 
 
 def test_publish_requires_contact_email(http_server, dataverse_server):

@@ -287,6 +287,10 @@ def mirror_to_dataverse(
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
+    requests.RequestException
+        If the Zenodo record itself cannot be fetched, for example an HTTP 404
+        for a valid-format but nonexistent version DOI, or a network failure;
+        propagated from ``fetch_zenodo_record`` before any Dataverse write.
     """
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
