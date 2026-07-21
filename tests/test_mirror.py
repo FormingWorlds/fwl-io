@@ -342,10 +342,37 @@ def test_transport_failure_becomes_a_dataverse_error():
 
     requests.request = boom
     try:
-        with pytest.raises(DataverseError, match='failed') as exc_info:
+        # Match the cause text so the message interpolation is exercised, not just
+        # the generic 'failed' that the HTTP-status message also contains.
+        with pytest.raises(DataverseError, match='name resolution failed') as exc_info:
             client.create_dataset('coll', {'datasetVersion': {}})
         # The transport error is chained, not swallowed, so the cause survives.
         assert isinstance(exc_info.value.__cause__, requests.ConnectionError)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_unparseable_success_body_becomes_a_dataverse_error():
+    """A 2xx response with a non-JSON body is wrapped as DataverseError too.
+
+    JSONDecodeError is a requests error, so decoding a garbled success body would
+    otherwise leak a bare requests exception from a Dataverse call; every
+    Dataverse-side failure must surface as the one DataverseError type.
+    """
+    import requests
+
+    response = requests.Response()
+    response.status_code = 200  # ok, so it reaches the body decode
+    response._content = b'this is not json'
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: response
+    try:
+        with pytest.raises(DataverseError, match='failed') as exc_info:
+            client.create_dataset('coll', {'datasetVersion': {}})
+        # The decode error is a requests error, chained as the cause.
+        assert isinstance(exc_info.value.__cause__, requests.RequestException)
     finally:
         requests.request = orig
 

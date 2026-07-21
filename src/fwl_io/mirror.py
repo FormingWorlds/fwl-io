@@ -151,16 +151,20 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
+            if not response.ok:
+                raise DataverseError(
+                    f'Dataverse {method} {path} failed ({response.status_code}): '
+                    f'{response.text[:500]}'
+                )
+            return response.json()
         except requests.RequestException as exc:
-            # A transport failure (connection error, timeout, DNS) talking to
-            # Dataverse is a failed native-API request too; surface it as a
-            # DataverseError so callers have one Dataverse error type to catch.
+            # A transport failure (connection error, timeout, DNS) or an
+            # unparseable response body (JSONDecodeError is a requests error) is
+            # a failed native-API request too; surface it as a DataverseError so
+            # every Dataverse-side failure is one error type for callers to catch.
+            # The not-ok DataverseError above is not a RequestException, so it
+            # passes through this handler unchanged.
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
-        if not response.ok:
-            raise DataverseError(
-                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}'
-            )
-        return response.json()
 
     def _post(self, path: str, **kwargs) -> dict:
         return self._request('POST', path, **kwargs)
@@ -288,11 +292,11 @@ def mirror_to_dataverse(
         Zenodo record lists no files, or if a file name nests below the dataset
         directory (Dataverse flattens on the basename, so it would collide).
     DataverseError
-        If a Dataverse native-API request fails, whether the server rejects it
-        (for example an unknown subject in the citation metadata) or the HTTP
-        transport itself fails (connection error or timeout). A transport failure
-        during upload or publish can leave a draft that the rollback then tries
-        to delete.
+        If a Dataverse native-API request fails: the server rejects it (for
+        example an unknown subject in the citation metadata), the HTTP transport
+        fails (connection error or timeout), or the response body is unparseable.
+        A failure during upload or publish can leave a draft that the rollback
+        then tries to delete.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
@@ -300,7 +304,8 @@ def mirror_to_dataverse(
         If the Zenodo record itself cannot be fetched, for example an HTTP 404
         for a valid-format but nonexistent version DOI, or a network failure;
         propagated from ``fetch_zenodo_record`` before any Dataverse write.
-        (Transport failures on the Dataverse side are wrapped as DataverseError.)
+        (Dataverse-side request failures, including an unparseable response body,
+        are wrapped as DataverseError.)
     """
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
