@@ -1,4 +1,4 @@
-"""Command-line interface: ``fwl-io sync | list | fetch``.
+"""Command-line interface: ``fwl-io sync | list | fetch | mirror``.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -7,6 +7,7 @@ one-line message on stderr instead of a traceback.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from fwl_io import __version__
@@ -49,6 +50,32 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mirror(args: argparse.Namespace) -> int:
+    from fwl_io.mirror import mirror_to_dataverse
+
+    token = os.environ.get('DATAVERSE_TOKEN', '')
+    if not token and not args.dry_run:
+        print('fwl-io: set DATAVERSE_TOKEN to mirror (or pass --dry-run)', file=sys.stderr)
+        return 1
+    persistent_id = mirror_to_dataverse(
+        args.zenodo_doi,
+        dataverse_url=args.dataverse_url,
+        collection=args.collection,
+        token=token,
+        contact_name=args.contact_name,
+        contact_email=args.contact_email,
+        subject=args.subject,
+        publish=not args.no_publish,
+        dry_run=args.dry_run,
+    )
+    if persistent_id is None:
+        print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
+    else:
+        print(f'mirrored to {persistent_id}')
+        print(f'add this to the manifest:  dataverse = "{persistent_id.removeprefix("doi:")}"')
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog='fwl-io',
@@ -69,6 +96,29 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch.add_argument('model', help='model name matched against required_by')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_fetch.set_defaults(func=_cmd_fetch)
+
+    p_mirror = sub.add_parser('mirror', help='mirror a Zenodo deposit to a Dataverse collection')
+    p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')
+    p_mirror.add_argument('--collection', required=True, help='target Dataverse collection alias')
+    p_mirror.add_argument(
+        '--dataverse-url', default='https://dataverse.nl', help='Dataverse base URL'
+    )
+    p_mirror.add_argument('--contact-name', default='PROTEUS Framework', help='dataset contact')
+    p_mirror.add_argument(
+        '--contact-email',
+        default='',
+        help='dataset contact email (required to create; only --dry-run is exempt)',
+    )
+    p_mirror.add_argument(
+        '--subject',
+        default='Astronomy and Astrophysics',
+        help='Dataverse citation subject (the server rejects a value outside its vocabulary)',
+    )
+    p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
+    p_mirror.add_argument(
+        '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'
+    )
+    p_mirror.set_defaults(func=_cmd_mirror)
 
     args = parser.parse_args(argv)
     try:

@@ -13,6 +13,7 @@ nav:
   - How-to guides:
       - Installation: How-to/installation.md
       - Add a dataset: How-to/add_dataset.md
+      - Mirror a deposit to Dataverse: How-to/mirror_dataset.md
       - Migrate a model to fwl-io: How-to/migrate_model.md
       - Run on clusters: How-to/clusters.md
 
