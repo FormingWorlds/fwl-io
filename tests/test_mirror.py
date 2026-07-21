@@ -57,6 +57,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     calls: list[dict] = []
     fail_on_create: bool = False  # set by a test to force a create-time server rejection
     fail_on_add: bool = False  # set by a test to force an upload failure
+    fail_on_publish: bool = False  # set by a test to force a publish failure
     fail_on_delete: bool = False  # set by a test to force a rollback failure
     omit_persistent_id: bool = False  # set by a test to drop the create response id
 
@@ -104,6 +105,9 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             else:
                 self._reply(200, {'status': 'OK', 'data': {'files': [{'label': 'ok'}]}})
         elif parsed.path.endswith('/actions/:publish'):
+            if self.fail_on_publish:
+                self._reply(400, {'status': 'ERROR', 'message': 'publish rejected'})
+                return
             self._reply(200, {'status': 'OK', 'data': {'id': 7}})
         else:
             self.send_response(404)
@@ -123,6 +127,7 @@ def dataverse_server():
     _DataverseHandler.calls = []
     _DataverseHandler.fail_on_create = False
     _DataverseHandler.fail_on_add = False
+    _DataverseHandler.fail_on_publish = False
     _DataverseHandler.fail_on_delete = False
     _DataverseHandler.omit_persistent_id = False
     server = ThreadingHTTPServer(('127.0.0.1', 0), _DataverseHandler)
@@ -276,13 +281,16 @@ def test_subject_is_carried_into_the_create_body(http_server, dataverse_server):
 
 
 def test_create_rejection_aborts_without_upload_or_rollback(http_server, dataverse_server):
-    """A server-rejected create (e.g. an unknown subject) raises and mints nothing.
+    """A create rejected by the server raises and mints nothing.
 
-    The subject is validated server-side, so a bad value fails at create. Because
-    the create fails before a persistentId exists, there is nothing to upload,
-    publish, or roll back: the only Dataverse call is the create, with no /add,
-    no publish, and no DELETE. This pins the documented DataverseError path that
-    the mock cannot otherwise reach (it accepts any create body by default).
+    The mock rejects the create with a 400, as the live server does for an
+    invalid citation field (an unknown subject among them); the subject value
+    here is illustrative, not what triggers the mock, which rejects any create
+    when armed. Because the create fails before a persistentId exists, there is
+    nothing to upload, publish, or roll back: the only Dataverse call is the
+    create, with no /add, no publish, and no DELETE. This pins the DataverseError
+    path the accept-anything mock cannot otherwise reach; server-side validation
+    of the subject itself is not exercised here.
     """
     from fwl_io.mirror import DataverseError
 
@@ -511,6 +519,28 @@ def test_failed_upload_rolls_back_the_draft(http_server, dataverse_server):
     assert not any(c['path'].endswith('/actions/:publish') for c in calls)
 
 
+def test_failed_publish_rolls_back_the_draft(http_server, dataverse_server):
+    """When publishing fails, the created draft is deleted so no orphan is left.
+
+    Publish is the last orphan-creating step: all files upload, then the publish
+    is rejected, so the draft must be removed rather than left as a private
+    deposit with a minted DOI. This covers the rollback branch past the upload
+    failure that the upload-rollback test exercises.
+    """
+    from fwl_io.mirror import DataverseError
+
+    _DataverseHandler.fail_on_publish = True
+    with pytest.raises(DataverseError):
+        _mirror(http_server, dataverse_server)
+    _, calls = dataverse_server
+    # Both files uploaded and a publish was attempted, then the draft was deleted.
+    assert sum(c['path'].endswith('/add') for c in calls) == 2
+    assert any(c['path'].endswith('/actions/:publish') for c in calls)
+    deletes = [c for c in calls if c['method'] == 'DELETE']
+    assert len(deletes) == 1
+    assert deletes[0]['query'].get('persistentId') == ['doi:10.34894/DEMO01']
+
+
 def test_publish_requires_contact_email(http_server, dataverse_server):
     """Publishing without a contact email fails fast, before any Dataverse write."""
     _, calls = dataverse_server  # noqa: F841 -- asserted empty below
@@ -700,18 +730,25 @@ def test_cli_mirror_forwards_subject_and_contact_email(monkeypatch):
 def test_cli_mirror_refuses_a_real_run_without_contact_email(monkeypatch, capsys):
     """A real run (token set, not --dry-run) with no --contact-email is refused at the CLI.
 
-    The email guard fires before any network call, so this is hermetic. The
-    surfaced message must name the CLI flag the user actually has, so the check
-    is on ``--contact-email`` appearing in stderr, which also pins the wording.
+    The email guard lives in the library and fires before any Zenodo fetch. A
+    stubbed fetch that raises if called keeps the test hermetic and enforces that
+    ordering: reordering the guard after the fetch would trip the stub instead of
+    silently issuing a live request.
     """
+    import fwl_io.mirror as mirror_mod
     from fwl_io.cli import main
 
+    def _no_network(*args, **kwargs):
+        raise AssertionError('the contact-email guard must fire before any Zenodo fetch')
+
+    monkeypatch.setattr(mirror_mod, 'fetch_zenodo_record', _no_network)
     monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
     rc = main(['mirror', '10.5281/zenodo.55', '--collection', 'Proteus_Fr'])
     assert rc == 1
     err = capsys.readouterr().err
-    # Actionable for a CLI user: the flag is named, not only the API keyword.
+    # Actionable in both contexts: the CLI flag and the API keyword are named.
     assert '--contact-email' in err
+    assert 'contact_email' in err
     # Discrimination: this is the contact-email guard, not the token guard.
     assert 'contact email' in err.lower()
     assert 'DATAVERSE_TOKEN' not in err

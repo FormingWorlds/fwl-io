@@ -277,8 +277,9 @@ def mirror_to_dataverse(
     Raises
     ------
     ValueError
-        If a real create is requested without a contact email, if the Zenodo
-        record lists no files, or if a file name nests below the dataset
+        If ``zenodo_doi`` is malformed or is a concept DOI (a version DOI is
+        required), if a real create is requested without a contact email, if the
+        Zenodo record lists no files, or if a file name nests below the dataset
         directory (Dataverse flattens on the basename, so it would collide).
     DataverseError
         If a Dataverse native-API request fails, including a server-side
