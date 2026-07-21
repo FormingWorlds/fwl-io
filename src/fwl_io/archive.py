@@ -6,9 +6,11 @@ archive, then extracts its members into the dataset directory; the archive
 itself is not kept, so consumers see the extracted tree they expect.
 
 Extraction is hardened against hostile archives: every member is checked before
-anything is written, and a member that would escape the destination (an
-absolute path, a ``..`` component, or a symlink/hardlink/device) is rejected, so
-an untrusted archive cannot place a file outside the dataset directory.
+anything is written. A member that would escape the destination (an absolute
+path or a ``..`` component) is rejected, and a member that is not a plain file
+or directory (a symlink, hardlink, or device node) is refused by type, so an
+untrusted archive can neither place a file outside the dataset directory nor
+smuggle in a link.
 """
 
 from __future__ import annotations
@@ -63,19 +65,20 @@ def _extract_tar(archive: Path, dest: Path) -> None:
 def _extract_zip(archive: Path, dest: Path) -> None:
     dest_resolved = dest.resolve()
     try:
-        zf = zipfile.ZipFile(archive)
-    except zipfile.BadZipFile as exc:
+        with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode not in _ALLOWED_ZIP_MODES:
+                    raise ArchiveError(
+                        f'unsafe archive member {info.filename!r}: {_MEMBER_TYPE_MSG}'
+                    )
+                if _escapes(dest_resolved, info.filename):
+                    raise ArchiveError(
+                        f'unsafe archive member {info.filename!r}: escapes the destination'
+                    )
+            zf.extractall(dest)
+    except zipfile.BadZipFile as exc:  # unreadable/corrupt zip, at open or during read
         raise ArchiveError(f'not a valid zip archive {archive.name!r}: {exc}') from exc
-    with zf:
-        for info in zf.infolist():
-            mode = (info.external_attr >> 16) & 0o170000
-            if mode not in _ALLOWED_ZIP_MODES:
-                raise ArchiveError(f'unsafe archive member {info.filename!r}: {_MEMBER_TYPE_MSG}')
-            if _escapes(dest_resolved, info.filename):
-                raise ArchiveError(
-                    f'unsafe archive member {info.filename!r}: escapes the destination'
-                )
-        zf.extractall(dest)
 
 
 def extract_archive(archive: Path, dest: Path, kind: str) -> None:

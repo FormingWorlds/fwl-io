@@ -24,7 +24,7 @@ Validation at load time:
 
 ## Archive datasets
 
-A deposit packaged as a single archive sets `extract = "tar"` or `"zip"`. Its registry lists the one archive file and its checksum; the fetcher downloads and verifies the archive, then extracts the members into the dataset directory and discards the archive, so consumers see the extracted tree rather than a tarball. Extraction is staged and the tree is moved into place atomically, so an interrupted fetch never leaves a half-populated dataset, and any member that would escape the directory (an absolute path, a `..` component, or a symlink or device node) is rejected before anything is written.
+A deposit packaged as a single archive sets `extract = "tar"` or `"zip"`. Its registry lists the one archive file and its checksum; the fetcher downloads and verifies the archive, then extracts the members into the dataset directory and discards the archive, so consumers see the extracted tree rather than a tarball. Extraction is staged and the tree is moved into place atomically, so an interrupted fetch never leaves a half-populated dataset, and any member that escapes the directory (an absolute path or a `..` component) or is not a plain file or directory (a symlink, hardlink, or device node) is rejected before anything is written.
 
 ## Registries
 
