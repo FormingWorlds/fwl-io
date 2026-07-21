@@ -243,6 +243,39 @@ def test_empty_record_rejected(http_server, dataverse_server):
     assert calls == []
 
 
+def test_subject_outside_vocabulary_is_rejected(http_server, dataverse_server):
+    """A subject outside the controlled vocabulary fails before any download or deposit."""
+    base_url, root = http_server
+    dv_url, calls = dataverse_server
+    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n'})
+    with pytest.raises(ValueError, match='not a Dataverse citation subject'):
+        mirror_to_dataverse(
+            '10.5281/zenodo.55',
+            dataverse_url=dv_url,
+            collection='Proteus_Fr',
+            token='t',
+            contact_name='x',
+            contact_email='y@z',
+            subject='Planetary Science',  # plausible but not in the citation vocabulary
+            api_base=f'{base_url}api/records',
+            base_urls=[base_url],
+        )
+    # Discrimination: rejected up front, so no deposit is created and the failure
+    # is a local error, not a mid-run server rejection after files upload.
+    assert calls == []
+    # A vocabulary value, by contrast, reaches the create call and is sent as-is.
+    result, calls2 = _mirror(http_server, dataverse_server, subject='Physics')
+    assert result == 'doi:10.34894/DEMO01'
+    create = next(c for c in calls2 if c['path'].endswith('/datasets'))
+    subjects = {
+        f['typeName']: f['value']
+        for f in json.loads(create['body'])['datasetVersion']['metadataBlocks']['citation'][
+            'fields'
+        ]
+    }
+    assert subjects['subject'] == ['Physics']
+
+
 @pytest.mark.unit
 def test_dataverse_error_on_failed_request():
     """A non-2xx Dataverse response raises DataverseError, not a silent pass."""
@@ -336,18 +369,23 @@ def test_citation_defaults_author_when_creators_missing():
     # than an empty list that the API would reject.
     assert len(fields['author']) == 1
     assert fields['author'][0]['authorName']['value'] == 'Unknown'
+    # The placeholder author is fully typed too: the no-creators fallback must
+    # not revert to a bare {'value': ...} that the server rejects.
+    assert fields['author'][0]['authorName']['typeClass'] == 'primitive'
+    assert fields['author'][0]['authorName']['multiple'] is False
     # No affiliation is invented for the placeholder author.
     assert 'authorAffiliation' not in fields['author'][0]
 
 
 @pytest.mark.unit
 def test_citation_fields_declare_typeclass_and_multiple():
-    """Each field, and each compound sub-field, carries the Dataverse type metadata.
+    """Every field, and every compound sub-field, carries the Dataverse type metadata.
 
-    The native API requires ``typeClass`` and ``multiple`` on every field and
-    on every sub-field of a compound field; a field sent with only a name and
-    value is rejected by the server. This pins that contract so the mapping
-    cannot regress to the bare ``{'typeName', 'value'}`` shape.
+    The native API requires ``typeClass`` and ``multiple`` on each field and on
+    each sub-field of a compound field; a field sent with only a name and value
+    is rejected by the server. The assertions walk the whole emitted document
+    rather than a fixed name list, so a bare ``{'typeName', 'value'}`` shape on
+    any field or sub-field, present now or added later, fails the test.
     """
     record = {
         'id': 12,
@@ -365,35 +403,76 @@ def test_citation_fields_declare_typeclass_and_multiple():
         subject='Astronomy and Astrophysics',
     )
     fields = citation['datasetVersion']['metadataBlocks']['citation']['fields']
+    valid_classes = {'primitive', 'compound', 'controlledVocabulary'}
+
+    def assert_typed(field, where):
+        assert set(field) >= {'typeName', 'typeClass', 'multiple', 'value'}, where
+        assert field['typeClass'] in valid_classes, f'{where}: {field["typeClass"]}'
+        assert isinstance(field['multiple'], bool), where
+
+    # Walk every top-level field and every sub-field of every compound field, so
+    # a dropped attribute anywhere (authorAffiliation, datasetContactName, or a
+    # field added later) is caught, not just the few names spelled out below.
+    for field in fields:
+        assert_typed(field, field['typeName'])
+        if field['typeClass'] == 'compound':
+            for entry in field['value']:
+                for sub_name, sub in entry.items():
+                    assert_typed(sub, f'{field["typeName"]}.{sub_name}')
+                    assert sub['typeClass'] == 'primitive', f'{field["typeName"]}.{sub_name}'
+
     by_name = {f['typeName']: f for f in fields}
-    # Every top-level field declares the right typeClass and a multiple flag.
-    expected_class = {
-        'title': 'primitive',
-        'author': 'compound',
-        'datasetContact': 'compound',
-        'dsDescription': 'compound',
-        'subject': 'controlledVocabulary',
-    }
-    for name, klass in expected_class.items():
-        assert by_name[name]['typeClass'] == klass, name
-        assert isinstance(by_name[name]['multiple'], bool), name
-    # A single-valued field and a repeatable field differ in the multiple flag,
-    # so the flag is set from the field's nature, not left at one default.
+    # Exact typeClass per field, so a wrong-but-valid class (subject built as a
+    # primitive, say) is caught, not only a missing attribute.
+    assert by_name['title']['typeClass'] == 'primitive'
+    assert by_name['author']['typeClass'] == 'compound'
+    assert by_name['datasetContact']['typeClass'] == 'compound'
+    assert by_name['dsDescription']['typeClass'] == 'compound'
+    assert by_name['subject']['typeClass'] == 'controlledVocabulary'
+    # Exact multiple per field: single-valued title against the repeatable
+    # compounds and subject, so a flipped flag on any of them fails.
     assert by_name['title']['multiple'] is False
     assert by_name['author']['multiple'] is True
+    assert by_name['datasetContact']['multiple'] is True
+    assert by_name['dsDescription']['multiple'] is True
     assert by_name['subject']['multiple'] is True
-    # Compound sub-fields one level down must be fully typed too, which is what
-    # the create-dataset call needs and what a bare {'value': ...} would omit.
-    author_name = by_name['author']['value'][0]['authorName']
-    assert author_name['typeName'] == 'authorName'
-    assert author_name['typeClass'] == 'primitive'
-    assert author_name['multiple'] is False
-    contact_email = by_name['datasetContact']['value'][0]['datasetContactEmail']
-    assert contact_email['typeClass'] == 'primitive'
-    assert contact_email['value'] == 'c@x.org'
-    description = by_name['dsDescription']['value'][0]['dsDescriptionValue']
-    assert description['typeClass'] == 'primitive'
-    assert description['multiple'] is False
+    # The affiliation sub-field, present in this record, is fully typed too (a
+    # path a check for authorName alone would skip).
+    author = by_name['author']['value'][0]
+    assert author['authorAffiliation']['typeClass'] == 'primitive'
+    assert author['authorAffiliation']['value'] == 'Example University'
+    # The mapped values still survive alongside the type metadata.
+    contact = by_name['datasetContact']['value'][0]
+    assert contact['datasetContactEmail']['value'] == 'c@x.org'
+    assert by_name['subject']['value'] == ['Astronomy and Astrophysics']
+
+
+def test_contact_email_required_even_for_a_draft(http_server, dataverse_server):
+    """A no-publish draft still needs a contact email; it is refused without one.
+
+    Dataverse requires a point-of-contact email on every dataset, so an empty
+    email is rejected up front even when publishing is off, before any download
+    or deposit, rather than surfacing as a server error mid-run. The served
+    record ensures the only reason to raise is the guard, not a missing record.
+    """
+    base_url, root = http_server
+    dv_url, calls = dataverse_server
+    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n'})
+    with pytest.raises(ValueError, match='contact email'):
+        mirror_to_dataverse(
+            '10.5281/zenodo.55',
+            dataverse_url=dv_url,
+            collection='Proteus_Fr',
+            token='t',
+            contact_name='x',
+            contact_email='',  # empty: refused even though publish is False
+            publish=False,
+            api_base=f'{base_url}api/records',
+            base_urls=[base_url],
+        )
+    # Discrimination against a publish-only guard: publish=False still refuses, so
+    # no draft or DOI is minted and the server is never touched.
+    assert calls == []
 
 
 def test_failed_upload_rolls_back_the_draft(http_server, dataverse_server):

@@ -42,6 +42,30 @@ log = logging.getLogger(__name__)
 # against the target installation before relying on it for tabular content.
 _NO_INGEST_PARAM = 'noVarDetect'
 
+# Dataverse's citation ``subject`` is a controlled vocabulary; a value outside it
+# is rejected by the server at create time, the same way a missing type attribute
+# is. Validating up front turns that into a fast local error instead of a failure
+# after the deposit (and its DOI) is minted. Sourced from the citation metadata
+# block at dataverse.nl (/api/metadatablocks/citation).
+_SUBJECT_VOCABULARY = frozenset(
+    {
+        'Agricultural Sciences',
+        'Arts and Humanities',
+        'Astronomy and Astrophysics',
+        'Business and Management',
+        'Chemistry',
+        'Computer and Information Science',
+        'Earth and Environmental Sciences',
+        'Engineering',
+        'Law',
+        'Mathematical Sciences',
+        'Medicine, Health and Life Sciences',
+        'Physics',
+        'Social Sciences',
+        'Other',
+    }
+)
+
 
 class DataverseError(RuntimeError):
     """A Dataverse native-API request failed."""
@@ -55,6 +79,26 @@ def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
     value; a field carrying only a name and value is rejected server-side.
     """
     return {'typeName': type_name, 'typeClass': 'primitive', 'multiple': multiple, 'value': value}
+
+
+def _compound(type_name: str, value: list[dict], *, multiple: bool = True) -> dict:
+    """Wrap compound entries (each a dict of primitive sub-fields) as a field.
+
+    Every field builder sets ``typeClass`` and ``multiple`` so no citation
+    field can be assembled without them; hand-building a raw dict is what let
+    the required attributes go missing.
+    """
+    return {'typeName': type_name, 'typeClass': 'compound', 'multiple': multiple, 'value': value}
+
+
+def _controlled(type_name: str, values: list[str], *, multiple: bool = True) -> dict:
+    """Wrap controlled-vocabulary values as a Dataverse ``controlledVocabulary`` field."""
+    return {
+        'typeName': type_name,
+        'typeClass': 'controlledVocabulary',
+        'multiple': multiple,
+        'value': values,
+    }
 
 
 def _creators_to_authors(creators: list[dict]) -> list[dict]:
@@ -89,40 +133,23 @@ def zenodo_record_to_citation(
     description = metadata.get('description') or title
     source_note = f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
 
+    contact = {
+        'datasetContactName': _primitive('datasetContactName', contact_name),
+        'datasetContactEmail': _primitive('datasetContactEmail', contact_email),
+    }
+
     fields = [
         _primitive('title', title),
-        {
-            'typeName': 'author',
-            'typeClass': 'compound',
-            'multiple': True,
-            'value': _creators_to_authors(metadata.get('creators', [])),
-        },
-        {
-            'typeName': 'datasetContact',
-            'typeClass': 'compound',
-            'multiple': True,
-            'value': [
-                {
-                    'datasetContactName': _primitive('datasetContactName', contact_name),
-                    'datasetContactEmail': _primitive('datasetContactEmail', contact_email),
-                }
-            ],
-        },
-        {
-            'typeName': 'dsDescription',
-            'typeClass': 'compound',
-            'multiple': True,
-            'value': [
+        _compound('author', _creators_to_authors(metadata.get('creators', []))),
+        _compound('datasetContact', [contact]),
+        _compound(
+            'dsDescription',
+            [
                 {'dsDescriptionValue': _primitive('dsDescriptionValue', description)},
                 {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note)},
             ],
-        },
-        {
-            'typeName': 'subject',
-            'typeClass': 'controlledVocabulary',
-            'multiple': True,
-            'value': [subject],
-        },
+        ),
+        _controlled('subject', [subject]),
     ]
     return {'datasetVersion': {'metadataBlocks': {'citation': {'fields': fields}}}}
 
@@ -271,8 +298,20 @@ def mirror_to_dataverse(
     # not something to ship, so require a contact email up front rather than fail
     # after a draft (and its DOI) has already been minted. A dry run never
     # publishes, so it is exempt.
-    if publish and not dry_run and not contact_email:
-        raise ValueError('publishing requires a contact email; pass one or use publish=False')
+    # Dataverse requires a point-of-contact email on every dataset, so any real
+    # create (draft or published) needs one; a dry run writes nothing and is exempt.
+    if not dry_run and not contact_email:
+        raise ValueError(
+            'a contact email is required to create a Dataverse dataset; '
+            'pass one or use dry_run=True'
+        )
+    # Reject a subject outside the controlled vocabulary before any download or
+    # deposit, so a typo fails fast rather than as a server error mid-run.
+    if subject not in _SUBJECT_VOCABULARY:
+        raise ValueError(
+            f'subject {subject!r} is not a Dataverse citation subject; '
+            f'choose one of {sorted(_SUBJECT_VOCABULARY)}'
+        )
 
     recid = zenodo_record_id(zenodo_doi)
     record = fetch_zenodo_record(zenodo_doi, api_base=api_base)
