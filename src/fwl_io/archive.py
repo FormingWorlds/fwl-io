@@ -13,11 +13,19 @@ an untrusted archive cannot place a file outside the dataset directory.
 
 from __future__ import annotations
 
+import stat
 import tarfile
 import zipfile
 from pathlib import Path
 
 ARCHIVE_KINDS = ('tar', 'zip')
+
+# Only regular files and directories belong in a data archive; a link, device,
+# or fifo member is either a mistake or an attack, so it is refused.
+_MEMBER_TYPE_MSG = 'only regular files and directories are allowed'
+# Zip stores a unix mode in the high 16 bits of external_attr; 0 means no mode
+# was recorded (a Windows-created entry), which is treated as a regular file.
+_ALLOWED_ZIP_MODES = frozenset({0, stat.S_IFREG, stat.S_IFDIR})
 
 
 class ArchiveError(RuntimeError):
@@ -34,32 +42,39 @@ def _escapes(dest_resolved: Path, member_name: str) -> bool:
 
 def _extract_tar(archive: Path, dest: Path) -> None:
     dest_resolved = dest.resolve()
-    with tarfile.open(archive, 'r:*') as tf:
-        members = tf.getmembers()
-        for m in members:
-            # Datasets are plain files and directories; a link or device node in
-            # a data archive is either a mistake or an attack, so reject it.
-            if m.issym() or m.islnk() or m.isdev() or m.ischr() or m.isblk() or m.isfifo():
-                raise ArchiveError(
-                    f'unsafe archive member {m.name!r}: only regular files and '
-                    f'directories are allowed'
-                )
-            if _escapes(dest_resolved, m.name):
-                raise ArchiveError(f'unsafe archive member {m.name!r}: escapes the destination')
-        try:
-            # The 'data' filter (Python 3.12, backported to 3.11.4+) is a second
-            # line of defence over the explicit checks above.
-            tf.extractall(dest, filter='data')
-        except TypeError:  # Python build without the 'filter' keyword
-            tf.extractall(dest, members=members)
+    try:
+        with tarfile.open(archive, 'r:*') as tf:
+            members = tf.getmembers()
+            for m in members:
+                if m.issym() or m.islnk() or m.isdev() or m.ischr() or m.isblk() or m.isfifo():
+                    raise ArchiveError(f'unsafe archive member {m.name!r}: {_MEMBER_TYPE_MSG}')
+                if _escapes(dest_resolved, m.name):
+                    raise ArchiveError(f'unsafe archive member {m.name!r}: escapes the destination')
+            try:
+                # The 'data' filter (Python 3.12, backported to 3.11.4+) is a
+                # second line of defence over the explicit checks above.
+                tf.extractall(dest, filter='data')
+            except TypeError:  # Python build without the 'filter' keyword
+                tf.extractall(dest, members=members)
+    except tarfile.TarError as exc:  # unreadable/corrupt archive, or a filter rejection
+        raise ArchiveError(f'could not read tar archive {archive.name!r}: {exc}') from exc
 
 
 def _extract_zip(archive: Path, dest: Path) -> None:
     dest_resolved = dest.resolve()
-    with zipfile.ZipFile(archive) as zf:
-        for name in zf.namelist():
-            if _escapes(dest_resolved, name):
-                raise ArchiveError(f'unsafe archive member {name!r}: escapes the destination')
+    try:
+        zf = zipfile.ZipFile(archive)
+    except zipfile.BadZipFile as exc:
+        raise ArchiveError(f'not a valid zip archive {archive.name!r}: {exc}') from exc
+    with zf:
+        for info in zf.infolist():
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode not in _ALLOWED_ZIP_MODES:
+                raise ArchiveError(f'unsafe archive member {info.filename!r}: {_MEMBER_TYPE_MSG}')
+            if _escapes(dest_resolved, info.filename):
+                raise ArchiveError(
+                    f'unsafe archive member {info.filename!r}: escapes the destination'
+                )
         zf.extractall(dest)
 
 

@@ -492,21 +492,71 @@ def test_archive_offline_serves_extracted_tree_and_errors_when_absent(http_serve
     assert (tmp_path / VERSIONED / 'm0p1.txt') in paths
 
 
-def test_corrupt_archive_fails_and_extracts_nothing(http_server, tmp_path):
-    """A checksum mismatch on the archive raises DownloadError; nothing is extracted.
+def test_corrupt_archive_fails_and_extracts_nothing(http_server, tmp_path, monkeypatch):
+    """When every mirror fails the archive download, nothing is extracted.
 
-    The fetcher is given only the local mirror (no Zenodo DOI) so a failed
-    download cannot fall through to the real doi.org resolver.
+    pooch.retrieve is stubbed to fail (as a checksum mismatch would) for every
+    mirror, so the test is hermetic (no fall-through to the real doi.org
+    resolver) and exercises the exhausted-mirrors path for an archive.
     """
     base_url, root = http_server
-    _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
-    wrong = {'tracks.tar': 'sha256:' + '0' * 64}
-    fetcher = create_fetcher(
-        subdir=SUBDIR, registry=wrong, base_urls=[base_url], data_root=tmp_path, extract='tar'
-    )
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+
+    def boom(*args, **kwargs):
+        raise ValueError('hash of downloaded file does not match the known hash')
+
+    monkeypatch.setattr('pooch.retrieve', boom)
+    fetcher = _archive_fetcher(base_url, registry, tmp_path, 'tar')
     with pytest.raises(DownloadError):
         fetcher.fetch_all()
-    assert not (tmp_path / SUBDIR).exists()
+    assert not (tmp_path / VERSIONED).exists()
+
+
+def test_archive_heals_a_deleted_member_on_refetch(http_server, tmp_path):
+    """A member deleted from the extracted tree is restored on the next fetch.
+
+    The stamp records the member names, so a missing member fails the intact
+    check and the archive is re-extracted rather than served incomplete.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    victim = tmp_path / VERSIONED / 'nested' / 'm1p0.txt'
+    victim.unlink()
+    assert not victim.exists()
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    # The deleted member is back, restored from a re-extraction (not served short).
+    assert victim.read_bytes() == b'1.0\n'
+    assert victim in paths
+
+
+def test_archive_extracts_a_top_level_directory_member(http_server, tmp_path):
+    """A tar whose members sit under a top-level directory keeps that structure.
+
+    This is the common real-Zenodo layout (files inside one wrapping folder).
+    """
+    base_url, root = http_server
+    members = [('grid/t0.txt', b'0\n'), ('grid/sub/t1.txt', b'1\n')]
+    registry = _serve_archive(root, 'grid.tar', members, 'tar')
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    version_dir = tmp_path / VERSIONED
+    got = sorted(p.relative_to(version_dir).as_posix() for p in paths)
+    assert got == ['grid/sub/t1.txt', 'grid/t0.txt']
+    assert (version_dir / 'grid' / 't0.txt').read_bytes() == b'0\n'
+
+
+@pytest.mark.unit
+def test_extract_requires_a_zenodo_pin(tmp_path):
+    """An archive dataset without a Zenodo pin is refused at construction."""
+    with pytest.raises(ValueError, match='requires a Zenodo version DOI'):
+        create_fetcher(
+            subdir=SUBDIR,
+            registry={'a.tar': 'sha256:aaa'},
+            base_urls=['http://unused/'],
+            data_root=tmp_path,
+            extract='tar',
+        )
 
 
 def test_malicious_archive_aborts_with_no_dataset_and_clean_staging(http_server, tmp_path):

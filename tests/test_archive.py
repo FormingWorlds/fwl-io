@@ -128,3 +128,90 @@ def test_unknown_kind_rejected(tmp_path):
         extract_archive(archive, dest, 'rar')
     # A rejected kind writes nothing.
     assert list(dest.iterdir()) == []
+
+
+def _make_tar_typed_member(path: Path, name: str, typeflag: bytes, *, linkname: str = '') -> None:
+    with tarfile.open(path, 'w') as tf:
+        info = tarfile.TarInfo(name)
+        info.type = typeflag
+        info.linkname = linkname
+        tf.addfile(info)
+
+
+def _make_zip_symlink(path: Path, name: str, target: str) -> None:
+    import stat
+
+    info = zipfile.ZipInfo(name)
+    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(path, 'w') as zf:
+        zf.writestr(info, target)
+
+
+def test_tar_hardlink_member_rejected(tmp_path):
+    """A hardlink member is refused (not just symlinks); the type check must cover it."""
+    archive = tmp_path / 'hard.tar'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_tar_typed_member(archive, 'hard', tarfile.LNKTYPE, linkname='ok.txt')
+    with pytest.raises(ArchiveError, match='only regular files and directories'):
+        extract_archive(archive, dest, 'tar')
+    assert list(dest.iterdir()) == []
+
+
+def test_tar_fifo_member_rejected(tmp_path):
+    """A device/fifo member is refused, so the non-symlink half of the type check is live."""
+    archive = tmp_path / 'fifo.tar'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_tar_typed_member(archive, 'pipe', tarfile.FIFOTYPE)
+    with pytest.raises(ArchiveError, match='only regular files and directories'):
+        extract_archive(archive, dest, 'tar')
+    assert list(dest.iterdir()) == []
+
+
+def test_tar_relative_symlink_member_rejected(tmp_path):
+    """Even a symlink whose target stays inside the destination is refused.
+
+    This pins the module's stricter contract (reject all links) rather than only
+    the stdlib data filter's behaviour (which permits a safe relative symlink).
+    """
+    archive = tmp_path / 'link.tar'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_tar_typed_member(archive, 'inside_link', tarfile.SYMTYPE, linkname='ok.txt')
+    with pytest.raises(ArchiveError, match='only regular files and directories'):
+        extract_archive(archive, dest, 'tar')
+    assert list(dest.iterdir()) == []
+
+
+def test_zip_symlink_member_rejected(tmp_path):
+    """A zip entry flagged as a symlink is refused, matching the tar contract."""
+    archive = tmp_path / 'link.zip'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_zip_symlink(archive, 'evil_link', '/etc/passwd')
+    with pytest.raises(ArchiveError, match='only regular files and directories'):
+        extract_archive(archive, dest, 'zip')
+    assert list(dest.iterdir()) == []
+
+
+def test_garbage_tar_raises_archive_error(tmp_path):
+    """Non-archive bytes on the tar path fail as ArchiveError, not a raw tarfile error."""
+    archive = tmp_path / 'notreal.tar'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    archive.write_bytes(b'this is definitely not a tar archive\n')
+    with pytest.raises(ArchiveError, match='could not read tar archive'):
+        extract_archive(archive, dest, 'tar')
+    assert list(dest.iterdir()) == []
+
+
+def test_garbage_zip_raises_archive_error(tmp_path):
+    """Non-archive bytes on the zip path fail as ArchiveError, not a raw BadZipFile."""
+    archive = tmp_path / 'notreal.zip'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    archive.write_bytes(b'this is definitely not a zip archive\n')
+    with pytest.raises(ArchiveError, match='not a valid zip archive'):
+        extract_archive(archive, dest, 'zip')
+    assert list(dest.iterdir()) == []

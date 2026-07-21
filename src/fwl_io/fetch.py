@@ -117,6 +117,11 @@ class Fetcher:
                     f'an archive dataset lists exactly one archive file in its registry, '
                     f'got {len(registry)}: {sorted(registry)}'
                 )
+            if not zenodo:
+                raise ValueError(
+                    'an archive dataset requires a Zenodo version DOI: extraction needs a '
+                    'version directory to stamp and to detect a deleted member on refetch'
+                )
         self.subdir = subdir
         self.zenodo = zenodo
         self.registry = dict(registry)
@@ -137,6 +142,7 @@ class Fetcher:
                 f'it must be a relative path without ".." components'
             )
         self._sources: dict[str, str] = {}
+        self._archive_members: list[str] = []
 
         self.mirrors: list[str] = []
         if base_urls:
@@ -277,21 +283,39 @@ class Fetcher:
         dataset absent (a re-fetch restores it) rather than half-populated.
         """
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        if target_dir.exists():
+        if target_dir.is_dir():
             shutil.rmtree(target_dir)
+        elif target_dir.exists():  # a stray file where the dataset directory belongs
+            target_dir.unlink()
         os.replace(src_dir, target_dir)
+
+    def _archive_tree_intact(self, stamp: Path) -> bool:
+        """True when every member the stamp recorded is still present on disk.
+
+        This detects a member deleted after extraction, so the tree is
+        re-fetched rather than served incomplete. It does not re-hash contents:
+        the archive-only checksum policy records member names, not per-file
+        digests, so a truncated member is not detected here.
+        """
+        try:
+            members = json.loads(stamp.read_text()).get('members') or []
+        except (OSError, ValueError):
+            return False
+        return all((self.target_dir / m).is_file() for m in members)
 
     def _fetch_archive(self, offline: bool | None = None) -> list[Path]:
         """Download the single archive, verify it, and extract it into place.
 
         The archive itself is not kept: the version directory holds the
-        extracted tree. A current provenance stamp short-circuits re-download
-        and re-extraction, the archive analogue of the per-file checksum check.
-        Extraction is staged and the tree is moved into place atomically.
+        extracted tree. A current provenance stamp whose recorded members are
+        all still present short-circuits re-download and re-extraction; unlike
+        the per-file path it does not re-hash contents (the archive-only
+        checksum policy records member names, not per-file digests). Extraction
+        is staged and the tree is moved into place atomically.
         """
         archive_name, known_hash = next(iter(self.registry.items()))
         stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp) and self.target_dir.is_dir():
+        if self._stamp_is_current(stamp) and self._archive_tree_intact(stamp):
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()
 
@@ -315,6 +339,11 @@ class Fetcher:
             self._sources[archive_name] = used_mirror
         finally:
             shutil.rmtree(work, ignore_errors=True)
+        # Record the extracted member names so a later fetch can detect a member
+        # deleted from the tree and re-extract instead of serving it incomplete.
+        self._archive_members = [
+            p.relative_to(self.target_dir).as_posix() for p in self._extracted_files()
+        ]
         self._write_stamp()
         return self._extracted_files()
 
@@ -360,6 +389,10 @@ class Fetcher:
             'fwl_io_version': _fwl_io_version(),
             'files': dict(self.registry),
         }
+        if self.extract is not None:
+            # The extracted member names, so a later fetch can tell whether the
+            # tree is still complete without re-hashing every file.
+            record['members'] = sorted(self._archive_members)
         payload = json.dumps(record, indent=2, sort_keys=True) + '\n'
         tmp_path: Path | None = None
         try:
