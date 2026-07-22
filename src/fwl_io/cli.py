@@ -32,7 +32,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             registry_note = (
                 '' if ds.registry_path and ds.registry_path.is_file() else '  [NO REGISTRY]'
             )
-            print(f'  {ds.key:50s} {ds.subdir:45s} required_by: {consumers}{registry_note}')
+            print(f'  {ds.key:50s} required_by: {consumers}{registry_note}')
     for provider, message in sorted(errors.items()):
         print(f'[{provider}] FAILED TO LOAD: {message}', file=sys.stderr)
     return 1 if errors else 0

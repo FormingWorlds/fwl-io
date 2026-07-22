@@ -14,6 +14,7 @@ def _serve_record(root, recid, payload):
 
 
 def test_sync_command_writes_registries(http_server, tmp_path, capsys):
+    """The sync command writes the registry file the Zenodo record describes."""
     base_url, root = http_server
     _serve_record(
         root,
@@ -25,7 +26,7 @@ def test_sync_command_writes_registries(http_server, tmp_path, capsys):
         },
     )
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text('[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1234567"\n')
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1234567"\n')
     code = main(['sync', str(manifest), '--api-base', f'{base_url}api/records'])
     assert code == 0
     assert 'wrote' in capsys.readouterr().out
@@ -33,6 +34,7 @@ def test_sync_command_writes_registries(http_server, tmp_path, capsys):
 
 
 def test_sync_command_failure_is_message_not_traceback(tmp_path, capsys):
+    """A missing manifest is reported as a message, not as a stack trace."""
     code = main(['sync', str(tmp_path / 'missing_manifest.toml')])
     assert code == 1
     err = capsys.readouterr().err
@@ -42,8 +44,9 @@ def test_sync_command_failure_is_message_not_traceback(tmp_path, capsys):
 
 @pytest.mark.unit
 def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, monkeypatch):
+    """Listing shows what is installed and names what failed to load."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text('[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1"\n')
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\n')
 
     class _EP:
         def __init__(self, name, target):
@@ -64,11 +67,15 @@ def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, mon
     assert code == 1
     assert 'g.demo' in captured.out
     assert 'NO REGISTRY' in captured.out
+    # The key is the location, so the listing carries it once: a second column
+    # repeating it as a path would contradict the command reference.
+    assert 'g/demo' not in captured.out
     assert 'badmodel' in captured.err and 'FAILED TO LOAD' in captured.err
 
 
 @pytest.mark.unit
 def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
+    """Asking for a model no manifest declares is an error, not an empty success."""
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
     code = main(['fetch', 'nomodule'])
     assert code == 1
@@ -77,10 +84,9 @@ def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
 
 @pytest.mark.unit
 def test_fetch_missing_registry_is_aggregated_error(tmp_path, capsys, monkeypatch):
+    """A dataset that cannot be fetched is named, without a stack trace."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(
-        '[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["demo"]\n'
-    )
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["demo"]\n')
 
     class _EP:
         name = 'okmodel'

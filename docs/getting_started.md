@@ -30,7 +30,7 @@ from fwl_io import create_fetcher, fetch_for
 eos = create_fetcher(
     subdir='interior/eos/mgsio3_demo',
     zenodo='10.5281/zenodo.1234567',
-    registry='interior_lookup_tables.MgSiO3_demo.registry.txt',
+    registry='interior.eos.mgsio3_demo.registry.txt',
 )
 path = eos.fetch('density.dat')      # verified, cached, atomic
 paths = fetch_for('mors')            # everything a model requires

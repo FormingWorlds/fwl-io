@@ -16,7 +16,6 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
     ```toml
     [star.tracks.baraffe_2015]
-    subdir = "star/tracks/baraffe_2015"
     zenodo = "10.5281/zenodo.15729114"
     dataverse = "10.34894/XXXXXX"        # the printed mirror DOI
     ```

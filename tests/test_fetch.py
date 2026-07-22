@@ -210,6 +210,19 @@ def test_zenodo_pin_lands_in_version_directory(sample_files, tmp_path):
     assert not (tmp_path / SUBDIR / 'alpha.dat').exists()
 
 
+def test_doi_whitespace_never_reaches_a_mirror_url(sample_files, tmp_path):
+    """A DOI carrying a line break resolves to the same clean mirror and path."""
+    base_url, registry = sample_files
+    fetcher = _fetcher(
+        base_url, registry, tmp_path, zenodo=f'{ZENODO}\n', dataverse=' 10.34894/ABCDEF '
+    )
+    assert all('\n' not in mirror and ' ' not in mirror for mirror in fetcher.mirrors)
+    assert f'doi:{ZENODO}/' in fetcher.mirrors
+    # Discrimination: the version directory is the record id alone, so the
+    # whitespace cannot leak into the on-disk layout either.
+    assert fetcher.rel_dir == VERSIONED
+
+
 def test_no_zenodo_pin_keeps_bare_subdir(sample_files, tmp_path):
     """Without a Zenodo pin the legacy bare-subdir layout is preserved."""
     base_url, registry = sample_files

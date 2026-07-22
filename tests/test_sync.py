@@ -87,11 +87,7 @@ def test_sync_manifest_writes_committed_registry(http_server, tmp_path):
     base_url, root = http_server
     _serve_record(root, 1234567, VERSION_RECORD)
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(
-        '[interior_lookup_tables.demo]\n'
-        'subdir = "interior_lookup_tables/demo"\n'
-        'zenodo = "10.5281/zenodo.1234567"\n'
-    )
+    manifest.write_text('[interior_lookup_tables.demo]\nzenodo = "10.5281/zenodo.1234567"\n')
     written = sync_manifest(manifest, api_base=f'{base_url}api/records')
     assert written == [tmp_path / 'interior_lookup_tables.demo.registry.txt']
     assert load_registry(written[0]) == {'alpha.dat': 'md5:aaa111', 'beta.dat': 'md5:bbb222'}
@@ -104,8 +100,7 @@ def test_sync_manifest_partial_failure_writes_the_rest(http_server, tmp_path):
     _serve_record(root, 1234567, VERSION_RECORD)  # record 999 is NOT served -> 404
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(
-        '[g.good]\nsubdir = "g/good"\nzenodo = "10.5281/zenodo.1234567"\n'
-        '[g.bad]\nsubdir = "g/bad"\nzenodo = "10.5281/zenodo.999"\n'
+        '[g.good]\nzenodo = "10.5281/zenodo.1234567"\n[g.bad]\nzenodo = "10.5281/zenodo.999"\n'
     )
     with pytest.raises(RuntimeError, match=r'g\.bad'):
         sync_manifest(manifest, api_base=f'{base_url}api/records')
