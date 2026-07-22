@@ -95,6 +95,16 @@ def test_array_of_tables_rejected_not_silently_dropped(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
+def test_unknown_extract_kind_rejected(tmp_path):
+    """Only the archive kinds the fetcher can unpack are accepted at load time."""
+    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\nextract = "rar"\n'
+    with pytest.raises(ValueError, match='extract value'):
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: a supported kind loads and is carried onto the dataset.
+    good = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\n'
+    assert load_manifest(_write(tmp_path, good))[0].extract == 'tar'
+
+
 def test_missing_registry_gives_actionable_error(tmp_path):
     ds = load_manifest(_write(tmp_path, GOOD))[0]
     with pytest.raises(FileNotFoundError, match='fwl-io sync'):

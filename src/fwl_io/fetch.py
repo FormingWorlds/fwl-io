@@ -24,6 +24,11 @@ A dataset pinned to a Zenodo version DOI resolves into a per-version
 directory ``<subdir>/r<record-id>`` so successive deposits coexist, and
 ``fetch_all`` writes a ``.fwl-io.json`` stamp (DOI, checksums, fetch date)
 there so a completed dataset directory or shared cache is self-describing.
+
+A dataset given ``extract="tar"`` or ``"zip"`` ships as a single archive: the
+archive is downloaded and checksum-verified like any file, then extracted
+(safely, rejecting members that escape the directory) into the version
+directory, with the tree moved into place atomically. The archive is not kept.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from pathlib import Path
 
 import pooch
 
+from fwl_io.archive import ARCHIVE_KINDS, extract_archive
 from fwl_io.doi import zenodo_record_id
 from fwl_io.paths import is_offline, resolve_cache_root, resolve_data_root
 from fwl_io.registry import load_registry, validate_entry_name
@@ -95,15 +101,32 @@ class Fetcher:
         base_urls: list[str] | None = None,
         data_root: str | Path | None = None,
         progress: bool = False,
+        extract: str | None = None,
     ):
         if not registry:
             raise ValueError('empty registry: run "fwl-io sync" for this dataset first')
         for name in registry:
             validate_entry_name(name)
+        if extract is not None:
+            if extract not in ARCHIVE_KINDS:
+                raise ValueError(
+                    f'unknown extract kind {extract!r}; expected one of {ARCHIVE_KINDS}'
+                )
+            if len(registry) != 1:
+                raise ValueError(
+                    f'an archive dataset lists exactly one archive file in its registry, '
+                    f'got {len(registry)}: {sorted(registry)}'
+                )
+            if not zenodo:
+                raise ValueError(
+                    'an archive dataset requires a Zenodo version DOI: extraction needs a '
+                    'version directory to stamp and to detect a deleted member on refetch'
+                )
         self.subdir = subdir
         self.zenodo = zenodo
         self.registry = dict(registry)
         self.progress = progress
+        self.extract = extract
         # A dataset pinned to a Zenodo version DOI resolves into a per-version
         # directory r<record-id> below its subdir, so an updated deposit lands
         # beside its predecessor instead of overwriting it. Sources without a
@@ -119,6 +142,7 @@ class Fetcher:
                 f'it must be a relative path without ".." components'
             )
         self._sources: dict[str, str] = {}
+        self._archive_members: list[str] = []
 
         self.mirrors: list[str] = []
         if base_urls:
@@ -191,36 +215,41 @@ class Fetcher:
         self._sources[fname] = f'cache:{cache_root}'
         return target
 
+    def _retrieve_from_mirrors(
+        self, fname: str, known_hash: str, into_dir: Path
+    ) -> tuple[str, str]:
+        """Download and checksum-verify ``fname`` into ``into_dir``.
+
+        Tries each mirror in turn (Zenodo first, then Dataverse); a network or
+        checksum failure moves to the next. Returns ``(local_path, mirror)`` on
+        success and raises :class:`DownloadError` if no mirror serves the file.
+        """
+        errors: list[str] = []
+        for mirror in self.mirrors:
+            try:
+                got = pooch.retrieve(
+                    url=f'{mirror}{fname}',
+                    known_hash=known_hash,
+                    fname=fname.replace('/', '_'),
+                    path=into_dir,
+                    progressbar=self.progress,
+                )
+            except Exception as exc:  # noqa: BLE001 -- try the next mirror on any failure
+                errors.append(f'{mirror}: {exc}')
+                log.warning('mirror failed for %s: %s', fname, exc)
+                continue
+            return got, mirror
+        raise DownloadError(f'could not obtain {fname!r} from any mirror:\n' + '\n'.join(errors))
+
     def _download(self, fname: str, known_hash: str, target: Path) -> Path:
         staging = self._staging_dir()
         tmp_dir = Path(tempfile.mkdtemp(dir=staging))
         try:
-            errors: list[str] = []
-            got: str | None = None
-            used_mirror: str | None = None
-            for mirror in self.mirrors:
-                try:
-                    got = pooch.retrieve(
-                        url=f'{mirror}{fname}',
-                        known_hash=known_hash,
-                        fname=fname.replace('/', '_'),
-                        path=tmp_dir,
-                        progressbar=self.progress,
-                    )
-                except Exception as exc:  # noqa: BLE001 -- try the next mirror on any failure
-                    errors.append(f'{mirror}: {exc}')
-                    log.warning('mirror failed for %s: %s', fname, exc)
-                    continue
-                used_mirror = mirror
-                break
-            if got is None:
-                raise DownloadError(
-                    f'could not obtain {fname!r} from any mirror:\n' + '\n'.join(errors)
-                )
-            # Placement is outside the mirror loop: a local failure (read-only
+            got, used_mirror = self._retrieve_from_mirrors(fname, known_hash, tmp_dir)
+            # Placement is outside the retrieval: a local failure (read-only
             # tree, full disk) raises its own OSError, never a DownloadError.
             self._place(got, target)
-            self._sources[fname] = used_mirror or self.mirrors[0]
+            self._sources[fname] = used_mirror
             return target
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -231,11 +260,167 @@ class Fetcher:
         The stamp is written here (the whole-dataset operation), not by an
         individual :meth:`fetch`, so a version directory populated one file at
         a time is not stamped until a ``fetch_all`` completes it. A stamp-write
-        failure never fails the fetch: the data is already in place.
+        failure never fails the fetch: the data is already in place. An archive
+        dataset is downloaded, verified, and extracted as one operation.
         """
+        if self.extract is not None:
+            return self._fetch_archive(offline=offline)
         paths = [self.fetch(name, offline=offline) for name in sorted(self.registry)]
         self._write_stamp()
         return paths
+
+    def _extracted_files(self) -> list[Path]:
+        """Return the extracted data files under the version directory.
+
+        Only the stamp at the top of the directory is excluded. A deposit is
+        free to ship a file of that name further down, and it belongs to the
+        dataset like any other member.
+        """
+        own_stamp = self.target_dir / _STAMP_FILENAME
+        return sorted(p for p in self.target_dir.rglob('*') if p.is_file() and p != own_stamp)
+
+    def _place_tree(self, src_dir: Path, target_dir: Path) -> None:
+        """Move a fully extracted tree into its final location atomically.
+
+        Any existing tree is removed first; because the staged tree is complete
+        before this runs, a crash between the removal and the rename leaves the
+        dataset absent (a re-fetch restores it) rather than half-populated.
+        """
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        if target_dir.is_dir():
+            shutil.rmtree(target_dir)
+        elif target_dir.exists():  # a stray file where the dataset directory belongs
+            target_dir.unlink()
+        os.replace(src_dir, target_dir)
+
+    def _archive_tree_intact(self, stamp: Path) -> bool:
+        """True when every member the stamp recorded is still present on disk.
+
+        This detects a member deleted after extraction, so the tree is
+        re-fetched rather than served incomplete. It does not re-hash contents:
+        the archive-only checksum policy records member names, not per-file
+        digests, so a truncated member is not detected here.
+        """
+        try:
+            record = json.loads(stamp.read_text())
+        except (OSError, ValueError):
+            return False
+        if record.get('extract') != self.extract:
+            # The stamp describes a different fetch of this deposit, a plain
+            # one or a different archive kind, so its tree is not this dataset.
+            return False
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            # An absent or empty member list describes no tree at all, and must
+            # never read as a complete one.
+            return False
+        return all((self.target_dir / m).is_file() for m in members)
+
+    def _fetch_archive(self, offline: bool | None = None) -> list[Path]:
+        """Download the single archive, verify it, and extract it into place.
+
+        The archive itself is not kept: the version directory holds the
+        extracted tree. A current provenance stamp whose recorded members are
+        all still present short-circuits re-download and re-extraction; unlike
+        the per-file path it does not re-hash contents (the archive-only
+        checksum policy records member names, not per-file digests). Extraction
+        is staged and the tree is moved into place atomically.
+        """
+        archive_name, known_hash = next(iter(self.registry.items()))
+        stamp = self.target_dir / _STAMP_FILENAME
+        if self._stamp_is_current(stamp) and self._archive_tree_intact(stamp):
+            self._sources.setdefault(archive_name, 'local')
+            return self._extracted_files()
+
+        cached_archive = self._cached_archive(archive_name, known_hash)
+        if cached_archive is None and self._copy_cached_tree():
+            self._sources[archive_name] = f'cache:{resolve_cache_root()}'
+            self._archive_members = [
+                p.relative_to(self.target_dir).as_posix() for p in self._extracted_files()
+            ]
+            self._write_stamp()
+            return self._extracted_files()
+
+        if cached_archive is None and (is_offline() if offline is None else offline):
+            raise OfflineDataError(
+                f'{self.target_dir} is missing or incomplete and offline mode is active; '
+                f'populate the data tree at {self.data_root} or unset FWL_IO_OFFLINE'
+            )
+
+        staging = self._staging_dir()
+        work = Path(tempfile.mkdtemp(dir=staging))
+        try:
+            if cached_archive is not None:
+                got, used_mirror = str(cached_archive), f'cache:{resolve_cache_root()}'
+            else:
+                got, used_mirror = self._retrieve_from_mirrors(archive_name, known_hash, work)
+            extract_dir = work / 'extracted'
+            extract_dir.mkdir()
+            extract_archive(Path(got), extract_dir, self.extract)
+            # Placement is outside the retrieval/extraction: a local failure
+            # (read-only tree, full disk) raises its own OSError, never a
+            # DownloadError or ArchiveError.
+            self._place_tree(extract_dir, self.target_dir)
+            self._sources[archive_name] = used_mirror
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        # Record the extracted member names so a later fetch can detect a member
+        # deleted from the tree and re-extract instead of serving it incomplete.
+        self._archive_members = [
+            p.relative_to(self.target_dir).as_posix() for p in self._extracted_files()
+        ]
+        self._write_stamp()
+        return self._extracted_files()
+
+    def _cached_archive(self, fname: str, known_hash: str) -> Path | None:
+        """Return the archive in the shared cache when its checksum matches."""
+        cache_root = resolve_cache_root()
+        if cache_root is None:
+            return None
+        cache_file = cache_root / self.rel_dir / fname
+        if not cache_file.is_file() or not _hash_matches(cache_file, known_hash):
+            return None
+        log.info('extracting %s from shared cache %s', fname, cache_root)
+        return cache_file
+
+    def _copy_cached_tree(self) -> bool:
+        """Copy an already-extracted dataset out of the shared cache.
+
+        A cache populated by fwl-io holds the extracted tree rather than the
+        archive, since the archive is dropped after extraction. The cached
+        stamp has to describe this deposit and the same archive kind, and
+        every member it names has to be present, which is the same standard
+        the local tree is held to.
+        """
+        cache_root = resolve_cache_root()
+        if cache_root is None:
+            return False
+        cached_dir = cache_root / self.rel_dir
+        cached_stamp = cached_dir / _STAMP_FILENAME
+        try:
+            record = json.loads(cached_stamp.read_text())
+        except (OSError, ValueError):
+            return False
+        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
+            return False
+        if record.get('extract') != self.extract:
+            return False
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            return False
+        if not all((cached_dir / m).is_file() for m in members):
+            return False
+        staging = self._staging_dir()
+        work = Path(tempfile.mkdtemp(dir=staging))
+        try:
+            copied = work / 'tree'
+            shutil.copytree(cached_dir, copied)
+            (copied / _STAMP_FILENAME).unlink(missing_ok=True)
+            self._place_tree(copied, self.target_dir)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        log.info('copied dataset from shared cache %s', cache_root)
+        return True
 
     def _stamp_is_current(self, stamp: Path) -> bool:
         """True when a valid stamp for this exact record id already exists.
@@ -274,10 +459,15 @@ class Fetcher:
             'subdir': self.subdir,
             'zenodo': self.zenodo,
             'record_id': self.record_id,
+            'extract': self.extract,
             'fetched': datetime.now(UTC).isoformat(timespec='seconds'),
             'fwl_io_version': _fwl_io_version(),
             'files': dict(self.registry),
         }
+        if self.extract is not None:
+            # The extracted member names, so a later fetch can tell whether the
+            # tree is still complete without re-hashing every file.
+            record['members'] = sorted(self._archive_members)
         payload = json.dumps(record, indent=2, sort_keys=True) + '\n'
         tmp_path: Path | None = None
         try:
@@ -322,6 +512,7 @@ def create_fetcher(
     base_urls: list[str] | None = None,
     data_root: str | Path | None = None,
     progress: bool = False,
+    extract: str | None = None,
 ) -> Fetcher:
     """Create a :class:`Fetcher` for one dataset.
 
@@ -342,6 +533,10 @@ def create_fetcher(
         Override for the data root; defaults to the resolved FWL_DATA tree.
     progress : bool
         Show a download progress bar (requires tqdm; useful for large files).
+    extract : str | None
+        When set (``"tar"`` or ``"zip"``), the single registry entry is a
+        downloadable archive; it is verified, then its members are extracted
+        into the dataset directory and the archive itself is discarded.
     """
     if isinstance(registry, (str, Path)):
         registry = load_registry(registry)
@@ -353,4 +548,5 @@ def create_fetcher(
         base_urls=base_urls,
         data_root=data_root,
         progress=progress,
+        extract=extract,
     )

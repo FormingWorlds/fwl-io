@@ -11,6 +11,7 @@ subdir = "interior/eos/wolf_bower_2018"                  # location below FWL_DA
 zenodo = "10.5281/zenodo.1234567"                        # required, version DOI
 dataverse = "10.34894/ABCDEF"                            # optional mirror DOI
 required_by = ["aragog", "zalmoxis", "spider"]           # models that need it
+extract = "tar"                                          # optional, unpack a single archive
 ```
 
 Validation at load time:
@@ -18,7 +19,12 @@ Validation at load time:
 - `subdir` must be a relative path with no `..` components and no backslashes; it can never escape the data root.
 - `zenodo` is required and must have the form `10.5281/zenodo.<record-id>`.
 - `dataverse`, when present, must be a DOI.
+- `extract`, when present, must be `"tar"` or `"zip"`.
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
+
+## Archive datasets
+
+A deposit packaged as a single archive sets `extract = "tar"` or `"zip"`. Its registry lists the one archive file and its checksum; the fetcher downloads and verifies the archive, then extracts the members into the dataset directory and discards the archive, so consumers see the extracted tree rather than a tarball. Extraction is staged and the tree is moved into place atomically, so an interrupted fetch never leaves a half-populated dataset, and any member that escapes the directory (an absolute path or a `..` component) or is not a plain file or directory (a symlink, hardlink, or device node) is rejected before anything is written.
 
 ## Registries
 
