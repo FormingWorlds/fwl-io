@@ -78,6 +78,17 @@ def test_subdir_at_the_manifest_root_rejected(tmp_path):
     assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
 
 
+def test_a_table_named_subdir_is_an_ordinary_directory_level(tmp_path):
+    """The rejection is about a declared location, not about the word itself."""
+    at_root = load_manifest(_write(tmp_path, '[subdir.demo]\nzenodo = "10.5281/zenodo.1"\n'))
+    assert at_root[0].subdir == 'subdir/demo'
+    nested = load_manifest(_write(tmp_path, '[g.d]\n[g.d.subdir]\nzenodo = "10.5281/zenodo.1"\n'))
+    assert nested[0].subdir == 'g/d/subdir'
+    # Discrimination: the same word as a field, not a table, is still refused.
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
+        load_manifest(_write(tmp_path, '[g.d]\nsubdir = "x"\nzenodo = "10.5281/zenodo.1"\n'))
+
+
 def test_subdir_on_a_grouping_table_rejected(tmp_path):
     """A location lifted up to a group level is refused, not quietly ignored."""
     bad = '[star]\nsubdir = "somewhere/else"\n[star.tracks_x]\nzenodo = "10.5281/zenodo.1"\n'
@@ -204,7 +215,7 @@ def test_non_string_zenodo_rejected(tmp_path):
 
 
 def test_non_string_name_rejected(tmp_path):
-    """A dataset name is display text, and reaches logs and the listing."""
+    """A dataset name is author-supplied display text, checked when it is read."""
     bad = '[g.d]\nname = 42\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='"name" must be text'):
         load_manifest(_write(tmp_path, bad))

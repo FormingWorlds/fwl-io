@@ -2,7 +2,7 @@
 
 ## Manifest schema
 
-A manifest is a TOML file with one table per dataset. A table is recognized as a dataset by the presence of the `zenodo` key; tables without `zenodo` are grouping levels.
+A manifest is a TOML file with one table per dataset. A table is recognized as a dataset by the presence of the `zenodo` key. A table without `zenodo` is a grouping level when it contains sub-tables, and is rejected otherwise.
 
 ```toml
 [interior.eos.wolf_bower_2018]
@@ -23,7 +23,7 @@ Validation at load time:
 - `required_by`, when present, must be a list of model names.
 - `extract`, when present, must be `"tar"` or `"zip"`.
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
-- A `subdir` field is rejected on any table, dataset or grouping level: the location comes from the key.
+- A `subdir` field is rejected on any table, dataset or grouping level, and at the manifest root: the location comes from the key. A table *named* `subdir` is an ordinary directory level.
 - Within one manifest, two keys that differ only in case are rejected: they would share one directory and one registry file on a case-insensitive filesystem. Two installed packages declaring keys that collide is a separate check, tracked in [#18](https://github.com/FormingWorlds/fwl-io/issues/18).
 
 ## Archive datasets

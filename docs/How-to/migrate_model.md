@@ -25,7 +25,7 @@ zenodo = "10.5281/zenodo.1234567"
 required_by = ["mors"]
 ```
 
-The dotted key is the dataset location below `FWL_DATA`, so this table places the tracks in `star/tracks/spada_2013`.
+The dotted key is the dataset location below `FWL_DATA`, so this table places the tracks in `star/tracks/spada_2013/r<record-id>`, the version directory named for its Zenodo record.
 
 ## 3. Generate and commit the registries
 
