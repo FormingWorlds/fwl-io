@@ -1,8 +1,12 @@
+import io
 import json
+import pathlib
+import tarfile
 
 import pooch
 import pytest
 
+from fwl_io.fetch import create_fetcher
 from fwl_io.manifest import (
     Dataset,
     discover_manifests,
@@ -47,10 +51,11 @@ def test_subdir_is_derived_from_the_dotted_key(tmp_path):
     manifest = '[star.tracks.baraffe_2015]\nzenodo = "10.5281/zenodo.15729114"\n'
     ds = load_manifest(_write(tmp_path, manifest))[0]
     assert ds.subdir == 'star/tracks/baraffe_2015'
-    # Discrimination: a grouping level dropped, or only the leaf kept, would put
-    # the data in a different directory, so both wrong derivations are excluded.
-    assert ds.subdir != 'star/baraffe_2015'
-    assert ds.subdir != 'baraffe_2015'
+    # A key of a different depth follows the same rule, so the derivation tracks
+    # the key rather than assuming a fixed group/dataset nesting.
+    shallow = load_manifest(_write(tmp_path, '[star.demo]\nzenodo = "10.5281/zenodo.1"\n'))[0]
+    assert shallow.subdir == 'star/demo'
+    assert shallow.registry_path.name == 'star.demo.registry.txt'
 
 
 def test_explicit_subdir_rejected(tmp_path):
@@ -58,6 +63,19 @@ def test_explicit_subdir_rejected(tmp_path):
     bad = '[g.d]\nsubdir = "somewhere/else"\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
         load_manifest(_write(tmp_path, bad))
+    # The same table without the field loads, so the rejection is the field's doing.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/d'
+
+
+def test_subdir_at_the_manifest_root_rejected(tmp_path):
+    """The field is refused outside any table too, where it would be dropped."""
+    bad = 'subdir = "somewhere/else"\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='the manifest root'):
+        load_manifest(_write(tmp_path, bad))
+    # A root-level scalar that is not "subdir" is still fine.
+    good = 'schema_version = 1\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
 
 
 def test_subdir_on_a_grouping_table_rejected(tmp_path):
@@ -83,19 +101,37 @@ def test_keys_differing_only_in_case_rejected(tmp_path):
 def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
     """The field is refused outright, so no manifest can reintroduce the drift."""
     bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field') as excinfo:
         load_manifest(_write(tmp_path, bad))
+    # The message names the derived location, which is what the author should
+    # compare against before deleting the line.
+    assert "'g/d'" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
     'segment',
-    ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve', 'demo\\n', '\\ttab', 'a+b'],
+    ['a/b', 'a\\\\b', 'a.b', '', ' ', 'a b', '-lead', 'naïve', 'demo\\n', '\\ttab', 'a+b'],
 )
 def test_unsafe_key_segment_rejected(tmp_path, segment):
     """A key segment that is not a plain directory name never reaches the data root."""
     bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='table segment'):
+    with pytest.raises(ValueError, match='not a valid directory name'):
         load_manifest(_write(tmp_path, bad))
+    # The nearest safe spelling of each rejected segment loads, so the rule bites
+    # on the character and not on the surrounding table.
+    good = '[g.a_b]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/a_b'
+
+
+@pytest.mark.parametrize('segment', ['.', '..'])
+def test_relative_path_segment_named_as_such(tmp_path, segment):
+    """A path component as a key gets its own diagnosis, not the character rule."""
+    bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='relative-path component') as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: the generic character message would leave the reader
+    # hunting for an illegal character in a segment made only of dots.
+    assert 'not a valid directory name' not in str(excinfo.value)
 
 
 def test_key_segment_rejects_a_trailing_control_character(tmp_path):
@@ -121,28 +157,40 @@ def test_quoted_dotted_segment_does_not_silently_deepen_the_path(tmp_path):
 
 
 def test_dataset_without_zenodo_rejected(tmp_path):
+    """A mirror alone does not make a dataset: the pin is what identifies one."""
     bad = '[g.d]\ndataverse = "10.34894/XYZ"\n'
-    with pytest.raises(ValueError, match='Zenodo version DOI is required'):
+    with pytest.raises(ValueError, match='has no "zenodo" key') as excinfo:
         load_manifest(_write(tmp_path, bad))
+    # Discrimination: the table is not treated as a dataset with a bad pin, which
+    # is what a discriminator keyed on "dataverse" would report instead.
+    assert 'is not a Zenodo DOI' not in str(excinfo.value)
+    # Adding the pin turns the same table into a dataset.
+    good = '[g.d]\ndataverse = "10.34894/XYZ"\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].dataverse == '10.34894/XYZ'
 
 
-def test_empty_zenodo_value_rejected_as_a_missing_pin(tmp_path):
-    """An empty pin is a missing pin, and says so rather than naming a bad DOI."""
+def test_empty_zenodo_value_rejected_as_an_empty_pin(tmp_path):
+    """An empty pin says the value is empty rather than naming a bad DOI."""
     bad = '[g.d]\nzenodo = ""\n'
-    with pytest.raises(ValueError, match='Zenodo version DOI is required') as excinfo:
+    with pytest.raises(ValueError, match='the "zenodo" value is empty') as excinfo:
         load_manifest(_write(tmp_path, bad))
-    # Discrimination: the empty value takes the missing-pin branch, not the
-    # malformed-DOI branch, so the message tells the author to add a pin.
-    assert 'not a Zenodo DOI' not in str(excinfo.value)
+    # Discrimination: the empty value takes neither the malformed-DOI branch nor
+    # the missing-key branch, so the message points at the value itself.
+    assert 'is not a Zenodo DOI' not in str(excinfo.value)
+    assert 'has no "zenodo" key' not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
     'value', ['https://zenodo.org/records/1', '10.1234/other.repo', '10.5281/zenodo.abc']
 )
 def test_non_zenodo_doi_rejected(tmp_path, value):
+    """Only a Zenodo version DOI pins a deposit, so nothing else is accepted."""
     bad = f'[g.d]\nzenodo = "{value}"\n'
     with pytest.raises(ValueError, match='not a Zenodo DOI'):
         load_manifest(_write(tmp_path, bad))
+    # The well-formed pin of the same shape loads and keeps its record id.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.15729114"\n'
+    assert load_manifest(_write(tmp_path, good))[0].zenodo.endswith('15729114')
 
 
 def test_non_string_zenodo_rejected(tmp_path):
@@ -150,14 +198,32 @@ def test_non_string_zenodo_rejected(tmp_path):
     bad = '[g.d]\nzenodo = 15729114\n'
     with pytest.raises(ValueError, match='not a Zenodo DOI'):
         load_manifest(_write(tmp_path, bad))
+    # Quoting the same digits as a full DOI is the accepted spelling.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.15729114"\n'
+    assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
 
 
-@pytest.mark.parametrize('value', ['"not-a-doi"', 'false', '0', '""'])
+def test_non_string_name_rejected(tmp_path):
+    """A dataset name is display text, and reaches logs and the listing."""
+    bad = '[g.d]\nname = 42\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"name" must be text'):
+        load_manifest(_write(tmp_path, bad))
+    # An absent name falls back to the key rather than to an empty string.
+    assert load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\n'))[0].name == 'g.d'
+
+
+@pytest.mark.parametrize(
+    'value',
+    ['"not-a-doi"', 'false', '0', '""', '"10.34894/AB junk"', r'"10.34894/AB\n"'],
+)
 def test_bad_dataverse_doi_rejected(tmp_path, value):
-    """A mirror DOI is checked by type first, so a falsy value cannot slip past."""
+    """A mirror DOI is checked by type and in full, whitespace and all."""
     bad = f'[g.d]\nzenodo = "10.5281/zenodo.1"\ndataverse = {value}\n'
     with pytest.raises(ValueError, match='is not a DOI'):
         load_manifest(_write(tmp_path, bad))
+    # The clean form of the same DOI loads and reaches the dataset unchanged.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\ndataverse = "10.34894/ABCDEF"\n'
+    assert load_manifest(_write(tmp_path, good))[0].dataverse == '10.34894/ABCDEF'
 
 
 def test_dataset_without_a_mirror_still_loads(tmp_path):
@@ -172,6 +238,9 @@ def test_trailing_newline_in_a_doi_rejected(tmp_path):
     bad = '[g.d]\nzenodo = "10.5281/zenodo.1234567\\n"\n'
     with pytest.raises(ValueError, match='not a Zenodo DOI'):
         load_manifest(_write(tmp_path, bad))
+    # The same DOI without the break is accepted, so the rule is the whitespace.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1234567"\n'
+    assert load_manifest(_write(tmp_path, good))[0].zenodo == '10.5281/zenodo.1234567'
 
 
 def test_dataset_rejects_positional_construction():
@@ -183,23 +252,35 @@ def test_dataset_rejects_positional_construction():
     assert ds.subdir == 'g/d'
 
 
-def test_required_by_string_rejected(tmp_path):
-    """A bare string would split into characters and match no model at all."""
-    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nrequired_by = "mors"\n'
+@pytest.mark.parametrize('value', ['"mors"', '[1, 2]', '["ok", 7]', '42'])
+def test_bad_required_by_rejected(tmp_path, value):
+    """Model names are text in a list: anything else matches no model at load."""
+    bad = f'[g.d]\nzenodo = "10.5281/zenodo.1"\nrequired_by = {value}\n'
     with pytest.raises(ValueError, match='must be a list of model names'):
         load_manifest(_write(tmp_path, bad))
+    # A well-formed list survives, so the guard is about the shape of the value.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n'
+    assert load_manifest(_write(tmp_path, good))[0].required_by == ('mors',)
 
 
 def test_dataset_with_subtable_rejected_not_silently_dropped(tmp_path):
+    """A pinned table is a leaf, so nesting below it is a structural mistake."""
     bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\n[g.d.meta]\nauthor = "someone"\n'
     with pytest.raises(ValueError, match='must not contain sub-tables'):
         load_manifest(_write(tmp_path, bad))
+    # The same nesting without a pin on the parent is a grouping level.
+    good = '[g.d]\n[g.d.meta]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/d/meta'
 
 
 def test_array_of_tables_rejected_not_silently_dropped(tmp_path):
+    """An array of tables would hide several datasets behind one key."""
     bad = '[[g.d]]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='arrays of tables'):
         load_manifest(_write(tmp_path, bad))
+    # The single-table spelling of the same intent is what loads.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
 
 
 def test_top_level_array_of_tables_rejected(tmp_path):
@@ -334,6 +415,58 @@ def test_fetch_for_reports_a_dataset_failure_and_an_unreadable_manifest_together
     message = str(excinfo.value)
     assert 'no registry file' in message
     assert 'unreadable manifest' in message
+
+
+def test_fetch_for_resolves_an_archive_dataset_at_the_key_derived_path(
+    http_server, tmp_path, monkeypatch
+):
+    """An extract= dataset lands under the path its manifest key derives."""
+    base_url, served = http_server
+    archive = pathlib.Path(served) / 'tracks.tar'
+    with tarfile.open(archive, 'w') as tf:
+        for member, payload in (('m0p1.txt', b'0.1\n'), ('nested/m1p0.txt', b'1.0\n')):
+            info = tarfile.TarInfo(member)
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+    checksum = 'sha256:' + pooch.file_hash(str(archive), alg='sha256')
+
+    manifest = _write(
+        tmp_path,
+        '[star.tracks.demo]\nzenodo = "10.5281/zenodo.1234567"\n'
+        'extract = "tar"\nrequired_by = ["demo"]\n',
+    )
+    (tmp_path / 'star.tracks.demo.registry.txt').write_text(f'tracks.tar {checksum}\n')
+    ds = load_manifest(manifest)[0]
+    assert ds.extract == 'tar'
+
+    # Extract once through the low-level API at the derived location, then let
+    # fetch_for resolve the same dataset offline: no network, and the paths it
+    # returns are the proof that the key alone decided where the tree lives.
+    data_root = tmp_path / 'data'
+    create_fetcher(
+        subdir=ds.subdir,
+        registry=ds.registry(),
+        base_urls=[base_url],
+        zenodo=ds.zenodo,
+        data_root=data_root,
+        extract='tar',
+    ).fetch_all()
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_FakeEntryPoint('demo-model', lambda: manifest)],
+    )
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+
+    fetched = fetch_for('demo', data_root=data_root)
+
+    version_dir = data_root / 'star/tracks/demo/r1234567'
+    assert sorted(p.relative_to(version_dir).as_posix() for p in fetched['star.tracks.demo']) == [
+        'm0p1.txt',
+        'nested/m1p0.txt',
+    ]
+    # The archive itself is not kept, and no unversioned copy is left behind.
+    assert not (version_dir / 'tracks.tar').exists()
+    assert not (data_root / 'star/tracks/demo/tracks.tar').exists()
 
 
 def _seed_versioned_dataset(root, subdir, recid, files, required_by):

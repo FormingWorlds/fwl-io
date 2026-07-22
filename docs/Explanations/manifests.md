@@ -24,7 +24,7 @@ Validation at load time:
 - `extract`, when present, must be `"tar"` or `"zip"`.
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
 - A `subdir` field is rejected on any table, dataset or grouping level: the location comes from the key.
-- Two keys that differ only in case are rejected: they would share one directory and one registry file on a case-insensitive filesystem.
+- Within one manifest, two keys that differ only in case are rejected: they would share one directory and one registry file on a case-insensitive filesystem. Two installed packages declaring keys that collide is a separate check, tracked in [#18](https://github.com/FormingWorlds/fwl-io/issues/18).
 
 ## Archive datasets
 

@@ -64,6 +64,9 @@ def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, mon
     assert code == 1
     assert 'g.demo' in captured.out
     assert 'NO REGISTRY' in captured.out
+    # The key is the location, so the listing carries it once: a second column
+    # repeating it as a path would contradict the command reference.
+    assert 'g/demo' not in captured.out
     assert 'badmodel' in captured.err and 'FAILED TO LOAD' in captured.err
 
 

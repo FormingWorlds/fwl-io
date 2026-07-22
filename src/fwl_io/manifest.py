@@ -110,14 +110,19 @@ def _validate_key_segment(segment: str, parent: str) -> None:
         )
 
 
-def _reject_declared_subdir(dotted: str, table: dict) -> None:
+def _reject_declared_subdir(where: str, table: dict, derived: str | None = None) -> None:
     """Refuse a location declared alongside the key that already carries it."""
-    if 'subdir' in table:
-        raise ValueError(
-            f'table {dotted!r}: "subdir" is not a manifest field; the location is derived '
-            f'from the table key, here {dotted.replace(".", "/")!r} '
-            f'(create_fetcher() still takes a subdir argument, manifests do not)'
-        )
+    if 'subdir' not in table:
+        return
+    location = (
+        f'the location is derived from the table key, here {derived!r}'
+        if derived
+        else 'a dataset location is derived from its own table key'
+    )
+    raise ValueError(
+        f'{where}: "subdir" is not a manifest field; {location} '
+        f'(create_fetcher() still takes a subdir argument, manifests do not)'
+    )
 
 
 def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
@@ -137,7 +142,7 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
             continue
         dotted = f'{prefix}{name}'
         _validate_key_segment(name, prefix.rstrip('.'))
-        _reject_declared_subdir(dotted, value)
+        _reject_declared_subdir(f'table {dotted!r}', value, dotted.replace('.', '/'))
         for child, child_value in value.items():
             if isinstance(child_value, list) and any(isinstance(i, dict) for i in child_value):
                 raise ValueError(
@@ -152,7 +157,8 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
             leaves.extend(_walk_tables(value, prefix=f'{dotted}.'))
         else:
             raise ValueError(
-                f'dataset {dotted!r}: a Zenodo version DOI is required '
+                f'table {dotted!r} has no "zenodo" key, so it is neither a dataset nor a '
+                f'grouping level; a Zenodo version DOI is required for every dataset '
                 f'("dataverse" is a download mirror, not a primary source)'
             )
     return leaves
@@ -164,6 +170,7 @@ def load_manifest(path: str | Path) -> list[Dataset]:
     with path.open('rb') as fh:
         tree = tomllib.load(fh)
 
+    _reject_declared_subdir('the manifest root', tree)
     datasets: list[Dataset] = []
     folded: dict[str, str] = {}
     for key, table in _walk_tables(tree):
@@ -175,10 +182,10 @@ def load_manifest(path: str | Path) -> list[Dataset]:
             )
         zenodo = table.get('zenodo')
         dataverse = table.get('dataverse')
-        if zenodo is None or zenodo == '':
+        if zenodo == '':
             raise ValueError(
-                f'dataset {key!r}: a Zenodo version DOI is required '
-                f'("dataverse" is a download mirror, not a primary source)'
+                f'dataset {key!r}: the "zenodo" value is empty; a Zenodo version DOI is '
+                f'required ("dataverse" is a download mirror, not a primary source)'
             )
         if not isinstance(zenodo, str) or not ZENODO_DOI_PATTERN.fullmatch(zenodo):
             raise ValueError(
@@ -189,6 +196,9 @@ def load_manifest(path: str | Path) -> list[Dataset]:
             not isinstance(dataverse, str) or not _GENERIC_DOI_PATTERN.fullmatch(dataverse)
         ):
             raise ValueError(f'dataset {key!r}: dataverse value {dataverse!r} is not a DOI')
+        name = table.get('name', key)
+        if not isinstance(name, str):
+            raise ValueError(f'dataset {key!r}: "name" must be text, got {name!r}')
         required_by = table.get('required_by', ())
         if not isinstance(required_by, list | tuple) or not all(
             isinstance(model, str) for model in required_by
@@ -204,7 +214,7 @@ def load_manifest(path: str | Path) -> list[Dataset]:
         datasets.append(
             Dataset(
                 key=key,
-                name=table.get('name', key),
+                name=name,
                 zenodo=zenodo,
                 dataverse=dataverse,
                 required_by=tuple(required_by),
