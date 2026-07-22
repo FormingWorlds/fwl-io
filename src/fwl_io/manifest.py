@@ -17,9 +17,10 @@ Manifest schema, one table per dataset, identified by its ``zenodo`` key::
 
 The dotted table key is the dataset location below the data root: the table
 above resolves into ``interior/eos/wolf_bower_2018``. Key segments are
-restricted to letters, digits, ``_``, ``+`` and ``-``, each starting with a
-letter, digit or ``_``, so a key can neither escape the data root nor split
-into an unintended path depth.
+restricted to letters, digits, ``_`` and ``-``, each starting with a letter,
+digit or ``_``, so a key can neither escape the data root nor split into an
+unintended path depth. A dataset resolves into ``<key-as-path>/r<record-id>``,
+the version directory named for its Zenodo record.
 
 A deposit packaged as one archive declares ``extract = "tar"`` or ``"zip"``; its
 registry lists the archive, and the fetcher downloads and checksum-verifies it,
@@ -64,7 +65,7 @@ __all__ = [
 ]
 
 _GENERIC_DOI_PATTERN = re.compile(r'(doi:)?10\.\S+')
-_KEY_SEGMENT_PATTERN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_+-]*')
+_KEY_SEGMENT_PATTERN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]*')
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -93,15 +94,29 @@ class Dataset:
         return load_registry(self.registry_path)
 
 
-def _validate_key_segment(segment: str, dotted: str) -> None:
+def _validate_key_segment(segment: str, parent: str) -> None:
     """Reject a table name that cannot serve as one directory level."""
+    where = f'under {parent!r}' if parent else 'at the top level of the manifest'
     if segment in ('.', '..'):
-        raise ValueError(f'table key {dotted!r}: segment {segment!r} would escape the data root')
+        raise ValueError(
+            f'table segment {segment!r} {where} is a relative-path component, not a '
+            f'directory name; the dataset location is derived from the key'
+        )
     if not _KEY_SEGMENT_PATTERN.fullmatch(segment):
         raise ValueError(
-            f'table key {dotted!r}: segment {segment!r} is not a valid directory name '
-            f'(letters, digits, "_", "+" and "-", starting with a letter, digit or "_"); '
+            f'table segment {segment!r} {where} is not a valid directory name '
+            f'(letters, digits, "_" and "-", starting with a letter, digit or "_"); '
             f'the dataset location is derived from the key'
+        )
+
+
+def _reject_declared_subdir(dotted: str, table: dict) -> None:
+    """Refuse a location declared alongside the key that already carries it."""
+    if 'subdir' in table:
+        raise ValueError(
+            f'table {dotted!r}: "subdir" is not a manifest field; the location is derived '
+            f'from the table key, here {dotted.replace(".", "/")!r} '
+            f'(create_fetcher() still takes a subdir argument, manifests do not)'
         )
 
 
@@ -121,7 +136,8 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
         if not isinstance(value, dict):
             continue
         dotted = f'{prefix}{name}'
-        _validate_key_segment(name, dotted)
+        _validate_key_segment(name, prefix.rstrip('.'))
+        _reject_declared_subdir(dotted, value)
         for child, child_value in value.items():
             if isinstance(child_value, list) and any(isinstance(i, dict) for i in child_value):
                 raise ValueError(
@@ -149,11 +165,13 @@ def load_manifest(path: str | Path) -> list[Dataset]:
         tree = tomllib.load(fh)
 
     datasets: list[Dataset] = []
+    folded: dict[str, str] = {}
     for key, table in _walk_tables(tree):
-        if 'subdir' in table:
+        clash = folded.setdefault(key.lower(), key)
+        if clash != key:
             raise ValueError(
-                f'dataset {key!r}: "subdir" is not a manifest field; the dataset location '
-                f'is derived from the table key, here {key.replace(".", "/")!r}'
+                f'datasets {clash!r} and {key!r} differ only in case; they would share one '
+                f'directory and one registry file on a case-insensitive filesystem'
             )
         zenodo = table.get('zenodo')
         dataverse = table.get('dataverse')

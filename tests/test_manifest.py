@@ -60,6 +60,26 @@ def test_explicit_subdir_rejected(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
+def test_subdir_on_a_grouping_table_rejected(tmp_path):
+    """A location lifted up to a group level is refused, not quietly ignored."""
+    bad = '[star]\nsubdir = "somewhere/else"\n[star.tracks_x]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: without the stray field the same shape loads at its key path.
+    good = '[star]\n[star.tracks_x]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'star/tracks_x'
+
+
+def test_keys_differing_only_in_case_rejected(tmp_path):
+    """Two such keys share one directory and one registry file on macOS."""
+    bad = '[g.Demo]\nzenodo = "10.5281/zenodo.1"\n[g.demo]\nzenodo = "10.5281/zenodo.2"\n'
+    with pytest.raises(ValueError, match='differ only in case'):
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: keys that differ by more than case are independent datasets.
+    good = '[g.demo_a]\nzenodo = "10.5281/zenodo.1"\n[g.demo_b]\nzenodo = "10.5281/zenodo.2"\n'
+    assert len(load_manifest(_write(tmp_path, good))) == 2
+
+
 def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
     """The field is refused outright, so no manifest can reintroduce the drift."""
     bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n'
@@ -68,12 +88,13 @@ def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
 
 
 @pytest.mark.parametrize(
-    'segment', ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve', 'demo\\n', '\\ttab']
+    'segment',
+    ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve', 'demo\\n', '\\ttab', 'a+b'],
 )
 def test_unsafe_key_segment_rejected(tmp_path, segment):
     """A key segment that is not a plain directory name never reaches the data root."""
     bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='table key'):
+    with pytest.raises(ValueError, match='table segment'):
         load_manifest(_write(tmp_path, bad))
 
 
@@ -93,9 +114,10 @@ def test_quoted_dotted_segment_does_not_silently_deepen_the_path(tmp_path):
     bad = '[g."a.b"]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='not a valid directory name'):
         load_manifest(_write(tmp_path, bad))
-    # The safe spelling of the same intent loads and keeps the declared depth.
-    good = '[g.a.b]\nzenodo = "10.5281/zenodo.1"\n'
-    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/a/b'
+    # A directory name carrying a dot has no spelling: the unquoted key below is a
+    # different structure, two nested directories rather than one named 'a.b'.
+    nested = '[g.a.b]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, nested))[0].subdir == 'g/a/b'
 
 
 def test_dataset_without_zenodo_rejected(tmp_path):
@@ -190,8 +212,8 @@ def test_missing_registry_gives_actionable_error(tmp_path):
 def test_shared_manifest_ships_and_parses_empty():
     """The shared manifest ships with the package and parses cleanly.
 
-    It declares no datasets yet: nothing is consumed by several models, and the
-    Baraffe tracks now ship with the MORS package. A comment-only manifest is a
+    It declares no datasets: nothing is consumed by several models, and the
+    Baraffe tracks ship with the MORS package. A comment-only manifest is a
     valid one, and parsing it must yield an empty dataset list rather than
     raising.
     """

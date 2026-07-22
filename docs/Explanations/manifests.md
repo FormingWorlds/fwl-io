@@ -13,17 +13,18 @@ required_by = ["aragog", "zalmoxis", "spider"]           # models that need it
 extract = "tar"                                          # optional, unpack a single archive
 ```
 
-The dotted table key is the dataset location below `FWL_DATA`: the table above resolves into `interior/eos/wolf_bower_2018`. The key is the only source of that location, so the declared name and the directory on disk cannot drift apart.
+The dotted table key is the dataset location below `FWL_DATA`: the table above resolves into `interior/eos/wolf_bower_2018`, and its files land in the version directory `interior/eos/wolf_bower_2018/r1234567`. The key is the only source of that location, so the declared name and the directory on disk cannot drift apart.
 
 Validation at load time:
 
-- Every key segment must be letters, digits, `_`, `+` or `-`, starting with a letter, digit or `_`. A quoted key carrying a separator, a dot or a `..` component is rejected, so a key can neither escape the data root nor split into an unintended path depth.
+- Every key segment must be letters, digits, `_` or `-`, starting with a letter, digit or `_`. A quoted key carrying a separator, a dot or a `..` component is rejected, so a key can neither escape the data root nor split into an unintended path depth. A directory name containing a dot, a space or a non-ASCII character therefore has no manifest spelling.
 - `zenodo` is required and must have the form `10.5281/zenodo.<record-id>`.
 - `dataverse`, when present, must be a DOI.
 - `required_by`, when present, must be a list of model names.
 - `extract`, when present, must be `"tar"` or `"zip"`.
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
-- A `subdir` field is rejected: the location comes from the key.
+- A `subdir` field is rejected on any table, dataset or grouping level: the location comes from the key.
+- Two keys that differ only in case are rejected: they would share one directory and one registry file on a case-insensitive filesystem.
 
 ## Archive datasets
 

@@ -26,7 +26,7 @@ zenodo = "10.5281/zenodo.1234567"
 required_by = ["aragog", "zalmoxis", "spider"]
 ```
 
-The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018`. Choose it to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_`, `+` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
+The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018/r<record-id>`, the version directory named for its Zenodo record. Choose the key to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
 
 If the deposit is a single archive that consumers expect unpacked, add `extract = "tar"` or `extract = "zip"`; the archive is downloaded, checksum-verified, and unpacked into the dataset directory. See [Archive datasets](../Explanations/manifests.md#archive-datasets).
 
