@@ -80,9 +80,10 @@ def test_any_non_table_subdir_value_rejected(tmp_path, value):
     assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/d'
 
 
-def test_subdir_at_the_manifest_root_rejected(tmp_path):
+@pytest.mark.parametrize('value', ['"somewhere/else"', '1', 'true', '["a", "b"]', '[]'])
+def test_subdir_at_the_manifest_root_rejected(tmp_path, value):
     """The field is refused outside any table too, where it would be dropped."""
-    bad = 'subdir = "somewhere/else"\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    bad = f'subdir = {value}\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='the manifest root'):
         load_manifest(_write(tmp_path, bad))
     # A root-level scalar that is not "subdir" is still fine.
