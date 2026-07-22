@@ -114,9 +114,13 @@ def _reject_declared_subdir(where: str, table: dict, derived: str | None = None)
     """Refuse a location declared alongside the key that already carries it.
 
     A sub-table shares the mapping with the scalar fields, so a group named
-    ``subdir`` is a directory name like any other and is left to the walk.
+    ``subdir`` is a directory name like any other and is left to the walk,
+    in either the single-table or the array-of-tables spelling.
     """
-    if isinstance(table.get('subdir'), (dict, type(None))):
+    declared = table.get('subdir')
+    if declared is None or isinstance(declared, dict):
+        return
+    if isinstance(declared, list) and any(isinstance(item, dict) for item in declared):
         return
     location = (
         f'the location is derived from the table key, here {derived!r}'

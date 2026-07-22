@@ -68,6 +68,18 @@ def test_explicit_subdir_rejected(tmp_path):
     assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/d'
 
 
+@pytest.mark.parametrize('value', ['"x"', '1', 'true', '["a", "b"]', '[]'])
+def test_any_non_table_subdir_value_rejected(tmp_path, value):
+    """Whatever type it is given, a declared location is still a declared location."""
+    bad = f'[g.d]\nsubdir = {value}\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: dropping the line loads the same dataset at its key path,
+    # so the value never quietly decides the location either.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/d'
+
+
 def test_subdir_at_the_manifest_root_rejected(tmp_path):
     """The field is refused outside any table too, where it would be dropped."""
     bad = 'subdir = "somewhere/else"\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
@@ -87,6 +99,22 @@ def test_a_table_named_subdir_is_an_ordinary_directory_level(tmp_path):
     # Discrimination: the same word as a field, not a table, is still refused.
     with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
         load_manifest(_write(tmp_path, '[g.d]\nsubdir = "x"\nzenodo = "10.5281/zenodo.1"\n'))
+
+
+@pytest.mark.parametrize(
+    'manifest',
+    [
+        '[[subdir]]\nzenodo = "10.5281/zenodo.1"\n',
+        '[g.d]\n[[g.d.subdir]]\nzenodo = "10.5281/zenodo.1"\n',
+    ],
+)
+def test_array_of_tables_named_subdir_reports_the_structure(tmp_path, manifest):
+    """A structural mistake is named as one, whatever the table is called."""
+    with pytest.raises(ValueError, match='arrays of tables') as excinfo:
+        load_manifest(_write(tmp_path, manifest))
+    # Discrimination: the reader is not sent looking for a "subdir" field to
+    # delete, since none was declared.
+    assert 'not a manifest field' not in str(excinfo.value)
 
 
 def test_subdir_on_a_grouping_table_rejected(tmp_path):
