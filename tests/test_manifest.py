@@ -164,7 +164,7 @@ def test_trailing_newline_in_a_doi_rejected(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
-def test_dataset_rejects_positional_construction(tmp_path):
+def test_dataset_rejects_positional_construction():
     """Fields are keyword-only, so a stale positional call cannot rebind them."""
     with pytest.raises(TypeError):
         Dataset('g.d', 'demo', '10.5281/zenodo.1')
@@ -267,21 +267,47 @@ def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, m
     assert '"subdir" is not a manifest field' in str(excinfo.value)
 
 
-def test_fetch_for_still_serves_a_model_when_another_provider_is_broken(tmp_path, monkeypatch):
-    """One unreadable manifest does not block a model whose data did arrive."""
+def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
+    tmp_path, monkeypatch
+):
+    """A model served by two manifests hears about the one that failed."""
     data_root = tmp_path / 'data'
     _, wanted = _seed_versioned_dataset(
         data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
     )
     monkeypatch.setattr(
-        'fwl_io.manifest._discover', lambda: ({'good': [wanted]}, {'other': 'unreadable manifest'})
+        'fwl_io.manifest._discover',
+        lambda: ({'shared': [wanted]}, {'mymodel': 'unreadable manifest'}),
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
 
+    with pytest.raises(RuntimeError, match='unreadable manifest') as excinfo:
+        fetch_for('mymodel', data_root=data_root)
+    # The partial result is reported too, so the user knows what did arrive.
+    assert '1 dataset(s) arrived' in str(excinfo.value)
+    # Discrimination: the same call without the broken provider returns the data.
+    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'shared': [wanted]}, {}))
     fetched = fetch_for('mymodel', data_root=data_root)
-
-    assert set(fetched) == {wanted.key}
     assert [p.name for p in fetched[wanted.key]] == ['a.dat']
+
+
+def test_fetch_for_reports_a_dataset_failure_and_an_unreadable_manifest_together(
+    tmp_path, monkeypatch
+):
+    """Both error classes reach the user in one report, not one per run."""
+    _, broken = _seed_versioned_dataset(
+        tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
+    )
+    broken.registry_path.unlink()  # the dataset now fails on its missing registry
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover',
+        lambda: ({'shared': [broken]}, {'mymodel': 'unreadable manifest'}),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        fetch_for('mymodel', data_root=tmp_path / 'data')
+    message = str(excinfo.value)
+    assert 'no registry file' in message
+    assert 'unreadable manifest' in message
 
 
 def _seed_versioned_dataset(root, subdir, recid, files, required_by):

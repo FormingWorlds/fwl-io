@@ -253,10 +253,11 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
     together at the end so one broken dataset does not block the others
     (files fetched before the error remain in place).
 
-    A provider whose manifest fails to load is skipped, as everywhere else,
-    but it may be the very provider that declares this model. Coming back
-    empty-handed while a manifest is unreadable is therefore an error naming
-    that manifest, not a silent no-op.
+    An unreadable manifest counts as a failure here, even when other datasets
+    arrived: a manifest that cannot be parsed may be the one declaring this
+    model, and a model is routinely served by both its own manifest and the
+    shared one. Listing is more forgiving, since it reports per provider and
+    a reader can see which one is missing.
 
     Parameters
     ----------
@@ -287,16 +288,13 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
                 fetched[ds.key] = fetcher.fetch_all()
             except Exception as exc:  # noqa: BLE001 -- aggregate and re-raise below
                 failures[ds.key] = str(exc)
-    if failures:
-        detail = '\n'.join(f'  {key}: {msg}' for key, msg in sorted(failures.items()))
-        raise RuntimeError(
-            f'{len(failures)} dataset(s) failed for model {model!r} '
-            f'({len(fetched)} succeeded):\n{detail}'
-        )
-    if not fetched and provider_errors:
-        detail = '\n'.join(f'  {name}: {msg}' for name, msg in sorted(provider_errors.items()))
-        raise RuntimeError(
-            f'no dataset was fetched for model {model!r} and '
-            f'{len(provider_errors)} manifest(s) could not be read:\n{detail}'
-        )
+    if failures or provider_errors:
+        report = [f'fetching data for model {model!r} failed ({len(fetched)} dataset(s) arrived)']
+        if failures:
+            report.append(f'{len(failures)} dataset(s) failed:')
+            report += [f'  {key}: {msg}' for key, msg in sorted(failures.items())]
+        if provider_errors:
+            report.append(f'{len(provider_errors)} manifest(s) could not be read:')
+            report += [f'  {name}: {msg}' for name, msg in sorted(provider_errors.items())]
+        raise RuntimeError('\n'.join(report))
     return fetched

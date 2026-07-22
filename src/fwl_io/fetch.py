@@ -122,6 +122,11 @@ class Fetcher:
                     'an archive dataset requires a Zenodo version DOI: extraction needs a '
                     'version directory to stamp and to detect a deleted member on refetch'
                 )
+        # A DOI is used both as a mirror URL and as the version-directory key,
+        # so surrounding whitespace is trimmed once here rather than reaching a
+        # request URL through the string interpolation below.
+        zenodo = zenodo.strip() if zenodo else zenodo
+        dataverse = dataverse.strip() if dataverse else dataverse
         self.subdir = subdir
         self.zenodo = zenodo
         self.registry = dict(registry)
