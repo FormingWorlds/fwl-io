@@ -126,6 +126,16 @@ def test_dataset_without_zenodo_rejected(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
+def test_empty_zenodo_value_rejected_as_a_missing_pin(tmp_path):
+    """An empty pin is a missing pin, and says so rather than naming a bad DOI."""
+    bad = '[g.d]\nzenodo = ""\n'
+    with pytest.raises(ValueError, match='Zenodo version DOI is required') as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: the empty value takes the missing-pin branch, not the
+    # malformed-DOI branch, so the message tells the author to add a pin.
+    assert 'not a Zenodo DOI' not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     'value', ['https://zenodo.org/records/1', '10.1234/other.repo', '10.5281/zenodo.abc']
 )
@@ -192,13 +202,29 @@ def test_array_of_tables_rejected_not_silently_dropped(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
+def test_top_level_array_of_tables_rejected(tmp_path):
+    """An array at the outermost level is refused too, not just a nested one."""
+    bad = '[[d]]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='arrays of tables'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_top_level_scalars_are_ignored(tmp_path):
+    """A manifest may carry its own settings beside its dataset tables."""
+    manifest = 'schema_version = 1\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    datasets = load_manifest(_write(tmp_path, manifest))
+    # The scalar is skipped rather than read as a malformed dataset table.
+    assert [ds.key for ds in datasets] == ['g.d']
+    assert datasets[0].subdir == 'g/d'
+
+
 def test_unknown_extract_kind_rejected(tmp_path):
     """Only the archive kinds the fetcher can unpack are accepted at load time."""
-    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\nextract = "rar"\n'
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nextract = "rar"\n'
     with pytest.raises(ValueError, match='extract value'):
         load_manifest(_write(tmp_path, bad))
     # Discrimination: a supported kind loads and is carried onto the dataset.
-    good = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\n'
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\n'
     assert load_manifest(_write(tmp_path, good))[0].extract == 'tar'
 
 
