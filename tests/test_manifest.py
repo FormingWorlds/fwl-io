@@ -67,12 +67,25 @@ def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
-@pytest.mark.parametrize('segment', ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve'])
+@pytest.mark.parametrize(
+    'segment', ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve', 'demo\\n', '\\ttab']
+)
 def test_unsafe_key_segment_rejected(tmp_path, segment):
     """A key segment that is not a plain directory name never reaches the data root."""
     bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='table key'):
         load_manifest(_write(tmp_path, bad))
+
+
+def test_key_segment_rejects_a_trailing_control_character(tmp_path):
+    """A newline is not a directory name, however the key spells it."""
+    bad = '[g."demo\\n"]\nzenodo = "10.5281/zenodo.1234567"\n'
+    with pytest.raises(ValueError, match='not a valid directory name'):
+        load_manifest(_write(tmp_path, bad))
+    # Discrimination: the same key without the control character loads, so the
+    # rejection is about the newline and not about the segment 'demo'.
+    good = '[g.demo]\nzenodo = "10.5281/zenodo.1234567"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/demo'
 
 
 def test_quoted_dotted_segment_does_not_silently_deepen_the_path(tmp_path):
@@ -107,10 +120,35 @@ def test_non_string_zenodo_rejected(tmp_path):
         load_manifest(_write(tmp_path, bad))
 
 
-def test_bad_dataverse_doi_rejected(tmp_path):
-    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\ndataverse = "not-a-doi"\n'
+@pytest.mark.parametrize('value', ['"not-a-doi"', 'false', '0', '""'])
+def test_bad_dataverse_doi_rejected(tmp_path, value):
+    """A mirror DOI is checked by type first, so a falsy value cannot slip past."""
+    bad = f'[g.d]\nzenodo = "10.5281/zenodo.1"\ndataverse = {value}\n'
     with pytest.raises(ValueError, match='is not a DOI'):
         load_manifest(_write(tmp_path, bad))
+
+
+def test_dataset_without_a_mirror_still_loads(tmp_path):
+    """An absent mirror is the normal case and stays absent, not falsified."""
+    ds = load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\n'))[0]
+    assert ds.dataverse is None
+    assert ds.zenodo == '10.5281/zenodo.1'
+
+
+def test_trailing_newline_in_a_doi_rejected(tmp_path):
+    """A DOI carrying a line break is not a DOI, and never reaches the fetcher."""
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1234567\\n"\n'
+    with pytest.raises(ValueError, match='not a Zenodo DOI'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_dataset_rejects_positional_construction(tmp_path):
+    """Fields are keyword-only, so a stale positional call cannot rebind them."""
+    with pytest.raises(TypeError):
+        Dataset('g.d', 'demo', '10.5281/zenodo.1')
+    # The keyword form is the supported one and derives the location from the key.
+    ds = Dataset(key='g.d', name='demo', zenodo='10.5281/zenodo.1')
+    assert ds.subdir == 'g/d'
 
 
 def test_required_by_string_rejected(tmp_path):
@@ -192,6 +230,38 @@ def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
     assert len(found['good-model']) == 2
 
 
+def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
+    """An empty result while a manifest is unreadable names that manifest."""
+    stale = _write(
+        tmp_path, '[star.tracks.demo]\nsubdir = "star/tracks/demo"\nzenodo = "10.5281/zenodo.1"\n'
+    )
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_FakeEntryPoint('stale-model', lambda: stale)],
+    )
+    with pytest.raises(RuntimeError, match='stale-model') as excinfo:
+        fetch_for('anymodel', data_root=tmp_path / 'data')
+    # The provider's own diagnosis is carried through, not just the provider name.
+    assert '"subdir" is not a manifest field' in str(excinfo.value)
+
+
+def test_fetch_for_still_serves_a_model_when_another_provider_is_broken(tmp_path, monkeypatch):
+    """One unreadable manifest does not block a model whose data did arrive."""
+    data_root = tmp_path / 'data'
+    _, wanted = _seed_versioned_dataset(
+        data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
+    )
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover', lambda: ({'good': [wanted]}, {'other': 'unreadable manifest'})
+    )
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
+
+    fetched = fetch_for('mymodel', data_root=data_root)
+
+    assert set(fetched) == {wanted.key}
+    assert [p.name for p in fetched[wanted.key]] == ['a.dat']
+
+
 def _seed_versioned_dataset(root, subdir, recid, files, required_by):
     """Place files under root/subdir/r<recid>/ and return a matching Dataset."""
     version_dir = root / subdir / f'r{recid}'
@@ -221,7 +291,7 @@ def test_fetch_for_stamps_each_required_dataset_and_skips_others(tmp_path, monke
         data_root, 'interior/eos/demo', '222', {'c.dat': b'C\n'}, ('someone_else',)
     )
 
-    monkeypatch.setattr('fwl_io.manifest.discover_manifests', lambda: {'prov': [wanted, other]})
+    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [wanted, other]}, {}))
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # all files pre-seeded; no network
 
     fetched = fetch_for('mymodel', data_root=data_root)

@@ -26,7 +26,7 @@ zenodo = "10.5281/zenodo.1234567"
 required_by = ["aragog", "zalmoxis", "spider"]
 ```
 
-The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018`. Choose it to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_`, `+` and `-` per segment. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
+The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018`. Choose it to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_`, `+` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
 
 If the deposit is a single archive that consumers expect unpacked, add `extract = "tar"` or `extract = "zip"`; the archive is downloaded, checksum-verified, and unpacked into the dataset directory. See [Archive datasets](../Explanations/manifests.md#archive-datasets).
 
@@ -36,7 +36,7 @@ If the deposit is a single archive that consumers expect unpacked, add `extract 
 fwl-io sync path/to/manifest.toml
 ```
 
-This queries the Zenodo record and writes a registry file next to the manifest (`interior_lookup_tables.MgSiO3_Wolf_Bower_2018.registry.txt`) containing every file name and checksum. Commit the manifest change and the registry file together; the checksums are then reviewed like any other change.
+This queries the Zenodo record and writes a registry file next to the manifest (`interior.eos.wolf_bower_2018.registry.txt`, the dotted key) containing every file name and checksum. Commit the manifest change and the registry file together; the checksums are then reviewed like any other change.
 
 ## 4. Mirror to Dataverse (optional but encouraged)
 
