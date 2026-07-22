@@ -270,10 +270,14 @@ class Fetcher:
         return paths
 
     def _extracted_files(self) -> list[Path]:
-        """Return the extracted data files under the version directory (no stamp)."""
-        return sorted(
-            p for p in self.target_dir.rglob('*') if p.is_file() and p.name != _STAMP_FILENAME
-        )
+        """Return the extracted data files under the version directory.
+
+        Only the stamp at the top of the directory is excluded. A deposit is
+        free to ship a file of that name further down, and it belongs to the
+        dataset like any other member.
+        """
+        own_stamp = self.target_dir / _STAMP_FILENAME
+        return sorted(p for p in self.target_dir.rglob('*') if p.is_file() and p != own_stamp)
 
     def _place_tree(self, src_dir: Path, target_dir: Path) -> None:
         """Move a fully extracted tree into its final location atomically.
@@ -298,8 +302,17 @@ class Fetcher:
         digests, so a truncated member is not detected here.
         """
         try:
-            members = json.loads(stamp.read_text()).get('members') or []
+            record = json.loads(stamp.read_text())
         except (OSError, ValueError):
+            return False
+        if record.get('extract') != self.extract:
+            # The stamp describes a different fetch of this deposit, a plain
+            # one or a different archive kind, so its tree is not this dataset.
+            return False
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            # An absent or empty member list describes no tree at all, and must
+            # never read as a complete one.
             return False
         return all((self.target_dir / m).is_file() for m in members)
 
@@ -319,7 +332,16 @@ class Fetcher:
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()
 
-        if is_offline() if offline is None else offline:
+        cached_archive = self._cached_archive(archive_name, known_hash)
+        if cached_archive is None and self._copy_cached_tree():
+            self._sources[archive_name] = f'cache:{resolve_cache_root()}'
+            self._archive_members = [
+                p.relative_to(self.target_dir).as_posix() for p in self._extracted_files()
+            ]
+            self._write_stamp()
+            return self._extracted_files()
+
+        if cached_archive is None and (is_offline() if offline is None else offline):
             raise OfflineDataError(
                 f'{self.target_dir} is missing or incomplete and offline mode is active; '
                 f'populate the data tree at {self.data_root} or unset FWL_IO_OFFLINE'
@@ -328,7 +350,10 @@ class Fetcher:
         staging = self._staging_dir()
         work = Path(tempfile.mkdtemp(dir=staging))
         try:
-            got, used_mirror = self._retrieve_from_mirrors(archive_name, known_hash, work)
+            if cached_archive is not None:
+                got, used_mirror = str(cached_archive), f'cache:{resolve_cache_root()}'
+            else:
+                got, used_mirror = self._retrieve_from_mirrors(archive_name, known_hash, work)
             extract_dir = work / 'extracted'
             extract_dir.mkdir()
             extract_archive(Path(got), extract_dir, self.extract)
@@ -346,6 +371,56 @@ class Fetcher:
         ]
         self._write_stamp()
         return self._extracted_files()
+
+    def _cached_archive(self, fname: str, known_hash: str) -> Path | None:
+        """Return the archive in the shared cache when its checksum matches."""
+        cache_root = resolve_cache_root()
+        if cache_root is None:
+            return None
+        cache_file = cache_root / self.rel_dir / fname
+        if not cache_file.is_file() or not _hash_matches(cache_file, known_hash):
+            return None
+        log.info('extracting %s from shared cache %s', fname, cache_root)
+        return cache_file
+
+    def _copy_cached_tree(self) -> bool:
+        """Copy an already-extracted dataset out of the shared cache.
+
+        A cache populated by fwl-io holds the extracted tree rather than the
+        archive, since the archive is dropped after extraction. The cached
+        stamp has to describe this deposit and the same archive kind, and
+        every member it names has to be present, which is the same standard
+        the local tree is held to.
+        """
+        cache_root = resolve_cache_root()
+        if cache_root is None:
+            return False
+        cached_dir = cache_root / self.rel_dir
+        cached_stamp = cached_dir / _STAMP_FILENAME
+        try:
+            record = json.loads(cached_stamp.read_text())
+        except (OSError, ValueError):
+            return False
+        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
+            return False
+        if record.get('extract') != self.extract:
+            return False
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            return False
+        if not all((cached_dir / m).is_file() for m in members):
+            return False
+        staging = self._staging_dir()
+        work = Path(tempfile.mkdtemp(dir=staging))
+        try:
+            copied = work / 'tree'
+            shutil.copytree(cached_dir, copied)
+            (copied / _STAMP_FILENAME).unlink(missing_ok=True)
+            self._place_tree(copied, self.target_dir)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        log.info('copied dataset from shared cache %s', cache_root)
+        return True
 
     def _stamp_is_current(self, stamp: Path) -> bool:
         """True when a valid stamp for this exact record id already exists.

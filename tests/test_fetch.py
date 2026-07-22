@@ -531,6 +531,125 @@ def test_archive_heals_a_deleted_member_on_refetch(http_server, tmp_path):
     assert victim in paths
 
 
+def test_a_plain_stamp_does_not_pass_for_an_extracted_tree(http_server, tmp_path):
+    """A deposit fetched whole, then declared an archive, is extracted.
+
+    The stamp a per-file fetch leaves behind describes the same record id, so
+    only the recorded archive kind tells the two fetches apart.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    plain = create_fetcher(
+        subdir=SUBDIR, registry=registry, base_urls=[base_url], zenodo=ZENODO, data_root=tmp_path
+    )
+    plain.fetch_all()
+    version_dir = tmp_path / VERSIONED
+    assert (version_dir / 'tracks.tar').is_file(), 'the plain fetch keeps the archive'
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.relative_to(version_dir).as_posix() for p in paths) == [
+        'm0p1.txt',
+        'nested/m1p0.txt',
+    ]
+    # The archive is gone and the tree is in its place, so the second fetch did
+    # the extraction rather than trusting the stamp of the first.
+    assert not (version_dir / 'tracks.tar').exists()
+
+
+def test_a_stamp_from_a_different_archive_kind_is_not_intact(http_server, tmp_path):
+    """Switching the declared archive kind re-extracts rather than serving the old tree.
+
+    Both spellings of the deposit carry the same member names, so only the kind
+    recorded in the stamp distinguishes the tree already on disk from the one
+    the manifest now asks for.
+    """
+    base_url, root = http_server
+    zip_members = (('m0p1.txt', b'from the zip\n'),)
+    tar_members = (('m0p1.txt', b'from the tar\n'),)
+    zip_registry = _serve_archive(root, 'tracks.zip', zip_members, 'zip')
+    tar_registry = _serve_archive(root, 'tracks.tar', tar_members, 'tar')
+    _archive_fetcher(base_url, zip_registry, tmp_path, 'zip').fetch_all()
+    member = tmp_path / VERSIONED / 'm0p1.txt'
+    assert member.read_bytes() == b'from the zip\n'
+
+    paths = _archive_fetcher(base_url, tar_registry, tmp_path, 'tar').fetch_all()
+
+    assert member.read_bytes() == b'from the tar\n'
+    assert paths == [member]
+
+
+def test_a_stamp_recording_no_members_is_not_intact(http_server, tmp_path):
+    """An empty member list describes no tree, so it cannot mark one complete."""
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    version_dir = tmp_path / VERSIONED
+    stamp_path = version_dir / '.fwl-io.json'
+    record = json.loads(stamp_path.read_text())
+    record['members'] = []
+    stamp_path.write_text(json.dumps(record))
+    for member in ('m0p1.txt', 'nested/m1p0.txt'):
+        (version_dir / member).unlink()
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert len(paths) == 2, 'the emptied tree is re-extracted, not reported complete'
+    assert (version_dir / 'm0p1.txt').read_bytes() == b'0.1\n'
+
+
+def test_archive_member_named_like_the_stamp_belongs_to_the_dataset(http_server, tmp_path):
+    """Only the stamp at the top of the version directory is fwl-io's own."""
+    base_url, root = http_server
+    members = (('m0p1.txt', b'0.1\n'), ('nested/.fwl-io.json', b'{"deposit": true}\n'))
+    registry = _serve_archive(root, 'tracks.tar', members, 'tar')
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    version_dir = tmp_path / VERSIONED
+    assert sorted(p.relative_to(version_dir).as_posix() for p in paths) == [
+        'm0p1.txt',
+        'nested/.fwl-io.json',
+    ]
+    # The member keeps the deposit's content, and the stamp is written beside it.
+    assert (version_dir / 'nested' / '.fwl-io.json').read_bytes() == b'{"deposit": true}\n'
+    assert 'record_id' in json.loads((version_dir / '.fwl-io.json').read_text())
+
+
+def test_shared_cache_serves_an_archive_dataset_offline(http_server, tmp_path, monkeypatch):
+    """A cluster node with a populated cache needs no network for an archive."""
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    cache_root = tmp_path / 'shared_cache'
+    _archive_fetcher(base_url, registry, cache_root, 'tar').fetch_all()
+    assert not (cache_root / VERSIONED / 'tracks.tar').exists(), 'the cache holds the tree'
+
+    data_root = tmp_path / 'private'
+    monkeypatch.setenv('FWL_DATA_CACHE', str(cache_root))
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry=registry,
+        base_urls=['http://127.0.0.1:1/'],
+        zenodo=ZENODO,
+        data_root=data_root,
+        extract='tar',
+    )
+
+    paths = fetcher.fetch_all(offline=True)
+
+    version_dir = data_root / VERSIONED
+    assert sorted(p.relative_to(version_dir).as_posix() for p in paths) == [
+        'm0p1.txt',
+        'nested/m1p0.txt',
+    ]
+    # Discrimination: the copy is attributed to the cache, not to a mirror, and
+    # the same call without the cache is refused offline.
+    assert fetcher.provenance()[0]['source'] == f'cache:{cache_root}'
+    monkeypatch.delenv('FWL_DATA_CACHE')
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
+
+
 def test_archive_extracts_a_top_level_directory_member(http_server, tmp_path):
     """A tar whose members sit under a top-level directory keeps that structure.
 

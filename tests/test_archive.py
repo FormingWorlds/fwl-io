@@ -169,6 +169,64 @@ def test_tar_fifo_member_rejected(tmp_path):
     assert list(dest.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ('label', 'member_type'),
+    [('chr', tarfile.CHRTYPE), ('blk', tarfile.BLKTYPE)],
+)
+def test_tar_device_member_rejected(tmp_path, label, member_type):
+    """A character or block device is refused, like every non-file member."""
+    archive = tmp_path / f'{label}.tar'
+    dest = tmp_path / f'dest_{label}'
+    dest.mkdir()
+    _make_tar_typed_member(archive, f'{label}dev', member_type)
+    with pytest.raises(ArchiveError, match='only regular files and directories'):
+        extract_archive(archive, dest, 'tar')
+    assert list(dest.iterdir()) == []
+
+
+def test_truncated_compressed_tar_reports_an_archive_error(tmp_path):
+    """A stream that ends early is an archive failure, not a raw EOFError."""
+    archive = tmp_path / 'cut.tar.gz'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_tar(archive, [('m0.txt', b'0.1\n' * 500)], compression='gz')
+    whole = archive.read_bytes()
+    archive.write_bytes(whole[: len(whole) // 2])
+    with pytest.raises(ArchiveError, match='could not read tar archive'):
+        extract_archive(archive, dest, 'tar')
+    # Discrimination: the intact archive of the same shape extracts cleanly.
+    _make_tar(archive, [('m0.txt', b'0.1\n' * 500)], compression='gz')
+    extract_archive(archive, dest, 'tar')
+    assert (dest / 'm0.txt').is_file()
+
+
+def test_encrypted_zip_entry_reports_an_archive_error(tmp_path):
+    """An entry this build cannot decode is an archive failure, not a RuntimeError."""
+    archive = tmp_path / 'locked.zip'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr('m0.txt', b'0.1\n')
+    # Set the encrypted flag in the central directory, which is what zipfile
+    # reads, so extraction fails for want of a password.
+    raw = bytearray(archive.read_bytes())
+    raw[raw.rfind(b'PK\x01\x02') + 8] |= 0x01
+    archive.write_bytes(bytes(raw))
+    with pytest.raises(ArchiveError, match='not a valid zip archive'):
+        extract_archive(archive, dest, 'zip')
+    assert not (dest / 'm0.txt').exists()
+
+
+def test_member_colliding_with_a_written_file_reports_an_archive_error(tmp_path):
+    """A member below a name already written as a file is an archive failure."""
+    archive = tmp_path / 'clash.tar'
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _make_tar(archive, [('a', b'file\n'), ('a/b', b'below\n')])
+    with pytest.raises(ArchiveError, match='could not read tar archive'):
+        extract_archive(archive, dest, 'tar')
+
+
 def test_tar_relative_symlink_member_rejected(tmp_path):
     """Even a symlink whose target stays inside the destination is refused.
 

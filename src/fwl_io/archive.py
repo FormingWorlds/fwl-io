@@ -58,7 +58,10 @@ def _extract_tar(archive: Path, dest: Path) -> None:
                 tf.extractall(dest, filter='data')
             except TypeError:  # Python build without the 'filter' keyword
                 tf.extractall(dest, members=members)
-    except tarfile.TarError as exc:  # unreadable/corrupt archive, or a filter rejection
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        # Unreadable or corrupt archive, a filter rejection, a truncated
+        # compressed stream, or a member whose name collides with a path
+        # already written as a file.
         raise ArchiveError(f'could not read tar archive {archive.name!r}: {exc}') from exc
 
 
@@ -77,15 +80,22 @@ def _extract_zip(archive: Path, dest: Path) -> None:
                         f'unsafe archive member {info.filename!r}: escapes the destination'
                     )
             zf.extractall(dest)
-    except zipfile.BadZipFile as exc:  # unreadable/corrupt zip, at open or during read
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError) as exc:
+        # Unreadable or corrupt zip at open or during read, an encrypted entry,
+        # a compression method this build cannot decode, or a member whose
+        # name collides with a path already written as a file.
         raise ArchiveError(f'not a valid zip archive {archive.name!r}: {exc}') from exc
 
 
 def extract_archive(archive: Path, dest: Path, kind: str) -> None:
     """Extract ``archive`` (a ``tar`` or ``zip`` file) into ``dest`` safely.
 
-    Every member is validated before extraction; on any unsafe member nothing
-    is written and :class:`ArchiveError` is raised. ``dest`` must already exist.
+    Every member is validated before extraction; when validation rejects a
+    member nothing is written and :class:`ArchiveError` is raised. A failure
+    while reading the archive also raises :class:`ArchiveError`, and may leave
+    members already written behind, so callers extract into a staging
+    directory and move the tree into place only on success. ``dest`` must
+    already exist.
 
     Parameters
     ----------
