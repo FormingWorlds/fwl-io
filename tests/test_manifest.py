@@ -16,13 +16,11 @@ pytestmark = pytest.mark.unit
 GOOD = """
 [interior_lookup_tables.demo_eos]
 name = "Demo equation of state"
-subdir = "interior_lookup_tables/demo_eos"
 zenodo = "10.5281/zenodo.1234567"
 dataverse = "10.34894/ABCDEF"
 required_by = ["aragog", "spider"]
 
 [spectral_files.demo_band]
-subdir = "spectral_files/demo_band"
 zenodo = "10.5281/zenodo.7654321"
 """
 
@@ -34,6 +32,7 @@ def _write(tmp_path, text):
 
 
 def test_nested_tables_load_with_dotted_keys(tmp_path):
+    """A dataset table is identified by its Zenodo pin and keyed by its full path."""
     datasets = {ds.key: ds for ds in load_manifest(_write(tmp_path, GOOD))}
     assert set(datasets) == {'interior_lookup_tables.demo_eos', 'spectral_files.demo_band'}
     demo = datasets['interior_lookup_tables.demo_eos']
@@ -43,27 +42,51 @@ def test_nested_tables_load_with_dotted_keys(tmp_path):
     assert datasets['spectral_files.demo_band'].name == 'spectral_files.demo_band'
 
 
-def test_missing_subdir_rejected(tmp_path):
-    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='missing required field "subdir"'):
+def test_subdir_is_derived_from_the_dotted_key(tmp_path):
+    """The dataset location comes from the key, at the key's own depth."""
+    manifest = '[star.tracks.baraffe_2015]\nzenodo = "10.5281/zenodo.15729114"\n'
+    ds = load_manifest(_write(tmp_path, manifest))[0]
+    assert ds.subdir == 'star/tracks/baraffe_2015'
+    # Discrimination: a grouping level dropped, or only the leaf kept, would put
+    # the data in a different directory, so both wrong derivations are excluded.
+    assert ds.subdir != 'star/baraffe_2015'
+    assert ds.subdir != 'baraffe_2015'
+
+
+def test_explicit_subdir_rejected(tmp_path):
+    """A manifest cannot declare a location that could drift from its key."""
+    bad = '[g.d]\nsubdir = "somewhere/else"\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
         load_manifest(_write(tmp_path, bad))
 
 
-def test_absolute_subdir_rejected(tmp_path):
-    bad = '[g.d]\nsubdir = "/etc/data"\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='must be relative'):
+def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
+    """The field is refused outright, so no manifest can reintroduce the drift."""
+    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
         load_manifest(_write(tmp_path, bad))
 
 
-@pytest.mark.parametrize('subdir', ['../outside', 'a/../../b', 'a\\\\b'])
-def test_traversal_subdir_rejected(tmp_path, subdir):
-    bad = f'[g.d]\nsubdir = "{subdir}"\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize('segment', ['..', '.', 'a/b', 'a\\\\b', 'a.b', '', ' ', '-lead', 'naïve'])
+def test_unsafe_key_segment_rejected(tmp_path, segment):
+    """A key segment that is not a plain directory name never reaches the data root."""
+    bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='table key'):
         load_manifest(_write(tmp_path, bad))
+
+
+def test_quoted_dotted_segment_does_not_silently_deepen_the_path(tmp_path):
+    """A dot inside a quoted key would add a directory level, so it is refused."""
+    bad = '[g."a.b"]\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='not a valid directory name'):
+        load_manifest(_write(tmp_path, bad))
+    # The safe spelling of the same intent loads and keeps the declared depth.
+    good = '[g.a.b]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/a/b'
 
 
 def test_dataset_without_zenodo_rejected(tmp_path):
-    bad = '[g.d]\nsubdir = "g/d"\ndataverse = "10.34894/XYZ"\n'
+    bad = '[g.d]\ndataverse = "10.34894/XYZ"\n'
     with pytest.raises(ValueError, match='Zenodo version DOI is required'):
         load_manifest(_write(tmp_path, bad))
 
@@ -72,25 +95,39 @@ def test_dataset_without_zenodo_rejected(tmp_path):
     'value', ['https://zenodo.org/records/1', '10.1234/other.repo', '10.5281/zenodo.abc']
 )
 def test_non_zenodo_doi_rejected(tmp_path, value):
-    bad = f'[g.d]\nsubdir = "g/d"\nzenodo = "{value}"\n'
+    bad = f'[g.d]\nzenodo = "{value}"\n'
+    with pytest.raises(ValueError, match='not a Zenodo DOI'):
+        load_manifest(_write(tmp_path, bad))
+
+
+def test_non_string_zenodo_rejected(tmp_path):
+    """A bare number is not a DOI, and must fail as a manifest error."""
+    bad = '[g.d]\nzenodo = 15729114\n'
     with pytest.raises(ValueError, match='not a Zenodo DOI'):
         load_manifest(_write(tmp_path, bad))
 
 
 def test_bad_dataverse_doi_rejected(tmp_path):
-    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\ndataverse = "not-a-doi"\n'
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\ndataverse = "not-a-doi"\n'
     with pytest.raises(ValueError, match='is not a DOI'):
         load_manifest(_write(tmp_path, bad))
 
 
+def test_required_by_string_rejected(tmp_path):
+    """A bare string would split into characters and match no model at all."""
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nrequired_by = "mors"\n'
+    with pytest.raises(ValueError, match='must be a list of model names'):
+        load_manifest(_write(tmp_path, bad))
+
+
 def test_dataset_with_subtable_rejected_not_silently_dropped(tmp_path):
-    bad = '[g.d]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n[g.d.meta]\nauthor = "someone"\n'
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\n[g.d.meta]\nauthor = "someone"\n'
     with pytest.raises(ValueError, match='must not contain sub-tables'):
         load_manifest(_write(tmp_path, bad))
 
 
 def test_array_of_tables_rejected_not_silently_dropped(tmp_path):
-    bad = '[[g.d]]\nsubdir = "g/d"\nzenodo = "10.5281/zenodo.1"\n'
+    bad = '[[g.d]]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='arrays of tables'):
         load_manifest(_write(tmp_path, bad))
 
@@ -168,7 +205,6 @@ def _seed_versioned_dataset(root, subdir, recid, files, required_by):
     return version_dir, Dataset(
         key=subdir.replace('/', '.'),
         name=subdir,
-        subdir=subdir,
         zenodo=f'10.5281/zenodo.{recid}',
         required_by=required_by,
         registry_path=registry_path,

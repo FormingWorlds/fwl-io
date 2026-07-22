@@ -25,7 +25,7 @@ def test_sync_command_writes_registries(http_server, tmp_path, capsys):
         },
     )
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text('[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1234567"\n')
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1234567"\n')
     code = main(['sync', str(manifest), '--api-base', f'{base_url}api/records'])
     assert code == 0
     assert 'wrote' in capsys.readouterr().out
@@ -43,7 +43,7 @@ def test_sync_command_failure_is_message_not_traceback(tmp_path, capsys):
 @pytest.mark.unit
 def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, monkeypatch):
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text('[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1"\n')
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\n')
 
     class _EP:
         def __init__(self, name, target):
@@ -78,9 +78,7 @@ def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
 @pytest.mark.unit
 def test_fetch_missing_registry_is_aggregated_error(tmp_path, capsys, monkeypatch):
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(
-        '[g.demo]\nsubdir = "g/demo"\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["demo"]\n'
-    )
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["demo"]\n')
 
     class _EP:
         name = 'okmodel'

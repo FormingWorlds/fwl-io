@@ -21,10 +21,11 @@ Add a manifest file inside the package, for example `src/mors/data/manifest.toml
 ```toml
 [star.tracks.spada_2013]
 name = "Spada et al. (2013) stellar evolution tracks"
-subdir = "star/tracks/spada_2013"
 zenodo = "10.5281/zenodo.1234567"
 required_by = ["mors"]
 ```
+
+The dotted key is the dataset location below `FWL_DATA`, so this table places the tracks in `star/tracks/spada_2013`.
 
 ## 3. Generate and commit the registries
 

@@ -6,15 +6,19 @@ tables); each model package may ship its own manifest for data only it
 consumes and expose it through the ``fwl_io.manifests`` entry-point group.
 Adding data to a model therefore never requires an fwl-io release.
 
-Manifest schema, one table per dataset, identified by its ``subdir`` key::
+Manifest schema, one table per dataset, identified by its ``zenodo`` key::
 
     [interior_lookup_tables.MgSiO3_Wolf_Bower_2018]
     name = "Wolf & Bower (2018) MgSiO3 equation of state"
-    subdir = "interior_lookup_tables/MgSiO3_Wolf_Bower_2018"
     zenodo = "10.5281/zenodo.1234567"       # version DOI, never a concept DOI
     dataverse = "10.34894/ABCDEF"           # optional download mirror
     required_by = ["aragog", "zalmoxis", "spider"]
     extract = "tar"                         # optional: unpack a single-archive deposit
+
+The dotted table key is the dataset location below the data root: the table
+above resolves into ``interior_lookup_tables/MgSiO3_Wolf_Bower_2018``. Key
+segments are restricted to letters, digits, ``_``, ``+`` and ``-`` so a key
+can neither escape the data root nor split into an unintended path depth.
 
 A deposit packaged as one archive declares ``extract = "tar"`` or ``"zip"``; its
 registry lists the archive, and the fetcher downloads and checksum-verifies it,
@@ -59,6 +63,7 @@ __all__ = [
 ]
 
 _GENERIC_DOI_PATTERN = re.compile(r'^(doi:)?10\.\S+$')
+_KEY_SEGMENT_PATTERN = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_+-]*$')
 
 
 @dataclass(frozen=True)
@@ -67,12 +72,16 @@ class Dataset:
 
     key: str
     name: str
-    subdir: str
     zenodo: str | None = None
     dataverse: str | None = None
     required_by: tuple[str, ...] = field(default_factory=tuple)
     registry_path: Path | None = None
     extract: str | None = None
+
+    @property
+    def subdir(self) -> str:
+        """Dataset location below the data root, derived from the dotted key."""
+        return self.key.replace('.', '/')
 
     def registry(self) -> dict[str, str]:
         """Return the committed name-to-hash registry for this dataset."""
@@ -83,21 +92,23 @@ class Dataset:
         return load_registry(self.registry_path)
 
 
-def _validate_subdir(key: str, subdir: str) -> None:
-    if '\\' in subdir:
-        raise ValueError(f'dataset {key!r}: "subdir" contains a backslash')
-    path = Path(subdir)
-    if path.is_absolute():
-        raise ValueError(f'dataset {key!r}: "subdir" must be relative to the data root')
-    if '..' in path.parts:
-        raise ValueError(f'dataset {key!r}: "subdir" contains a ".." component')
+def _validate_key_segment(segment: str, dotted: str) -> None:
+    """Reject a table name that cannot serve as one directory level."""
+    if segment in ('.', '..'):
+        raise ValueError(f'table key {dotted!r}: segment {segment!r} would escape the data root')
+    if not _KEY_SEGMENT_PATTERN.match(segment):
+        raise ValueError(
+            f'table key {dotted!r}: segment {segment!r} is not a valid directory name '
+            f'(letters, digits, "_", "+" and "-", starting with a letter, digit or "_"); '
+            f'the dataset location is derived from the key'
+        )
 
 
 def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
     """Return (dotted-key, table) pairs for the dataset tables of a manifest.
 
-    A table is a dataset when it carries the ``subdir`` key. Grouping tables
-    (no ``subdir``) are recursed into. Ambiguous structures are rejected
+    A table is a dataset when it carries the ``zenodo`` key. Grouping tables
+    (no ``zenodo``) are recursed into. Ambiguous structures are rejected
     instead of silently reinterpreted.
     """
     leaves: list[tuple[str, dict]] = []
@@ -109,20 +120,24 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
         if not isinstance(value, dict):
             continue
         dotted = f'{prefix}{name}'
+        _validate_key_segment(name, dotted)
         for child, child_value in value.items():
             if isinstance(child_value, list) and any(isinstance(i, dict) for i in child_value):
                 raise ValueError(
                     f'{dotted}.{child}: arrays of tables ([[...]]) are not supported in manifests'
                 )
         has_subtables = any(isinstance(v, dict) for v in value.values())
-        if 'subdir' in value:
+        if 'zenodo' in value:
             if has_subtables:
                 raise ValueError(f'dataset {dotted!r}: dataset tables must not contain sub-tables')
             leaves.append((dotted, value))
         elif has_subtables:
             leaves.extend(_walk_tables(value, prefix=f'{dotted}.'))
         else:
-            raise ValueError(f'dataset {dotted!r}: missing required field "subdir"')
+            raise ValueError(
+                f'dataset {dotted!r}: a Zenodo version DOI is required '
+                f'("dataverse" is a download mirror, not a primary source)'
+            )
     return leaves
 
 
@@ -134,8 +149,11 @@ def load_manifest(path: str | Path) -> list[Dataset]:
 
     datasets: list[Dataset] = []
     for key, table in _walk_tables(tree):
-        subdir = table['subdir']
-        _validate_subdir(key, subdir)
+        if 'subdir' in table:
+            raise ValueError(
+                f'dataset {key!r}: "subdir" is not a manifest field; the dataset location '
+                f'is derived from the table key, here {key.replace(".", "/")!r}'
+            )
         zenodo = table.get('zenodo')
         dataverse = table.get('dataverse')
         if not zenodo:
@@ -143,13 +161,22 @@ def load_manifest(path: str | Path) -> list[Dataset]:
                 f'dataset {key!r}: a Zenodo version DOI is required '
                 f'("dataverse" is a download mirror, not a primary source)'
             )
-        if not ZENODO_DOI_PATTERN.match(zenodo):
+        if not isinstance(zenodo, str) or not ZENODO_DOI_PATTERN.match(zenodo):
             raise ValueError(
                 f'dataset {key!r}: zenodo value {zenodo!r} is not a Zenodo DOI '
                 f'of the form 10.5281/zenodo.<record-id>'
             )
-        if dataverse and not _GENERIC_DOI_PATTERN.match(dataverse):
+        if dataverse and (
+            not isinstance(dataverse, str) or not _GENERIC_DOI_PATTERN.match(dataverse)
+        ):
             raise ValueError(f'dataset {key!r}: dataverse value {dataverse!r} is not a DOI')
+        required_by = table.get('required_by', ())
+        if not isinstance(required_by, list | tuple) or not all(
+            isinstance(model, str) for model in required_by
+        ):
+            raise ValueError(
+                f'dataset {key!r}: "required_by" must be a list of model names, got {required_by!r}'
+            )
         extract = table.get('extract')
         if extract is not None and extract not in ARCHIVE_KINDS:
             raise ValueError(
@@ -159,10 +186,9 @@ def load_manifest(path: str | Path) -> list[Dataset]:
             Dataset(
                 key=key,
                 name=table.get('name', key),
-                subdir=subdir,
                 zenodo=zenodo,
                 dataverse=dataverse,
-                required_by=tuple(table.get('required_by', ())),
+                required_by=tuple(required_by),
                 registry_path=path.parent / f'{key}.registry.txt',
                 extract=extract,
             )
