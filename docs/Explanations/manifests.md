@@ -19,7 +19,7 @@ Validation at load time:
 
 - Every key segment must be letters, digits, `_` or `-`, starting with a letter, digit or `_`. A quoted key carrying a separator, a dot or a `..` component is rejected, so a key can neither escape the data root nor split into an unintended path depth. A directory name containing a dot, a space or a non-ASCII character therefore has no manifest spelling.
 - `zenodo` is required and must have the form `10.5281/zenodo.<record-id>`.
-- `name`, when present, must be text with something in it; a dataset without one is displayed under its dotted key.
+- `name`, when present, must be text with something in it. It is a human-readable label for the dataset; a dataset without one falls back to its dotted key.
 - `dataverse`, when present, must be a DOI.
 - `required_by`, when present, must be a list of model names.
 - `extract`, when present, must be `"tar"` or `"zip"`.

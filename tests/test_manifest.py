@@ -163,7 +163,7 @@ def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
         ('a\\\\b', 'a_b'),
         ('a.b', 'a_b'),
         ('', 'a'),
-        (' ', 'a'),
+        (' ', '_'),
         ('a b', 'a_b'),
         ('-lead', '_lead'),
         ('naïve', 'naive'),
@@ -177,8 +177,9 @@ def test_unsafe_key_segment_rejected(tmp_path, segment, nearest_safe):
     bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='not a valid directory name'):
         load_manifest(_write(tmp_path, bad))
-    # The nearest safe spelling of this very segment loads, so the rule bites on
-    # the offending character rather than on the shape of the key around it.
+    # A safe spelling of this very segment loads, so the rule bites on the
+    # offending character rather than on the shape of the key around it. An
+    # empty segment has no spelling of its own, so a bare letter stands in.
     good = f'[g.{nearest_safe}]\nzenodo = "10.5281/zenodo.1"\n'
     assert load_manifest(_write(tmp_path, good))[0].subdir == f'g/{nearest_safe}'
 
@@ -266,7 +267,7 @@ def test_non_string_zenodo_rejected(tmp_path, value):
 
 @pytest.mark.parametrize('value', ['42', 'true', '""', '"   "', '["a"]'])
 def test_unusable_name_rejected(tmp_path, value):
-    """A dataset name is author-supplied display text, checked when it is read."""
+    """A dataset label is author-supplied text, checked when the manifest loads."""
     bad = f'[g.d]\nname = {value}\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='"name" must be non-empty text'):
         load_manifest(_write(tmp_path, bad))
