@@ -14,6 +14,7 @@ def _serve_record(root, recid, payload):
 
 
 def test_sync_command_writes_registries(http_server, tmp_path, capsys):
+    """The sync command writes the registry file the Zenodo record describes."""
     base_url, root = http_server
     _serve_record(
         root,
@@ -33,6 +34,7 @@ def test_sync_command_writes_registries(http_server, tmp_path, capsys):
 
 
 def test_sync_command_failure_is_message_not_traceback(tmp_path, capsys):
+    """A missing manifest is reported as a message, not as a stack trace."""
     code = main(['sync', str(tmp_path / 'missing_manifest.toml')])
     assert code == 1
     err = capsys.readouterr().err
@@ -42,6 +44,7 @@ def test_sync_command_failure_is_message_not_traceback(tmp_path, capsys):
 
 @pytest.mark.unit
 def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, monkeypatch):
+    """Listing shows what is installed and names what failed to load."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\n')
 
@@ -72,6 +75,7 @@ def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, mon
 
 @pytest.mark.unit
 def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
+    """Asking for a model no manifest declares is an error, not an empty success."""
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
     code = main(['fetch', 'nomodule'])
     assert code == 1
@@ -80,6 +84,7 @@ def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
 
 @pytest.mark.unit
 def test_fetch_missing_registry_is_aggregated_error(tmp_path, capsys, monkeypatch):
+    """A dataset that cannot be fetched is named, without a stack trace."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["demo"]\n')
 

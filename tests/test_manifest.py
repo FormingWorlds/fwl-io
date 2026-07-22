@@ -84,8 +84,16 @@ def test_any_non_table_subdir_value_rejected(tmp_path, value):
 def test_subdir_at_the_manifest_root_rejected(tmp_path, value):
     """The field is refused outside any table too, where it would be dropped."""
     bad = f'subdir = {value}\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='the manifest root'):
+    with pytest.raises(ValueError, match='the manifest root') as at_root:
         load_manifest(_write(tmp_path, bad))
+    # The root has no key of its own, so it gets the general sentence rather than
+    # the derived path a table is told to compare against.
+    assert 'derived from its own table key' in str(at_root.value)
+    in_table = f'[g.d]\nsubdir = {value}\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError) as at_table:
+        load_manifest(_write(tmp_path, in_table))
+    assert 'derived from its own table key' not in str(at_table.value)
+    assert "'g/d'" in str(at_table.value)
     # A root-level scalar that is not "subdir" is still fine.
     good = 'schema_version = 1\n[g.d]\nzenodo = "10.5281/zenodo.1"\n'
     assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
@@ -149,18 +157,30 @@ def test_explicit_subdir_rejected_even_when_it_matches_the_key(tmp_path):
 
 
 @pytest.mark.parametrize(
-    'segment',
-    ['a/b', 'a\\\\b', 'a.b', '', ' ', 'a b', '-lead', 'naïve', 'demo\\n', '\\ttab', 'a+b'],
+    ('segment', 'nearest_safe'),
+    [
+        ('a/b', 'a_b'),
+        ('a\\\\b', 'a_b'),
+        ('a.b', 'a_b'),
+        ('', 'a'),
+        (' ', 'a'),
+        ('a b', 'a_b'),
+        ('-lead', '_lead'),
+        ('naïve', 'naive'),
+        ('demo\\n', 'demo'),
+        ('\\ttab', 'tab'),
+        ('a+b', 'a-b'),
+    ],
 )
-def test_unsafe_key_segment_rejected(tmp_path, segment):
+def test_unsafe_key_segment_rejected(tmp_path, segment, nearest_safe):
     """A key segment that is not a plain directory name never reaches the data root."""
     bad = f'[g."{segment}"]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='not a valid directory name'):
         load_manifest(_write(tmp_path, bad))
-    # The nearest safe spelling of each rejected segment loads, so the rule bites
-    # on the character and not on the surrounding table.
-    good = '[g.a_b]\nzenodo = "10.5281/zenodo.1"\n'
-    assert load_manifest(_write(tmp_path, good))[0].subdir == 'g/a_b'
+    # The nearest safe spelling of this very segment loads, so the rule bites on
+    # the offending character rather than on the shape of the key around it.
+    good = f'[g.{nearest_safe}]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == f'g/{nearest_safe}'
 
 
 @pytest.mark.parametrize('segment', ['.', '..'])
@@ -233,9 +253,10 @@ def test_non_zenodo_doi_rejected(tmp_path, value):
     assert load_manifest(_write(tmp_path, good))[0].zenodo.endswith('15729114')
 
 
-def test_non_string_zenodo_rejected(tmp_path):
+@pytest.mark.parametrize('value', ['15729114', 'false', '0', '["a"]', '1.5'])
+def test_non_string_zenodo_rejected(tmp_path, value):
     """A bare number is not a DOI, and must fail as a manifest error."""
-    bad = '[g.d]\nzenodo = 15729114\n'
+    bad = f'[g.d]\nzenodo = {value}\n'
     with pytest.raises(ValueError, match='not a Zenodo DOI'):
         load_manifest(_write(tmp_path, bad))
     # Quoting the same digits as a full DOI is the accepted spelling.
@@ -243,13 +264,17 @@ def test_non_string_zenodo_rejected(tmp_path):
     assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
 
 
-def test_non_string_name_rejected(tmp_path):
+@pytest.mark.parametrize('value', ['42', 'true', '""', '"   "', '["a"]'])
+def test_unusable_name_rejected(tmp_path, value):
     """A dataset name is author-supplied display text, checked when it is read."""
-    bad = '[g.d]\nname = 42\nzenodo = "10.5281/zenodo.1"\n'
-    with pytest.raises(ValueError, match='"name" must be text'):
+    bad = f'[g.d]\nname = {value}\nzenodo = "10.5281/zenodo.1"\n'
+    with pytest.raises(ValueError, match='"name" must be non-empty text'):
         load_manifest(_write(tmp_path, bad))
-    # An absent name falls back to the key rather than to an empty string.
+    # An absent name falls back to the key rather than to an empty string, and a
+    # name with text in it is kept as written.
     assert load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\n'))[0].name == 'g.d'
+    named = '[g.d]\nname = "Demo tracks"\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, named))[0].name == 'Demo tracks'
 
 
 @pytest.mark.parametrize(
@@ -328,6 +353,9 @@ def test_top_level_array_of_tables_rejected(tmp_path):
     bad = '[[d]]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ValueError, match='arrays of tables'):
         load_manifest(_write(tmp_path, bad))
+    # The single-table spelling at the same level is what loads.
+    good = '[d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].subdir == 'd'
 
 
 def test_top_level_scalars_are_ignored(tmp_path):
@@ -350,9 +378,14 @@ def test_unknown_extract_kind_rejected(tmp_path):
 
 
 def test_missing_registry_gives_actionable_error(tmp_path):
+    """A dataset whose registry was never generated names the command to run."""
     ds = load_manifest(_write(tmp_path, GOOD))[0]
     with pytest.raises(FileNotFoundError, match='fwl-io sync'):
         ds.registry()
+    # Writing the registry beside the manifest is what makes the same dataset
+    # resolvable, so the error is about the missing file and nothing else.
+    ds.registry_path.write_text('alpha.dat sha256:abc\n')
+    assert ds.registry() == {'alpha.dat': 'sha256:abc'}
 
 
 @pytest.mark.smoke
@@ -383,6 +416,7 @@ class _FakeEntryPoint:
 
 
 def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
+    """One package with a broken manifest cannot hide every other package's data."""
     good_manifest = _write(tmp_path, GOOD)
 
     def broken():

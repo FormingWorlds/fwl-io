@@ -205,8 +205,8 @@ def load_manifest(path: str | Path) -> list[Dataset]:
         ):
             raise ValueError(f'dataset {key!r}: dataverse value {dataverse!r} is not a DOI')
         name = table.get('name', key)
-        if not isinstance(name, str):
-            raise ValueError(f'dataset {key!r}: "name" must be text, got {name!r}')
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f'dataset {key!r}: "name" must be non-empty text, got {name!r}')
         required_by = table.get('required_by', ())
         if not isinstance(required_by, list | tuple) or not all(
             isinstance(model, str) for model in required_by
