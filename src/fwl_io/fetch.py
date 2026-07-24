@@ -21,7 +21,7 @@ tree, full disk) are reported as distinct errors: a permission problem on
 the data root is never disguised as a download problem.
 
 A transient transport failure (a read or connect timeout, a dropped or reset
-connection, or a 429 or 5xx server response) is retried: every mirror is tried
+connection, or a 429 or transient 5xx server response) is retried: every mirror is tried
 once per round, and the whole set is retried on a short backoff schedule when a
 round ends with no success and at least one transient failure. A round whose
 failures are all permanent (a 404 or a checksum mismatch) stops the retries at
@@ -83,8 +83,9 @@ _RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 # requests exception types that signal a transport-level failure worth retrying:
 # a connect or read timeout, a connection refused or reset before the body, a
 # connection dropped or the stream truncated mid-download, a corrupt compressed
-# body, and a malformed metadata response (pooch resolves a Zenodo or Dataverse
-# DOI through an API call whose non-JSON error body raises JSONDecodeError).
+# body, and a malformed Zenodo-metadata response (pooch reads the record through
+# an API call whose non-JSON error body raises JSONDecodeError). A Dataverse
+# resolution error instead surfaces as a plain ValueError and stays permanent.
 _TRANSIENT_EXC = (
     requests.exceptions.Timeout,
     requests.exceptions.ConnectionError,
@@ -130,8 +131,8 @@ def _is_transient(exc: BaseException) -> bool:
     a 404 or any other status is permanent. A non-HTTP failure is retried when it
     is a transport-level error (``_TRANSIENT_EXC``): a timeout, a refused or reset
     connection, a stream dropped or truncated mid-download, or a malformed
-    response from resolving a DOI. A checksum mismatch (pooch raises a plain
-    ``ValueError``, which is not one of those types) is permanent.
+    response from resolving a Zenodo DOI. A checksum mismatch (pooch raises a
+    plain ``ValueError``, which is not one of those types) is permanent.
     """
     if isinstance(exc, requests.exceptions.HTTPError):
         status = getattr(getattr(exc, 'response', None), 'status_code', None)

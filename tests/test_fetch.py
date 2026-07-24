@@ -1135,3 +1135,39 @@ def test_checksum_mismatch_and_responseless_http_error_are_permanent():
     assert _is_transient(ValueError('hash of downloaded file does not match')) is False
     assert isinstance(requests.exceptions.JSONDecodeError('m', '', 0), ValueError)  # the trap
     assert _is_transient(requests.exceptions.HTTPError('no response attached')) is False
+
+
+@pytest.mark.unit
+def test_round_with_a_transient_mirror_retries_despite_a_permanent_one(tmp_path, monkeypatch):
+    """A round mixing one transient and one permanent mirror still retries.
+
+    The retriable decision is OR-ed over every mirror tried in the round, so a
+    transient failure on one mirror keeps the schedule alive even when another
+    mirror in the same round fails permanently, and both mirrors are tried every
+    round rather than the round being abandoned on the permanent one.
+    """
+    monkeypatch.setattr('fwl_io.fetch._RETRY_BACKOFF_S', (0.01, 0.02))
+    sleeps: list[float] = []
+    monkeypatch.setattr('time.sleep', lambda s: sleeps.append(s))
+
+    calls = {'n': 0}
+
+    def mixed(*args, **kwargs):
+        calls['n'] += 1
+        if 'transient/' in kwargs['url']:
+            raise requests.exceptions.ConnectTimeout('connect timed out')
+        raise ValueError('hash of downloaded file does not match the known hash')
+
+    monkeypatch.setattr('pooch.retrieve', mixed)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'alpha.dat': 'sha256:' + '0' * 64},
+        base_urls=['http://transient/', 'http://permanent/'],
+        data_root=tmp_path,
+    )
+    with pytest.raises(DownloadError):
+        fetcher.fetch('alpha.dat')
+    # Two mirrors across three rounds; a per-mirror-overwrite of retriable would
+    # abandon after the permanent mirror and give calls == 2, sleeps == [].
+    assert calls['n'] == 6, 'two mirrors tried across three rounds'
+    assert sleeps == [0.01, 0.02], 'the transient mirror keeps the round retriable'
