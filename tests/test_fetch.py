@@ -62,6 +62,36 @@ def test_corrupt_file_is_refetched(sample_files, tmp_path):
     assert fetcher.fetch('alpha.dat').read_bytes() == b'0.1 0.2 0.3\n'
 
 
+def test_fetch_proceeds_when_lock_manager_unavailable(sample_files, tmp_path, monkeypatch):
+    """A filesystem without a working lock manager (ENOLCK) must not break fetching.
+
+    The lock only suppresses duplicate downloads; a fetch has to succeed even
+    where the lock cannot be taken, so the guard degrades to an unguarded fetch.
+    """
+    from filelock import FileLock
+
+    def enolck(self, *args, **kwargs):
+        raise OSError(37, 'No locks available')  # errno 37 == ENOLCK
+
+    monkeypatch.setattr(FileLock, 'acquire', enolck)
+    base_url, registry = sample_files
+    path = _fetcher(base_url, registry, tmp_path).fetch('alpha.dat')
+    assert path.read_bytes() == b'0.1 0.2 0.3\n'
+
+
+def test_fetch_proceeds_when_lock_times_out(sample_files, tmp_path, monkeypatch):
+    """A stalled lock holder must not block a waiter indefinitely: on timeout the
+    waiter falls back to fetching unguarded rather than raising."""
+    from filelock import FileLock, Timeout
+
+    def times_out(self, *args, **kwargs):
+        raise Timeout(self.lock_file)
+
+    monkeypatch.setattr(FileLock, 'acquire', times_out)
+    base_url, registry = sample_files
+    assert _fetcher(base_url, registry, tmp_path).fetch('beta.dat').is_file()
+
+
 def test_nested_registry_name_is_placed_below_dataset_dir(http_server, tmp_path):
     import pooch
 

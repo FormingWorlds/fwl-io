@@ -26,6 +26,8 @@ at a pre-populated, read-only copy of the data tree (a group share). Before any 
 
 Many jobs may fetch into one `FWL_DATA` tree concurrently. All writes are staged in `<FWL_DATA>/.fwl-io-staging` on the same filesystem and moved into place with an atomic rename, so a file is either absent or complete and verified; jobs racing on the same file converge on the same verified content. Staging entries left behind by killed jobs are pruned once they are older than a day, the next time any fetcher runs against the tree.
 
+To stop an array job from stampeding the mirrors, each target is also guarded by a per-file inter-process lock under `<FWL_DATA>/.fwl-io-locks`: when many jobs miss the same file at once, one downloads while the rest wait and then reuse the result. The lock is coherent across nodes wherever the shared filesystem supports it (verified on Kapteyn NFS and Hábrók Lustre, which is mounted with `flock`). It is best-effort by design: on a filesystem with no working lock manager, or if a lock holder stalls past `lock_timeout` (five minutes by default), waiters log a warning and fetch unguarded rather than failing or blocking the batch — never worse than having no lock. `.fwl-io-staging` and `.fwl-io-locks` are internal bookkeeping directories; leave them out of `queued`-style completeness checks of the data tree.
+
 ## Recommended pattern for SLURM campaigns
 
 1. On a login node: `fwl-io fetch <model>` for every model in the pipeline, into the shared tree.
