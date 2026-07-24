@@ -28,6 +28,18 @@ failures are all permanent (a 404 or a checksum mismatch) stops the retries at
 once. Every request carries an explicit connect and read timeout, so a stalled
 mirror socket fails in bounded time instead of hanging the fetch.
 
+Concurrency: a burst of processes (for example many PROTEUS instances started
+together) that all miss the same file would otherwise each download it,
+hammering the mirrors and risking rate-limiting for the whole collaboration.
+:meth:`Fetcher.fetch` serialises fetchers of the *same* file with a per-target
+inter-process lock and re-checks the target under it, so only the first process
+downloads and the rest reuse the completed file; distinct files still fetch in
+parallel. The lock lives on the shared data root and is coherent across nodes
+where the filesystem supports it (verified on Kapteyn NFS and Hábrók Lustre).
+It is best-effort: if the filesystem has no usable lock manager or a holder
+stalls past ``lock_timeout``, waiters log a warning and fetch unguarded rather
+than failing or blocking the batch.
+
 A dataset pinned to a Zenodo version DOI resolves into a per-version
 directory ``<subdir>/r<record-id>`` so successive deposits coexist, and
 ``fetch_all`` writes a ``.fwl-io.json`` stamp (DOI, checksums, fetch date)
@@ -41,12 +53,14 @@ directory, with the tree moved into place atomically. The archive is not kept.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -54,6 +68,7 @@ from pathlib import Path
 
 import pooch
 import requests
+from filelock import FileLock, Timeout
 
 from fwl_io.archive import ARCHIVE_KINDS, extract_archive
 from fwl_io.doi import zenodo_record_id
@@ -62,6 +77,12 @@ from fwl_io.registry import load_registry, validate_entry_name
 
 log = logging.getLogger(__name__)
 
+_LOCK_DIRNAME = '.fwl-io-locks'
+# How long a fetcher waits for the per-target download lock before giving up and
+# fetching unguarded. Bounds the worst case where one process wins the lock and
+# then stalls on a slow mirror: waiters degrade to their own fetch rather than
+# blocking a whole batch indefinitely.
+_LOCK_TIMEOUT_S = 300.0
 _STAGING_DIRNAME = '.fwl-io-staging'
 _STAGING_MAX_AGE_S = 24 * 3600
 _STAMP_FILENAME = '.fwl-io.json'
@@ -161,6 +182,7 @@ class Fetcher:
         data_root: str | Path | None = None,
         progress: bool = False,
         extract: str | None = None,
+        lock_timeout: float = _LOCK_TIMEOUT_S,
     ):
         if not registry:
             raise ValueError('empty registry: run "fwl-io sync" for this dataset first')
@@ -191,6 +213,7 @@ class Fetcher:
         self.registry = dict(registry)
         self.progress = progress
         self.extract = extract
+        self.lock_timeout = lock_timeout
         # A dataset pinned to a Zenodo version DOI resolves into a per-version
         # directory r<record-id> below its subdir, so an updated deposit lands
         # beside its predecessor instead of overwriting it. Sources without a
@@ -225,22 +248,92 @@ class Fetcher:
         known_hash = self.registry[fname]
         target = self.target_dir / fname
 
+        # Fast path: an already-present, valid file needs no work and no lock,
+        # so the common case (data already on disk) pays nothing for the guard.
         if target.is_file() and _hash_matches(target, known_hash):
             self._sources.setdefault(fname, 'local')
             return target
-        if target.is_file():
-            log.warning('checksum mismatch for %s; refetching', target)
 
-        cached = self._fetch_from_cache(fname, known_hash, target)
-        if cached is not None:
-            return cached
+        # Serialise concurrent fetchers of the *same* file across processes: a
+        # burst of instances that all miss it would otherwise each hit the
+        # mirrors at once and risk getting the collaboration rate-limited. The
+        # lock is per-target, so unrelated files still fetch in parallel.
+        # Double-checked: re-test the target under the lock, because another
+        # process may have completed the download while we waited.
+        with self._fetch_lock(fname, target):
+            if target.is_file() and _hash_matches(target, known_hash):
+                self._sources.setdefault(fname, 'local')
+                return target
+            if target.is_file():
+                log.warning('checksum mismatch for %s; refetching', target)
 
-        if is_offline() if offline is None else offline:
-            raise OfflineDataError(
-                f'{target} is missing or invalid and offline mode is active; '
-                f'populate the data tree at {self.data_root} or unset FWL_IO_OFFLINE'
+            cached = self._fetch_from_cache(fname, known_hash, target)
+            if cached is not None:
+                return cached
+
+            if is_offline() if offline is None else offline:
+                raise OfflineDataError(
+                    f'{target} is missing or invalid and offline mode is active; '
+                    f'populate the data tree at {self.data_root} or unset FWL_IO_OFFLINE'
+                )
+            return self._download(fname, known_hash, target)
+
+    @contextmanager
+    def _fetch_lock(self, fname: str, target: Path):
+        """Hold a best-effort inter-process lock guarding one target's download.
+
+        The lock only suppresses the thundering herd; it is never required for
+        correctness, since the caller re-checks the target under it and the
+        download is atomic. So it degrades instead of failing in the two cases
+        that would otherwise turn a working fetch into a stalled or failed one:
+
+        * the filesystem has no usable lock manager (e.g. an NFS mount whose
+          lock daemon is down, or a Lustre mount without ``flock``), so
+          acquiring raises ``OSError``/``ENOLCK``; or
+        * a process that holds the lock stalls on a slow mirror past
+          ``lock_timeout``.
+
+        In both cases we log and proceed unlocked -- no worse than having no
+        lock at all, which is the pre-lock behaviour. Where the lock works
+        (verified cross-node on Kapteyn NFS and Hábrók Lustre) exactly one
+        process fetches and the rest reuse its result.
+        """
+        lock = None
+        try:
+            lock = FileLock(str(self._lock_path(fname)), timeout=self.lock_timeout)
+            lock.acquire()
+        except Timeout:
+            log.warning(
+                'timed out after %ss waiting for the download lock on %s; fetching without it',
+                self.lock_timeout,
+                target,
             )
-        return self._download(fname, known_hash, target)
+            lock = None
+        except OSError as exc:
+            log.warning(
+                'download lock unavailable on this filesystem for %s (%s); fetching without it',
+                target,
+                exc,
+            )
+            lock = None
+        try:
+            yield
+        finally:
+            if lock is not None and lock.is_locked:
+                lock.release()
+
+    def _lock_path(self, fname: str) -> Path:
+        """Return the lock file guarding one target, keyed on its on-disk path.
+
+        Locks live in a dedicated directory under the (always writable) data
+        root, not beside the target, whose parent may not exist yet or may
+        itself be read-only. The name is a hash of the versioned relative path,
+        so it is unique per file and free of path separators or length limits.
+        """
+        lock_dir = self.data_root / _LOCK_DIRNAME
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha256(f'{self.rel_dir}/{fname}'.encode()).hexdigest()[:32]
+        return lock_dir / f'{key}.lock'
 
     def _staging_dir(self) -> Path:
         """Return the per-tree staging directory, pruning stale leftovers."""
@@ -620,6 +713,7 @@ def create_fetcher(
     data_root: str | Path | None = None,
     progress: bool = False,
     extract: str | None = None,
+    lock_timeout: float = _LOCK_TIMEOUT_S,
 ) -> Fetcher:
     """Create a :class:`Fetcher` for one dataset.
 
@@ -644,6 +738,12 @@ def create_fetcher(
         When set (``"tar"`` or ``"zip"``), the single registry entry is a
         downloadable archive; it is verified, then its members are extracted
         into the dataset directory and the archive itself is discarded.
+    lock_timeout : float
+        Seconds a fetcher waits for the per-target download lock before giving
+        up and fetching unguarded (default five minutes). The lock only
+        suppresses duplicate concurrent downloads; a waiter that times out (or
+        a filesystem without a working lock manager) falls back to its own
+        fetch rather than blocking or failing.
     """
     if isinstance(registry, (str, Path)):
         registry = load_registry(registry)
@@ -656,4 +756,5 @@ def create_fetcher(
         data_root=data_root,
         progress=progress,
         extract=extract,
+        lock_timeout=lock_timeout,
     )

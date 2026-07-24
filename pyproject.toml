@@ -32,6 +32,7 @@ classifiers = [
 dependencies = [
     "pooch>=1.9",
     "requests>=2.31",
+    "filelock>=3.12",
 ]
 
 [project.urls]
