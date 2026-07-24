@@ -20,6 +20,14 @@ Mirror failures (network, checksum) and local placement failures (read-only
 tree, full disk) are reported as distinct errors: a permission problem on
 the data root is never disguised as a download problem.
 
+A transient transport failure (a read or connect timeout, a dropped or reset
+connection, or a 429 or transient 5xx server response) is retried: every mirror is tried
+once per round, and the whole set is retried on a short backoff schedule when a
+round ends with no success and at least one transient failure. A round whose
+failures are all permanent (a 404 or a checksum mismatch) stops the retries at
+once. Every request carries an explicit connect and read timeout, so a stalled
+mirror socket fails in bounded time instead of hanging the fetch.
+
 A dataset pinned to a Zenodo version DOI resolves into a per-version
 directory ``<subdir>/r<record-id>`` so successive deposits coexist, and
 ``fetch_all`` writes a ``.fwl-io.json`` stamp (DOI, checksums, fetch date)
@@ -45,6 +53,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import pooch
+import requests
 
 from fwl_io.archive import ARCHIVE_KINDS, extract_archive
 from fwl_io.doi import zenodo_record_id
@@ -57,6 +66,39 @@ _STAGING_DIRNAME = '.fwl-io-staging'
 _STAGING_MAX_AGE_S = 24 * 3600
 _STAMP_FILENAME = '.fwl-io.json'
 _STAMP_SCHEMA = 1
+
+# Bounded retry for transient transport failures. Each entry is the wait in
+# seconds before the corresponding retry round, so the tuple length is the
+# number of retry rounds after the first. Every mirror is tried once per round;
+# the set is retried only when a round has at least one transient failure and no
+# success. A read timeout, a dropped connection, or a 429/5xx response is retried
+# on this schedule; a 404 or a checksum mismatch is permanent and is not retried.
+_RETRY_BACKOFF_S: tuple[float, ...] = (10.0, 30.0, 60.0)
+
+# HTTP status codes worth retrying: request timeout, rate limiting, and the
+# transient server and gateway errors. Other 4xx (a 404) and 501/505 are
+# permanent and are not retried.
+_RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+# requests exception types that signal a transport-level failure worth retrying:
+# a connect or read timeout, a connection refused or reset before the body, a
+# connection dropped or the stream truncated mid-download, a corrupt compressed
+# body, and a malformed Zenodo-metadata response (pooch reads the record through
+# an API call whose non-JSON error body raises JSONDecodeError). A Dataverse
+# resolution error instead surfaces as a plain ValueError and stays permanent.
+_TRANSIENT_EXC = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ContentDecodingError,
+    requests.exceptions.JSONDecodeError,
+)
+
+# Explicit (connect, read) timeout handed to pooch's downloaders, so a mirror
+# that will not connect fails fast and a stalled transfer fails in bounded time,
+# instead of inheriting pooch's scalar default. Applied to the DOI and
+# direct-URL paths alike.
+_DOWNLOAD_TIMEOUT_S: tuple[float, float] = (10.0, 60.0)
 
 
 def _fwl_io_version() -> str:
@@ -79,6 +121,23 @@ def _hash_matches(path: Path, known_hash: str) -> bool:
     algorithm = known_hash.split(':', 1)[0] if ':' in known_hash else 'sha256'
     digest = known_hash.split(':', 1)[-1]
     return pooch.file_hash(str(path), alg=algorithm) == digest
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Return whether a failed download is worth retrying.
+
+    An HTTP error is decided by its status: a request timeout, rate limiting, or
+    a transient server or gateway error (``_RETRYABLE_STATUS``) is retried, while
+    a 404 or any other status is permanent. A non-HTTP failure is retried when it
+    is a transport-level error (``_TRANSIENT_EXC``): a timeout, a refused or reset
+    connection, a stream dropped or truncated mid-download, or a malformed
+    response from resolving a Zenodo DOI. A checksum mismatch (pooch raises a
+    plain ``ValueError``, which is not one of those types) is permanent.
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        return status in _RETRYABLE_STATUS
+    return isinstance(exc, _TRANSIENT_EXC)
 
 
 class Fetcher:
@@ -220,30 +279,73 @@ class Fetcher:
         self._sources[fname] = f'cache:{cache_root}'
         return target
 
+    def _downloader(self, mirror: str):
+        """Build a pooch downloader for one mirror with a bounded request timeout.
+
+        A ``doi:`` mirror is resolved through pooch's DOI downloader; a direct
+        base URL uses the plain HTTP downloader. Both carry the same explicit
+        per-request timeout (``_DOWNLOAD_TIMEOUT_S``), so a stalled socket fails
+        in bounded time instead of inheriting pooch's downloader-specific
+        default.
+        """
+        if mirror.startswith('doi:'):
+            return pooch.DOIDownloader(progressbar=self.progress, timeout=_DOWNLOAD_TIMEOUT_S)
+        return pooch.HTTPDownloader(progressbar=self.progress, timeout=_DOWNLOAD_TIMEOUT_S)
+
+    def _retrieve_once(self, mirror: str, fname: str, known_hash: str, into_dir: Path) -> str:
+        """Download ``fname`` from a single mirror in one attempt.
+
+        Returns the local path pooch wrote on success and lets pooch's exception
+        (a transport error, an HTTP error, or a checksum ``ValueError``)
+        propagate so the caller can classify it for retry.
+        """
+        return pooch.retrieve(
+            url=f'{mirror}{fname}',
+            known_hash=known_hash,
+            fname=fname.replace('/', '_'),
+            path=into_dir,
+            downloader=self._downloader(mirror),
+        )
+
     def _retrieve_from_mirrors(
         self, fname: str, known_hash: str, into_dir: Path
     ) -> tuple[str, str]:
         """Download and checksum-verify ``fname`` into ``into_dir``.
 
-        Tries each mirror in turn (Zenodo first, then Dataverse); a network or
-        checksum failure moves to the next. Returns ``(local_path, mirror)`` on
-        success and raises :class:`DownloadError` if no mirror serves the file.
+        Each round tries every mirror once (Zenodo first, then Dataverse), so a
+        transient failure on one mirror falls over to the next at once rather
+        than waiting out the backoff. When a round ends with no success and at
+        least one transient failure, the loop waits ``_RETRY_BACKOFF_S`` and
+        tries the whole set again; a round whose failures are all permanent (a
+        404 or a checksum mismatch on every mirror) stops immediately. Returns
+        ``(local_path, mirror)`` on success and raises :class:`DownloadError`
+        when no mirror serves the file.
         """
         errors: list[str] = []
-        for mirror in self.mirrors:
-            try:
-                got = pooch.retrieve(
-                    url=f'{mirror}{fname}',
-                    known_hash=known_hash,
-                    fname=fname.replace('/', '_'),
-                    path=into_dir,
-                    progressbar=self.progress,
+        rounds = (0.0, *_RETRY_BACKOFF_S)
+        for round_idx, delay in enumerate(rounds):
+            if delay:
+                log.warning(
+                    'retrying %s after transient mirror failures; waiting %gs (round %d/%d)',
+                    fname,
+                    delay,
+                    round_idx + 1,
+                    len(rounds),
                 )
-            except Exception as exc:  # noqa: BLE001 -- try the next mirror on any failure
-                errors.append(f'{mirror}: {exc}')
-                log.warning('mirror failed for %s: %s', fname, exc)
-                continue
-            return got, mirror
+                time.sleep(delay)
+            errors = []
+            retriable = False
+            for mirror in self.mirrors:
+                try:
+                    got = self._retrieve_once(mirror, fname, known_hash, into_dir)
+                except Exception as exc:  # noqa: BLE001 -- classified for retry, tried per mirror
+                    errors.append(f'{mirror}: {exc}')
+                    retriable = retriable or _is_transient(exc)
+                    log.warning('mirror failed for %s: %s', fname, exc)
+                    continue
+                return got, mirror
+            if not retriable:
+                break
         raise DownloadError(f'could not obtain {fname!r} from any mirror:\n' + '\n'.join(errors))
 
     def _download(self, fname: str, known_hash: str, target: Path) -> Path:

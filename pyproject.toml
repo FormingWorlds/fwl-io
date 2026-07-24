@@ -30,7 +30,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "pooch>=1.8",
+    "pooch>=1.9",
     "requests>=2.31",
 ]
 
