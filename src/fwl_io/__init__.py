@@ -10,7 +10,13 @@ directory tree with hash verification and atomic writes.
 from importlib.metadata import PackageNotFoundError, version
 
 from fwl_io.fetch import DownloadError, Fetcher, OfflineDataError, create_fetcher
-from fwl_io.manifest import Dataset, discover_manifests, fetch_for, load_manifest
+from fwl_io.manifest import (
+    Dataset,
+    ManifestSchemaError,
+    discover_manifests,
+    fetch_for,
+    load_manifest,
+)
 from fwl_io.paths import MissingDataRootError, resolve_cache_root, resolve_data_root
 
 try:
@@ -22,6 +28,7 @@ __all__ = [
     'Dataset',
     'DownloadError',
     'Fetcher',
+    'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
     '__version__',

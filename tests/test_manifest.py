@@ -9,6 +9,7 @@ import pytest
 from fwl_io.fetch import create_fetcher
 from fwl_io.manifest import (
     Dataset,
+    ManifestSchemaError,
     discover_manifests,
     fetch_for,
     load_manifest,
@@ -586,3 +587,199 @@ def test_fetch_for_stamps_each_required_dataset_and_skips_others(tmp_path, monke
     assert stamp.is_file()
     assert json.loads(stamp.read_text())['record_id'] == '111'
     assert not (data_root / 'interior/eos/demo/r222/.fwl-io.json').exists()
+
+
+def test_unknown_dataset_field_reports_both_readings(tmp_path):
+    """A field this fwl-io does not know is a schema disagreement, not a
+    malformed file, and the error offers both readings of it.
+
+    A model ships its manifest with its own code, so the manifest can be newer
+    than the installed fwl-io. Ignoring the field silently would leave the
+    manifest asking for something it never gets. The two causes, a misspelt
+    field and a newer schema, need different actions, so the message names
+    both rather than asserting one.
+    """
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nchecksum_algorithm = "sha256"\nmirror_priority = 2\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+
+    message = str(excinfo.value)
+    # Every unknown field is named, not just the first one found.
+    assert "'checksum_algorithm'" in message
+    assert "'mirror_priority'" in message
+    # The accepted set is spelled out in full, so the reader can see what was
+    # expected rather than a sample of it.
+    known = message.split('known fields:')[1]
+    for accepted in ('dataverse', 'extract', 'name', 'required_by', 'zenodo'):
+        assert accepted in known
+    # Both actions are offered, because either cause is plausible.
+    assert 'check the spelling' in message
+    assert 'upgrade fwl-io' in message
+    # Discrimination: the same table without those fields loads, so the error
+    # is the fields and not the table.
+    good = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, good))[0].key == 'g.d'
+
+
+def test_error_reports_the_schema_the_running_code_implements(tmp_path):
+    """The message identifies the code doing the reading by its schema number.
+
+    An editable checkout keeps the version recorded at install time, so the
+    distribution version can name a release that contains none of the code
+    actually running. The schema number lives in the source and travels with
+    it, so it cannot go stale that way.
+    """
+    import fwl_io
+    from fwl_io.manifest import _MANIFEST_SCHEMA
+
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nunknown_field = 1\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+
+    message = str(excinfo.value)
+    # The schema number, pinned to a literal so a silent renumber is caught.
+    assert _MANIFEST_SCHEMA == 1
+    assert 'manifest schema 1' in message
+    # The packaging version is reported alongside it and labelled as what it
+    # is, so the two are not confused for each other.
+    assert f'distribution {fwl_io.__version__}' in message
+
+
+def test_schema_error_reaches_a_caller_catching_value_error(tmp_path):
+    """A caller that already handles a malformed manifest receives the typed
+    error unchanged, so a consumer needs no new except clause to keep working.
+    """
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nunknown_field = 1\n'
+
+    with pytest.raises(ValueError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+
+    # Caught as ValueError, delivered as the specific type.
+    assert isinstance(excinfo.value, ManifestSchemaError)
+    assert type(excinfo.value) is not ValueError
+
+
+def test_every_declared_dataset_field_is_accepted(tmp_path):
+    """The accepted set is exactly the model the loader fills in.
+
+    Discrimination: a field dropped from the set makes this manifest fail, and
+    a field added to the set without a home on the dataset is caught by the
+    comparison against the model rather than by loading.
+    """
+    import dataclasses
+
+    from fwl_io.manifest import _DATASET_FIELDS
+
+    manifest = (
+        '[g.d]\n'
+        'name = "Demo"\n'
+        'zenodo = "10.5281/zenodo.1234567"\n'
+        'dataverse = "10.34894/ABCDEF"\n'
+        'required_by = ["mors"]\n'
+        'extract = "tar"\n'
+    )
+
+    dataset = load_manifest(_write(tmp_path, manifest))[0]
+
+    assert dataset.name == 'Demo'
+    assert dataset.zenodo == '10.5281/zenodo.1234567'
+    assert dataset.dataverse == '10.34894/ABCDEF'
+    assert dataset.required_by == ('mors',)
+    assert dataset.extract == 'tar'
+    # The set cannot drift open: it is the dataset model minus the two fields
+    # the loader derives rather than reads.
+    derived = {'key', 'registry_path'}
+    assert _DATASET_FIELDS == {f.name for f in dataclasses.fields(Dataset)} - derived
+    # The location is derived, so re-admitting it as a field would undo that.
+    assert 'subdir' not in _DATASET_FIELDS
+
+
+def test_declared_subdir_is_reported_as_a_dropped_field(tmp_path):
+    """A manifest still declaring `subdir` is the other direction of the same
+    disagreement: the manifest is older than the fwl-io reading it, so the
+    action is to delete the line, not to upgrade.
+    """
+    bad = '[g.d]\nzenodo = "10.5281/zenodo.1"\nsubdir = "somewhere/else"\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+
+    message = str(excinfo.value)
+    assert 'subdir' in message
+    # The location is derived, and the message says where to.
+    assert 'g/d' in message
+    assert 'remove the line' in message
+    # The reading code is named here too, so every branch can be placed
+    # against the schema table.
+    assert 'manifest schema 1' in message
+    # Discrimination: upgrading fwl-io is the wrong action here, and offering
+    # it would send the reader in the opposite direction.
+    assert 'upgrade fwl-io' not in message
+
+
+def test_dataset_field_written_one_level_too_high_is_rejected(tmp_path):
+    """A dataset field on a grouping table is refused rather than dropped.
+
+    A `required_by` on the grouping table would leave the dataset claiming no
+    model needs it, so `fwl-io fetch <model>` would fetch nothing while the
+    manifest said otherwise. It is refused instead.
+    """
+    misplaced = '[star]\nrequired_by = ["mors"]\n[star.tracks]\nzenodo = "10.5281/zenodo.1"\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, misplaced))
+
+    message = str(excinfo.value)
+    assert "'required_by'" in message
+    assert "'star'" in message
+    # The action is to move the line, since the field is spelled correctly and
+    # no fwl-io reads it where it sits.
+    assert 'move the line into the dataset table' in message
+    assert 'manifest schema 1' in message
+    assert 'check the spelling' not in message
+    assert 'upgrade fwl-io' not in message
+    # Discrimination: the same field inside the dataset table is read, so the
+    # rejection is about where it sits, not about the field itself.
+    correct = '[star.tracks]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n'
+    assert load_manifest(_write(tmp_path, correct))[0].required_by == ('mors',)
+
+
+def test_unknown_name_on_a_grouping_level_keeps_the_two_readings(tmp_path):
+    """A name that is not a dataset field at all gets the spelling-or-upgrade
+    advice wherever it appears, because either cause remains possible.
+
+    Discrimination against the misplaced-field case: that one names an action
+    that only applies to a field this fwl-io does read.
+    """
+    bad = '[star]\nchecksum_algorithm = "sha256"\n[star.tracks]\nzenodo = "10.5281/zenodo.1"\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+
+    message = str(excinfo.value)
+    assert "'checksum_algorithm'" in message
+    assert 'check the spelling' in message
+    assert 'move the line' not in message
+
+
+def test_dataset_field_at_the_manifest_root_is_rejected(tmp_path):
+    """A dataset field at the root is the same misplacement as one on a
+    grouping level: for a top-level dataset table, the root is the level above
+    it, so a `required_by` there would leave the dataset claiming no model
+    needs it.
+    """
+    misplaced = 'required_by = ["mors"]\n[demo]\nzenodo = "10.5281/zenodo.1"\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, misplaced))
+
+    message = str(excinfo.value)
+    assert "'required_by'" in message
+    assert 'move the line into the dataset table' in message
+    # Discrimination: a root scalar that names no dataset field is a
+    # manifest's own setting and still loads, so the rejection is about the
+    # name and not about scalars at the root.
+    setting = 'schema_version = 1\n[demo]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, setting))[0].key == 'demo'
