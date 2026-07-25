@@ -84,8 +84,9 @@ class ManifestSchemaError(ValueError):
     """A manifest and the installed fwl-io disagree about the manifest schema.
 
     Raised when a manifest declares something this fwl-io does not understand,
-    or something it no longer understands. Subclasses ValueError, so callers
-    that already handle a malformed manifest keep working.
+    something it no longer understands, or a field it reads only inside a
+    dataset table. Subclasses ValueError, so callers that already handle a
+    malformed manifest keep working.
     """
 
 
@@ -115,8 +116,9 @@ def _unknown_field_error(what: str) -> ManifestSchemaError:
 def _misplaced_field_error(what: str) -> ManifestSchemaError:
     """Build the error for a known field declared outside a dataset table."""
     return ManifestSchemaError(
-        f'{what}. It is a dataset field, so move the line into the dataset table '
-        f'below it, the one carrying the "zenodo" pin.'
+        f'{what}. This fwl-io reads {_reading_version()}, in which it is a dataset '
+        f'field: move the line into the dataset table, the one carrying the '
+        f'"zenodo" pin.'
     )
 
 
@@ -207,14 +209,20 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
                 f'{prefix}{name}: arrays of tables ([[...]]) are not supported in manifests'
             )
         if not isinstance(value, dict):
-            if prefix:
+            if name in _DATASET_FIELDS:
                 where = (
+                    f'grouping table {prefix.rstrip(".")!r} declares {name!r}'
+                    if prefix
+                    else f'the manifest root declares {name!r}'
+                )
+                raise _misplaced_field_error(where)
+            if prefix:
+                raise _unknown_field_error(
                     f'grouping table {prefix.rstrip(".")!r} declares {name!r}, and a '
                     f'grouping level takes no fields'
                 )
-                if name in _DATASET_FIELDS:
-                    raise _misplaced_field_error(where)
-                raise _unknown_field_error(where)
+            # A root scalar that names no dataset field is a manifest's own
+            # setting.
             continue
         dotted = f'{prefix}{name}'
         _validate_key_segment(name, prefix.rstrip('.'))

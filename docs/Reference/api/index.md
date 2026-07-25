@@ -9,13 +9,14 @@ from fwl_io import (
     fetch_for, Dataset,
     resolve_data_root, resolve_cache_root,
     DownloadError, OfflineDataError, MissingDataRootError,
+    ManifestSchemaError,
 )
 ```
 
 Per-module reference pages:
 
 - [Fetching](fetch.md): `Fetcher`, `create_fetcher`, error types
-- [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`
+- [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`, `ManifestSchemaError`
 - [Registries](registry.md): registry file reading and writing
 - [Sync](sync.md): registry generation from the Zenodo API
 - [Paths](paths.md): data root, shared cache, offline mode

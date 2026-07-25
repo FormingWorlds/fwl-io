@@ -711,6 +711,9 @@ def test_declared_subdir_is_reported_as_a_dropped_field(tmp_path):
     # The location is derived, and the message says where to.
     assert 'g/d' in message
     assert 'remove the line' in message
+    # The reading code is named here too, so every branch can be placed
+    # against the schema table.
+    assert 'manifest schema 1' in message
     # Discrimination: upgrading fwl-io is the wrong action here, and offering
     # it would send the reader in the opposite direction.
     assert 'upgrade fwl-io' not in message
@@ -734,6 +737,7 @@ def test_dataset_field_written_one_level_too_high_is_rejected(tmp_path):
     # The action is to move the line, since the field is spelled correctly and
     # no fwl-io reads it where it sits.
     assert 'move the line into the dataset table' in message
+    assert 'manifest schema 1' in message
     assert 'check the spelling' not in message
     assert 'upgrade fwl-io' not in message
     # Discrimination: the same field inside the dataset table is read, so the
@@ -758,3 +762,24 @@ def test_unknown_name_on_a_grouping_level_keeps_the_two_readings(tmp_path):
     assert "'checksum_algorithm'" in message
     assert 'check the spelling' in message
     assert 'move the line' not in message
+
+
+def test_dataset_field_at_the_manifest_root_is_rejected(tmp_path):
+    """A dataset field at the root is the same misplacement as one on a
+    grouping level: for a top-level dataset table, the root is the level above
+    it, so a `required_by` there would leave the dataset claiming no model
+    needs it.
+    """
+    misplaced = 'required_by = ["mors"]\n[demo]\nzenodo = "10.5281/zenodo.1"\n'
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, misplaced))
+
+    message = str(excinfo.value)
+    assert "'required_by'" in message
+    assert 'move the line into the dataset table' in message
+    # Discrimination: a root scalar that names no dataset field is a
+    # manifest's own setting and still loads, so the rejection is about the
+    # name and not about scalars at the root.
+    setting = 'schema_version = 1\n[demo]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, setting))[0].key == 'demo'
