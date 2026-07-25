@@ -24,8 +24,18 @@ Validation at load time:
 - `required_by`, when present, must be a list of model names.
 - `extract`, when present, must be `"tar"` or `"zip"`.
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
+- A dataset table declares only the fields above, and a grouping level declares none: anything else raises `ManifestSchemaError`, naming the field and the manifest schema this fwl-io implements. A model ships its manifest with its own code, so a manifest can be newer than the installed fwl-io; ignoring an unknown field silently would leave the manifest asking for something it never gets, and a `required_by` written one level above its dataset would leave the dataset claiming no model needs it. The message names the action that fits the case: move a dataset field that sits too high, delete a field this fwl-io no longer takes, and for a name it does not know at all, check the spelling or upgrade. Two things are outside the check. A scalar at the manifest root is reserved for a manifest's own settings and is ignored, apart from `subdir`. And a table is recognised as a dataset by its `zenodo` key, so a misspelt `zenodo` is reported as a table with no pin rather than as an unknown field.
+- A manifest that fails to load takes its whole provider with it: `discover_manifests` skips that package and logs a warning, so its other datasets disappear from the result too. Use `fwl-io list` to see the error.
 - A `subdir` field is rejected on any table, dataset or grouping level, and at the manifest root: the location comes from the key. A table *named* `subdir` is an ordinary directory level.
 - Within one manifest, two keys that differ only in case are rejected: they would share one directory and one registry file on a case-insensitive filesystem. Two installed packages declaring keys that collide is a separate check, tracked in [#18](https://github.com/FormingWorlds/fwl-io/issues/18).
+
+### Schema versions
+
+| Schema | From | What it means |
+|---|---|---|
+| 1 | 26.07.22 | A dataset's location is derived from its dotted table key; `subdir` is not a field. |
+
+An error raised while reading a manifest names the schema the running code implements, so a mismatch between a manifest and an installed fwl-io can be placed against this table.
 
 ## Archive datasets
 
