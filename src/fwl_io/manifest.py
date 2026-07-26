@@ -8,12 +8,20 @@ Adding data to a model therefore never requires an fwl-io release.
 
 Manifest schema, one table per dataset, identified by its ``zenodo`` key::
 
+    manifest_schema = 1                     # optional, see below
+
     [interior.eos.wolf_bower_2018]
     name = "Wolf & Bower (2018) MgSiO3 equation of state"
     zenodo = "10.5281/zenodo.1234567"       # version DOI, never a concept DOI
     dataverse = "10.34894/ABCDEF"           # optional download mirror
     required_by = ["aragog", "zalmoxis", "spider"]
     extract = "tar"                         # optional: unpack a single-archive deposit
+
+The optional root ``manifest_schema`` names the schema the file was written
+against. Declaring it sharpens the diagnosis when something does not load: a
+number above the schema the installed fwl-io implements can only mean the
+reader is too old, and a number equal to it rules that reading out, so an
+unknown field is reported as a misspelling alone.
 
 The dotted table key is the dataset location below the data root: the table
 above resolves into ``interior/eos/wolf_bower_2018``. Key segments are
@@ -79,6 +87,12 @@ _DATASET_FIELDS = frozenset({'name', 'zenodo', 'dataverse', 'required_by', 'extr
 # checkout's recorded version does not.
 _MANIFEST_SCHEMA = 1
 
+# The root key by which a manifest states the schema it was written against.
+# Declaring it is optional and turns an ambiguous diagnosis into a definite
+# one: a manifest that names a schema this code does not implement is from the
+# future and says so, rather than being reported as a possible typo.
+_SCHEMA_KEY = 'manifest_schema'
+
 
 class ManifestSchemaError(ValueError):
     """A manifest and the installed fwl-io disagree about the manifest schema.
@@ -101,15 +115,72 @@ def _reading_version() -> str:
     return f'manifest schema {_MANIFEST_SCHEMA} (distribution {distribution})'
 
 
-def _unknown_field_error(what: str) -> ManifestSchemaError:
+def _unknown_field_error(what: str, declared_schema: int | None = None) -> ManifestSchemaError:
     """Build the error for a field this fwl-io does not know.
 
-    Both readings are offered because both are common: a misspelt field, and a
-    manifest written against a schema newer than the fwl-io reading it.
+    Without a declared schema both readings are offered, because both are
+    common: a misspelt field, and a manifest written against a schema newer
+    than the fwl-io reading it. A manifest declaring the schema this code
+    implements has ruled the second reading out, so the message names the typo
+    alone. A manifest declaring an older schema does not: the schema number
+    rises whenever a manifest written for the previous one stops loading, so a
+    field this code does not know may be one that older schema had and this
+    one dropped, and both readings stay on the table.
     """
+    if declared_schema == _MANIFEST_SCHEMA:
+        return ManifestSchemaError(
+            f'{what}. The manifest declares {_SCHEMA_KEY} {declared_schema}, the schema '
+            f'this fwl-io implements, so the field is misspelt rather than newer than '
+            f'this code.'
+        )
     return ManifestSchemaError(
         f'{what}. This fwl-io reads {_reading_version()}: check the spelling, or '
         f'upgrade fwl-io if the manifest was written against a newer schema.'
+    )
+
+
+def _read_declared_schema(tree: dict) -> int | None:
+    """Return the schema a manifest declares at its root, if it declares one.
+
+    Raises when the manifest names a schema this code does not implement,
+    which is the case the key exists to make unambiguous, and when the value
+    is not a schema number at all.
+    """
+    if _SCHEMA_KEY not in tree:
+        return None
+    declared = tree[_SCHEMA_KEY]
+    # A table of this name is a directory level like any other, the same rule
+    # `subdir` follows: the reserved name applies to the scalar, not to a
+    # dataset an author happens to have called this. Leave it to the walk.
+    if isinstance(declared, dict) or (
+        isinstance(declared, list) and any(isinstance(item, dict) for item in declared)
+    ):
+        return None
+    # bool is an int subclass, and `manifest_schema = true` is a mistake worth
+    # naming rather than reading as schema 1.
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        raise ManifestSchemaError(
+            f'the manifest root declares {_SCHEMA_KEY} {declared!r}; it must be a whole '
+            f'number of at least 1, naming the manifest schema the file was written '
+            f'against.'
+        )
+    if declared > _MANIFEST_SCHEMA:
+        raise ManifestSchemaError(
+            f'the manifest declares {_SCHEMA_KEY} {declared}, but this fwl-io reads '
+            f'{_reading_version()}: upgrade fwl-io to read this manifest.'
+        )
+    return declared
+
+
+def _misplaced_schema_error(what: str) -> ManifestSchemaError:
+    """Build the error for the reserved schema key written below the root.
+
+    The name is spelt correctly and sits at the wrong level, so reporting it as
+    an unknown field would give the one reading that is certainly wrong.
+    """
+    return ManifestSchemaError(
+        f'{what}. {_SCHEMA_KEY!r} is a manifest-root key naming the schema the file was '
+        f'written against: move the line above the first table.'
     )
 
 
@@ -195,7 +266,9 @@ def _reject_declared_subdir(where: str, table: dict, derived: str | None = None)
     )
 
 
-def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
+def _walk_tables(
+    tree: dict, prefix: str = '', declared_schema: int | None = None
+) -> list[tuple[str, dict]]:
     """Return (dotted-key, table) pairs for the dataset tables of a manifest.
 
     A table is a dataset when it carries the ``zenodo`` key. Grouping tables
@@ -217,12 +290,18 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
                 )
                 raise _misplaced_field_error(where)
             if prefix:
+                if name == _SCHEMA_KEY:
+                    raise _misplaced_schema_error(
+                        f'grouping table {prefix.rstrip(".")!r} declares {name!r}'
+                    )
                 raise _unknown_field_error(
                     f'grouping table {prefix.rstrip(".")!r} declares {name!r}, and a '
-                    f'grouping level takes no fields'
+                    f'grouping level takes no fields',
+                    declared_schema,
                 )
             # A root scalar that names no dataset field is a manifest's own
-            # setting.
+            # setting. The schema declaration is one of those, already read
+            # and validated before the walk began.
             continue
         dotted = f'{prefix}{name}'
         _validate_key_segment(name, prefix.rstrip('.'))
@@ -237,15 +316,18 @@ def _walk_tables(tree: dict, prefix: str = '') -> list[tuple[str, dict]]:
             if has_subtables:
                 raise ValueError(f'dataset {dotted!r}: dataset tables must not contain sub-tables')
             unknown = sorted(set(value) - _DATASET_FIELDS)
+            if _SCHEMA_KEY in unknown:
+                raise _misplaced_schema_error(f'dataset {dotted!r} declares {_SCHEMA_KEY!r}')
             if unknown:
                 raise _unknown_field_error(
                     f'dataset {dotted!r} declares {", ".join(repr(f) for f in unknown)}, '
                     f'which is not a dataset field '
-                    f'(known fields: {", ".join(sorted(_DATASET_FIELDS))})'
+                    f'(known fields: {", ".join(sorted(_DATASET_FIELDS))})',
+                    declared_schema,
                 )
             leaves.append((dotted, value))
         elif has_subtables:
-            leaves.extend(_walk_tables(value, prefix=f'{dotted}.'))
+            leaves.extend(_walk_tables(value, prefix=f'{dotted}.', declared_schema=declared_schema))
         else:
             raise ValueError(
                 f'table {dotted!r} has no "zenodo" key, so it is neither a dataset nor a '
@@ -261,10 +343,13 @@ def load_manifest(path: str | Path) -> list[Dataset]:
     with path.open('rb') as fh:
         tree = tomllib.load(fh)
 
+    # Read the declaration first: a manifest above this code's schema cannot be
+    # judged by this code's rules, so it must be refused before they are applied.
+    declared_schema = _read_declared_schema(tree)
     _reject_declared_subdir('the manifest root', tree)
     datasets: list[Dataset] = []
     folded: dict[str, str] = {}
-    for key, table in _walk_tables(tree):
+    for key, table in _walk_tables(tree, declared_schema=declared_schema):
         clash = folded.setdefault(key.lower(), key)
         if clash != key:
             raise ValueError(

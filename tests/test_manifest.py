@@ -783,3 +783,97 @@ def test_dataset_field_at_the_manifest_root_is_rejected(tmp_path):
     # name and not about scalars at the root.
     setting = 'schema_version = 1\n[demo]\nzenodo = "10.5281/zenodo.1"\n'
     assert load_manifest(_write(tmp_path, setting))[0].key == 'demo'
+
+
+DEMO = '[demo]\nzenodo = "10.5281/zenodo.1"\n'
+
+
+def test_a_manifest_from_a_newer_schema_says_so(tmp_path):
+    """A schema above the implemented one can only mean the reader is too old."""
+    with pytest.raises(ManifestSchemaError, match='upgrade fwl-io') as excinfo:
+        load_manifest(_write(tmp_path, f'manifest_schema = 99\n{DEMO}'))
+    # The spelling reading is dropped: nothing about this file is misspelt.
+    assert 'spelling' not in str(excinfo.value)
+    # The same file at the implemented schema loads, so the refusal is the
+    # number's doing and not the declaration's presence.
+    assert load_manifest(_write(tmp_path, f'manifest_schema = 1\n{DEMO}'))[0].key == 'demo'
+
+
+def test_declaring_the_implemented_schema_makes_an_unknown_field_a_typo(tmp_path):
+    """Declaring the schema this code implements rules out the newer-field reading."""
+    body = '[demo]\nzenodo = "10.5281/zenodo.1"\nrequired_bye = ["proteus"]\n'
+    with pytest.raises(ManifestSchemaError, match='misspelt') as declared:
+        load_manifest(_write(tmp_path, f'manifest_schema = 1\n{body}'))
+    assert 'upgrade fwl-io' not in str(declared.value)
+    # Without the declaration the same file still offers both readings, so the
+    # sharper message is attributable to the declaration.
+    with pytest.raises(ManifestSchemaError, match='upgrade fwl-io'):
+        load_manifest(_write(tmp_path, body))
+
+
+def test_the_sharper_message_reaches_nested_and_grouping_tables(tmp_path):
+    """The declaration sharpens every unknown-field message, at any depth."""
+    nested = 'manifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_bye = ["p"]\n'
+    with pytest.raises(ManifestSchemaError, match='misspelt') as deep:
+        load_manifest(_write(tmp_path, nested))
+    assert 'upgrade fwl-io' not in str(deep.value), (
+        'a dataset below a grouping level lost the declaration on the way down'
+    )
+
+    grouping = (
+        'manifest_schema = 1\n[grp]\nnickname = "x"\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\n'
+    )
+    with pytest.raises(ManifestSchemaError, match='misspelt') as level:
+        load_manifest(_write(tmp_path, grouping))
+    assert 'upgrade fwl-io' not in str(level.value), 'a grouping level lost the declaration'
+
+
+@pytest.mark.parametrize(
+    'value',
+    ['0', '-1', '"1"', '1.5', 'true'],
+    ids=['zero', 'negative', 'text', 'fractional', 'boolean'],
+)
+def test_the_schema_declaration_must_be_a_schema_number(tmp_path, value):
+    """Anything that is not a positive whole number is a mistake, including true."""
+    with pytest.raises(ManifestSchemaError, match='whole number') as excinfo:
+        load_manifest(_write(tmp_path, f'manifest_schema = {value}\n{DEMO}'))
+    assert 'manifest_schema' in str(excinfo.value)
+
+
+def test_a_table_named_for_the_schema_key_is_an_ordinary_directory(tmp_path):
+    """The reserved name applies to the scalar, as with subdir, not to a table."""
+    dataset = '[manifest_schema]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, dataset))[0].key == 'manifest_schema'
+    # Also as a grouping level, where the walk has to recurse past it.
+    nested = '[manifest_schema.demo]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, nested))[0].key == 'manifest_schema.demo'
+
+
+def test_the_schema_key_below_the_root_is_misplaced_rather_than_misspelt(tmp_path):
+    """The reserved key inside a table is at the wrong level, not spelt wrong."""
+    in_dataset = f'{DEMO}manifest_schema = 1\n'
+    with pytest.raises(ManifestSchemaError, match='move the line above the first table'):
+        load_manifest(_write(tmp_path, in_dataset))
+
+    in_grouping = (
+        'manifest_schema = 1\n[grp]\nmanifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\n'
+    )
+    with pytest.raises(ManifestSchemaError, match='move the line above the first table') as grp:
+        load_manifest(_write(tmp_path, in_grouping))
+    assert 'misspelt' not in str(grp.value)
+
+
+def test_a_future_manifest_is_refused_before_this_codes_own_rules(tmp_path):
+    """A manifest above this schema cannot be judged by this schema's rules."""
+    future = f'manifest_schema = 99\nsubdir = "x"\n{DEMO}'
+    with pytest.raises(ManifestSchemaError, match='upgrade fwl-io') as excinfo:
+        load_manifest(_write(tmp_path, future))
+    # The subdir rule is one of this code's rules, so it must not be the thing
+    # reported: schema 99 may well have reinstated the field.
+    assert 'subdir' not in str(excinfo.value)
+
+
+def test_other_root_scalars_stay_a_manifests_own_settings(tmp_path):
+    """Reserving one root key leaves the root open to a manifest's own settings."""
+    setting = f'schema_version = 1\nowner = "proteus"\n{DEMO}'
+    assert [ds.key for ds in load_manifest(_write(tmp_path, setting))] == ['demo']

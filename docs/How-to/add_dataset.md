@@ -20,11 +20,15 @@ Choose the manifest:
 Add a table for the dataset:
 
 ```toml
+manifest_schema = 1
+
 [interior.eos.wolf_bower_2018]
 name = "Wolf & Bower (2018) MgSiO3 equation of state"
 zenodo = "10.5281/zenodo.1234567"
 required_by = ["aragog", "zalmoxis", "spider"]
 ```
+
+The root `manifest_schema` names the schema the file is written against. It is optional and worth declaring: it lets fwl-io tell a manifest written for a newer schema from a misspelt field, so a load failure names the one that applies instead of offering both. The current schema is in the [schema versions](../Explanations/manifests.md#schema-versions) table.
 
 The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018/r<record-id>`, the version directory named for its Zenodo record. Choose the key to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
 
