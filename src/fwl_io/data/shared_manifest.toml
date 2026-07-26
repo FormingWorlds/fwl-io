@@ -1,6 +1,8 @@
 # Datasets shared by several models of the PROTEUS ecosystem.
 #
-# One TOML table per dataset:
+# One TOML table per dataset, below an optional schema declaration:
+#
+#   manifest_schema = 1
 #
 #   [group.dataset_key]
 #   name = "Human-readable dataset name"
@@ -23,3 +25,5 @@
 # No dataset is shared across several models yet, so this manifest declares
 # none. The Baraffe stellar tracks ship with the MORS package, which owns their
 # manifest and registry.
+
+manifest_schema = 1
