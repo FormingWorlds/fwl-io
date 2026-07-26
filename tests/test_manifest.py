@@ -6,6 +6,7 @@ import tarfile
 import pooch
 import pytest
 
+from fwl_io import manifest
 from fwl_io.fetch import create_fetcher
 from fwl_io.manifest import (
     Dataset,
@@ -877,3 +878,20 @@ def test_other_root_scalars_stay_a_manifests_own_settings(tmp_path):
     """Reserving one root key leaves the root open to a manifest's own settings."""
     setting = f'schema_version = 1\nowner = "proteus"\n{DEMO}'
     assert [ds.key for ds in load_manifest(_write(tmp_path, setting))] == ['demo']
+
+
+def test_older_schema_refusal_names_both_numbers(tmp_path, monkeypatch):
+    """The refusal names the manifest's schema and the reader's, and where to look."""
+    monkeypatch.setattr(manifest, '_MANIFEST_SCHEMA', 3)
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        load_manifest(_write(tmp_path, f'manifest_schema = 1\n{DEMO}'))
+    message = str(excinfo.value)
+    assert 'manifest_schema 1' in message, 'the refusal must name the schema the manifest declares'
+    assert 'manifest schema 3' in message, 'the refusal must name the schema the reader implements'
+    assert 'schema versions table' in message, 'the refusal must say where to look'
+    # It is not the upgrade case: the reader is newer, not older.
+    assert 'upgrade fwl-io' not in message
+
+    # Discrimination: at the reader's own schema the same file loads, so the
+    # refusal is the number's doing.
+    assert load_manifest(_write(tmp_path, f'manifest_schema = 3\n{DEMO}'))[0].key == 'demo'

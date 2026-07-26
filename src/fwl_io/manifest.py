@@ -18,10 +18,12 @@ Manifest schema, one table per dataset, identified by its ``zenodo`` key::
     extract = "tar"                         # optional: unpack a single-archive deposit
 
 The optional root ``manifest_schema`` names the schema the file was written
-against. Declaring it sharpens the diagnosis when something does not load: a
-number above the schema the installed fwl-io implements can only mean the
-reader is too old, and a number equal to it rules that reading out, so an
-unknown field is reported as a misspelling alone.
+against. A manifest that declares one is held to it: only the schema the
+installed fwl-io implements is accepted, a higher number meaning the reader is
+too old and a lower one meaning the manifest was written for a schema that
+stopped loading when the number rose. That is what sharpens the diagnosis
+elsewhere, since an unknown field in such a manifest can only be a
+misspelling.
 
 The dotted table key is the dataset location below the data root: the table
 above resolves into ``interior/eos/wolf_bower_2018``. Key segments are
@@ -120,12 +122,12 @@ def _unknown_field_error(what: str, declared_schema: int | None = None) -> Manif
 
     Without a declared schema both readings are offered, because both are
     common: a misspelt field, and a manifest written against a schema newer
-    than the fwl-io reading it. A manifest declaring the schema this code
-    implements has ruled the second reading out, so the message names the typo
-    alone. A manifest declaring an older schema does not: the schema number
-    rises whenever a manifest written for the previous one stops loading, so a
-    field this code does not know may be one that older schema had and this
-    one dropped, and both readings stay on the table.
+    than the fwl-io reading it. A manifest that declares one has ruled the
+    second reading out by the time this is reached, since the reader admits
+    only the schema this code implements, so the message names the typo alone.
+    The equality is restated here rather than assumed, so that relaxing the
+    reader later cannot silently sharpen the message for a schema it should
+    not apply to.
     """
     if declared_schema == _MANIFEST_SCHEMA:
         return ManifestSchemaError(
@@ -142,9 +144,12 @@ def _unknown_field_error(what: str, declared_schema: int | None = None) -> Manif
 def _read_declared_schema(tree: dict) -> int | None:
     """Return the schema a manifest declares at its root, if it declares one.
 
-    Raises when the manifest names a schema this code does not implement,
-    which is the case the key exists to make unambiguous, and when the value
-    is not a schema number at all.
+    Only the schema this code implements is admitted. A higher number means the
+    reader is too old. A lower one means the manifest is written for a schema
+    that, by the rule the number follows, stopped loading when it was
+    incremented; refusing it fails at the increment rather than part way
+    through a load. Either way the message names both numbers. Raises too when
+    the value is not a schema number at all.
     """
     if _SCHEMA_KEY not in tree:
         return None
@@ -168,6 +173,14 @@ def _read_declared_schema(tree: dict) -> int | None:
         raise ManifestSchemaError(
             f'the manifest declares {_SCHEMA_KEY} {declared}, but this fwl-io reads '
             f'{_reading_version()}: upgrade fwl-io to read this manifest.'
+        )
+    if declared < _MANIFEST_SCHEMA:
+        raise ManifestSchemaError(
+            f'the manifest declares {_SCHEMA_KEY} {declared}, but this fwl-io reads '
+            f'manifest schema {_MANIFEST_SCHEMA}: the schema number rises when a '
+            f'manifest written for the previous one stops loading, so update the '
+            f'manifest against the schema versions table in the manifests '
+            f'documentation.'
         )
     return declared
 
