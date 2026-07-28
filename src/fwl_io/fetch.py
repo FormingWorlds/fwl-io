@@ -75,7 +75,7 @@ from fwl_io.doi import zenodo_record_id
 from fwl_io.paths import is_offline, resolve_cache_root, resolve_data_root
 from fwl_io.registry import load_registry, validate_entry_name
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('fwl.' + __name__)
 
 _LOCK_DIRNAME = '.fwl-io-locks'
 # How long a fetcher waits for the per-target download lock before giving up and
