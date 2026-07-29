@@ -61,7 +61,7 @@ from fwl_io.archive import ARCHIVE_KINDS
 from fwl_io.doi import ZENODO_DOI_PATTERN, zenodo_record_id
 from fwl_io.registry import load_registry
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('fwl.' + __name__)
 
 # Re-exported so existing importers keep working; the parser lives in doi.
 __all__ = [

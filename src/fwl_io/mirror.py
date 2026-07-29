@@ -31,7 +31,7 @@ import requests
 
 from fwl_io.sync import ZENODO_API, fetch_zenodo_record, zenodo_record_id
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('fwl.' + __name__)
 
 # Safeguard against tabular-file ingest on upload, so a mirrored tabular file
 # is stored byte-for-byte rather than converted to Dataverse's tabular format.

@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [
     {name = "Tim Lichtenberg", email = "tim.lichtenberg@rug.nl"},
+    {name = "Harrison Nicholls", email = "harrison.nicholls@ast.cam.ac.uk"},
 ]
 keywords = [
     "Astronomy",
