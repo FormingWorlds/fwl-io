@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has four subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has five subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -25,6 +25,18 @@ fwl-io fetch <model> [--data-root PATH]
 ```
 
 Fetches every dataset that lists `<model>` in its `required_by`. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree.
+
+## fwl-io check
+
+```bash
+fwl-io check <model> [--data-root PATH]
+```
+
+Reports whether every dataset that lists `<model>` in its `required_by` is present and matches its registry, without downloading anything. Each file is reported in one of four states: `ok` (present, checksum matches), `missing`, `mismatch` (present, contents differ), or `present`. The last means the file is there and nothing was available to verify it against, which is the case for the members of an archive dataset: the registry pins the checksum of the archive, not of the files extracted from it, so such a dataset is reported `presence only`.
+
+A manifest that fails to load is reported alongside the datasets and is on its own enough to fail the check, because its datasets were never inspected. The report goes to stdout whatever the verdict, so a caller running this to find out what is wrong gets the detail and not only the exit status. Exit is 1 on any missing file, any checksum mismatch, any unreadable manifest, or a model no manifest declares.
+
+Nothing is downloaded and no dataset directory or file is written, which makes this safe to run against a tree another process is reading. The equivalent Python entry point is `fwl_io.check_for`.
 
 ## fwl-io mirror
 
