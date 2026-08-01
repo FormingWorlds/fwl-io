@@ -9,6 +9,7 @@ directory tree with hash verification and atomic writes.
 
 from importlib.metadata import PackageNotFoundError, version
 
+from fwl_io.check import CheckReport, DatasetCheck, FileCheck, check_dataset, check_for
 from fwl_io.fetch import DownloadError, Fetcher, OfflineDataError, create_fetcher
 from fwl_io.manifest import (
     Dataset,
@@ -25,13 +26,18 @@ except PackageNotFoundError:  # editable checkout without installed metadata
     __version__ = '0.0.0'
 
 __all__ = [
+    'CheckReport',
     'Dataset',
+    'DatasetCheck',
     'DownloadError',
+    'FileCheck',
     'Fetcher',
     'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
     '__version__',
+    'check_dataset',
+    'check_for',
     'create_fetcher',
     'discover_manifests',
     'fetch_for',

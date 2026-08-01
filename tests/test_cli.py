@@ -99,3 +99,52 @@ def test_fetch_missing_registry_is_aggregated_error(tmp_path, capsys, monkeypatc
     err = capsys.readouterr().err
     assert code == 1
     assert 'g.demo' in err and 'Traceback' not in err
+
+
+@pytest.mark.unit
+def test_check_unknown_module_exits_nonzero(capsys, monkeypatch):
+    """Asking about a model no manifest declares is an error, not a clean tree."""
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
+    code = main(['check', 'nomodule'])
+    assert code == 1
+    err = capsys.readouterr()
+    assert 'no datasets' in err.err
+    assert 'all data present' not in err.out, 'nothing was checked, so nothing may be declared ok'
+
+
+@pytest.mark.unit
+def test_check_reports_missing_data_and_exits_nonzero(tmp_path, capsys, monkeypatch):
+    """Absent data exits 1 and names the dataset, without downloading it."""
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    # The dataset location comes from the table key, so this one lands under
+    # "g/demo"; a manifest does not name its own subdirectory.
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1234567"\nrequired_by = ["demo"]\n')
+    registry = tmp_path / 'g.demo.registry.txt'
+    digest = hashlib.sha256(b'contents\n').hexdigest()
+    registry.write_text(f'alpha.dat sha256:{digest}\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    data_root = tmp_path / 'data'
+    code = main(['check', 'demo', '--data-root', str(data_root)])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert 'FAILED' in out
+    assert 'g.demo' in out
+    # The dataset has to be reported as data that is absent, not as a manifest
+    # this could not read. Both exit 1 and both name the dataset, so without
+    # this the test would pass just as well against a misplaced registry file
+    # and would be proving nothing about the check itself.
+    assert '1 missing' in out
+    assert 'MANIFEST UNREADABLE' not in out
+    # Resolving a path creates the data root, as it does for every entry point.
+    # What a check must not do is populate it: no dataset directory, no file.
+    assert list(data_root.iterdir()) == [], 'a check must not create the tree it inspects'

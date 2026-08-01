@@ -50,6 +50,19 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    from fwl_io.check import check_for
+
+    report = check_for(args.model, data_root=args.data_root)
+    if not report.datasets and not report.manifest_errors:
+        print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
+        return 1
+    # The summary goes to stdout whatever the verdict: a caller running this to
+    # find out what is wrong needs the detail, not just the exit code.
+    print(report.summary())
+    return 0 if report.ok else 1
+
+
 def _cmd_mirror(args: argparse.Namespace) -> int:
     from fwl_io.mirror import mirror_to_dataverse
 
@@ -96,6 +109,13 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch.add_argument('model', help='model name matched against required_by')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_fetch.set_defaults(func=_cmd_fetch)
+
+    p_check = sub.add_parser(
+        'check', help='report whether a model has its data, without downloading'
+    )
+    p_check.add_argument('model', help='model name matched against required_by')
+    p_check.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_check.set_defaults(func=_cmd_check)
 
     p_mirror = sub.add_parser('mirror', help='mirror a Zenodo deposit to a Dataverse collection')
     p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')
