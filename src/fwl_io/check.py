@@ -9,27 +9,28 @@ inspecting.
 
 A check therefore never reaches the network, never downloads, and never
 creates or repairs a dataset. It reads the manifest, hashes what is on disk,
-and returns a report. The one mark it leaves is the data root itself, which
-resolving a path creates when it is absent, exactly as every other entry point
-does; no dataset directory and no file is written.
+and returns a report. Resolving a path creates the data root when it is
+absent, exactly as every other entry point does; no dataset directory and no
+file is written.
 
-Two things the report is careful about, because a diagnostic that overstates
-what it verified is worse than no diagnostic at all. A manifest that fails to
-load is carried in the report rather than dropped, so a tree cannot read as
-complete when whole datasets were never looked at. And an archive dataset's
-members are reported as present rather than as verified: the archive-only
-checksum policy records member names, not per-file digests, so there is
-nothing to hash them against once the archive itself is gone.
+The report is careful about what it did not establish, because a diagnostic
+that overstates its own coverage is worse than none. A manifest that fails to
+load and a dataset whose registry cannot be read are both carried in the
+report and both count against the verdict, since their files were never
+looked at, and they are carried apart from each other because they call for
+different repairs. An archive dataset's members are reported as present
+rather than as verified: the archive-only checksum policy records member
+names, not per-file digests, so once the archive is gone there is nothing to
+hash them against.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from fwl_io.fetch import _STAMP_FILENAME, Fetcher, _hash_matches, create_fetcher
+from fwl_io.fetch import Fetcher, create_fetcher
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -40,10 +41,13 @@ log = logging.getLogger('fwl.' + __name__)
 OK = 'ok'
 MISSING = 'missing'
 MISMATCH = 'mismatch'
+UNREADABLE = 'unreadable'
 PRESENT = 'present'
 
-#: States that mean the tree is not usable as the manifest describes it.
-FAULT_STATES = (MISSING, MISMATCH)
+#: States that mean the tree is not usable as the manifest describes it. A file
+#: that cannot be read counts: whether its contents are right is unknown, and a
+#: check reports what it could not establish rather than assuming the best.
+FAULT_STATES = (MISSING, MISMATCH, UNREADABLE)
 
 
 @dataclass(frozen=True)
@@ -56,7 +60,7 @@ class FileCheck:
 
     @property
     def faulty(self) -> bool:
-        """True when this file is absent or does not match its checksum."""
+        """True when this file is absent, corrupt, or could not be read."""
         return self.state in FAULT_STATES
 
 
@@ -69,20 +73,33 @@ class DatasetCheck:
     directory: Path
     files: tuple[FileCheck, ...]
 
+    def _in_state(self, state: str) -> tuple[FileCheck, ...]:
+        return tuple(f for f in self.files if f.state == state)
+
     @property
     def missing(self) -> tuple[FileCheck, ...]:
         """Files the manifest declares that are not on disk."""
-        return tuple(f for f in self.files if f.state == MISSING)
+        return self._in_state(MISSING)
 
     @property
     def mismatched(self) -> tuple[FileCheck, ...]:
         """Files on disk whose contents differ from the registry."""
-        return tuple(f for f in self.files if f.state == MISMATCH)
+        return self._in_state(MISMATCH)
+
+    @property
+    def unreadable(self) -> tuple[FileCheck, ...]:
+        """Files on disk that could not be read to be checked."""
+        return self._in_state(UNREADABLE)
+
+    @property
+    def faults(self) -> tuple[FileCheck, ...]:
+        """Every file that is not in a usable state."""
+        return tuple(f for f in self.files if f.faulty)
 
     @property
     def complete(self) -> bool:
-        """True when nothing is missing and nothing fails its checksum."""
-        return not any(f.faulty for f in self.files)
+        """True when nothing is missing, corrupt, or unreadable."""
+        return not self.faults
 
     @property
     def hashed(self) -> bool:
@@ -91,16 +108,18 @@ class DatasetCheck:
         False for an archive dataset, whose members are recorded by name only,
         so a truncated member is indistinguishable from an intact one here.
         """
-        return not any(f.state == PRESENT for f in self.files)
+        return not self._in_state(PRESENT)
 
     def summary(self) -> str:
         """One line naming the counts, for a report a person reads."""
-        total = len(self.files)
-        parts = [f'{total} file(s)']
-        if self.missing:
-            parts.append(f'{len(self.missing)} missing')
-        if self.mismatched:
-            parts.append(f'{len(self.mismatched)} corrupt')
+        parts = [f'{len(self.files)} file(s)']
+        for label, group in (
+            ('missing', self.missing),
+            ('corrupt', self.mismatched),
+            ('unreadable', self.unreadable),
+        ):
+            if group:
+                parts.append(f'{len(group)} {label}')
         if not self.hashed:
             parts.append('presence only')
         state = 'ok' if self.complete else 'FAILED'
@@ -109,57 +128,66 @@ class DatasetCheck:
 
 @dataclass(frozen=True)
 class CheckReport:
-    """Every dataset checked, and every manifest that could not be read."""
+    """Every dataset checked, and everything that stopped one being checked.
 
-    datasets: dict[str, DatasetCheck]
-    manifest_errors: dict[str, str]
+    The two error maps are kept apart because they call for different repairs.
+    A manifest error means an installed package's manifest could not be read at
+    all, so nothing it declares was inspected. A dataset error means the
+    manifest was fine but that one dataset could not be resolved, most often
+    because its registry has never been generated.
+    """
+
+    datasets: dict[str, DatasetCheck] = field(default_factory=dict)
+    manifest_errors: dict[str, str] = field(default_factory=dict)
+    dataset_errors: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        """True only when every dataset is complete and every manifest loaded.
+        """True only when something was checked and all of it was sound.
 
-        A manifest that failed to load counts against the report. Its datasets
-        were never inspected, so treating it as harmless would let a tree with
-        an unreadable provider report exactly like a healthy one.
+        An empty report is not ok. A caller asking about a model and being told
+        nothing is wrong, when in truth nothing was looked at, is the failure
+        this whole module exists to avoid; the two are indistinguishable to
+        anyone reading a boolean.
         """
-        return not self.manifest_errors and all(d.complete for d in self.datasets.values())
+        if not self.datasets:
+            return False
+        if self.manifest_errors or self.dataset_errors:
+            return False
+        return all(d.complete for d in self.datasets.values())
 
     @property
     def faults(self) -> tuple[DatasetCheck, ...]:
-        """Datasets with something missing or corrupt, worst named first."""
+        """Datasets with something wrong, the worst affected named first."""
         broken = [d for d in self.datasets.values() if not d.complete]
-        return tuple(sorted(broken, key=lambda d: (-len(d.missing) - len(d.mismatched), d.key)))
+        return tuple(sorted(broken, key=lambda d: (-len(d.faults), d.key)))
 
     def summary(self) -> str:
         """A short human-readable report, one line per dataset plus a verdict."""
         lines = [d.summary() for d in sorted(self.datasets.values(), key=lambda d: d.key)]
         for provider, error in sorted(self.manifest_errors.items()):
             lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+        for key, error in sorted(self.dataset_errors.items()):
+            lines.append(f'{key}: NOT CHECKED, {error}')
         if not lines:
-            return 'no datasets checked'
+            return 'nothing was checked'
         lines.append('all data present and verified' if self.ok else 'data check FAILED')
         return '\n'.join(lines)
 
 
-def _archive_members(fetcher: Fetcher) -> list[str] | None:
-    """Return the member names an archive dataset's stamp recorded.
-
-    ``None`` when there is no usable stamp, which means the extracted tree is
-    not there to be checked rather than that it is empty.
-    """
-    stamp = fetcher.target_dir / _STAMP_FILENAME
+def _file_state(fetcher: Fetcher, name: str) -> str:
+    """Classify one registry file: present and correct, absent, or otherwise."""
+    path = fetcher.target_dir / name
     try:
-        record = json.loads(stamp.read_text())
-    except (OSError, ValueError):
-        return None
-    if record.get('extract') != fetcher.extract:
-        # The stamp describes a different fetch of this deposit, so its member
-        # list does not describe the tree this dataset expects.
-        return None
-    members = record.get('members')
-    if not isinstance(members, list) or not members:
-        return None
-    return [str(m) for m in members]
+        if not path.is_file():
+            return MISSING
+        return OK if fetcher.file_matches(name) else MISMATCH
+    except OSError as exc:
+        # A file the checker cannot read is not evidence of a good tree. This
+        # is reported rather than raised so one unreadable file cannot abort a
+        # report covering every other dataset.
+        log.warning('cannot read %s: %s', path, exc)
+        return UNREADABLE
 
 
 def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
@@ -183,7 +211,7 @@ def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
     key = key or fetcher.subdir
 
     if fetcher.extract is not None:
-        members = _archive_members(fetcher)
+        members = fetcher.recorded_members()
         if members is None:
             # No usable stamp means no extracted tree to speak of. The dataset
             # is reported as one missing item under the archive's own name,
@@ -197,16 +225,10 @@ def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
             checks.append(FileCheck(name, path, PRESENT if path.is_file() else MISSING))
         return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, tuple(checks))
 
-    checks = []
-    for name, known_hash in sorted(fetcher.registry.items()):
-        path = fetcher.target_dir / name
-        if not path.is_file():
-            state = MISSING
-        elif _hash_matches(path, known_hash):
-            state = OK
-        else:
-            state = MISMATCH
-        checks.append(FileCheck(name, path, state))
+    checks = [
+        FileCheck(name, fetcher.target_dir / name, _file_state(fetcher, name))
+        for name in sorted(fetcher.registry)
+    ]
     return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, tuple(checks))
 
 
@@ -214,14 +236,11 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
     """Report the state of every dataset a given model requires.
 
     Nothing is downloaded and no dataset directory or file is written, so this
-    is safe to run against a tree another process is reading. Resolving the
-    data root creates that root when it is absent, which is the only mark a
-    check leaves.
+    is safe to run against a tree another process is reading.
 
-    A dataset whose registry or fetcher cannot be built is reported as a
-    manifest error rather than skipped, for the same reason an unreadable
-    manifest is: the alternative is a report that looks clean because it
-    checked less than it appears to.
+    Nothing here raises for the state of the data or of a manifest. A caller
+    running a check wants the whole picture, including the parts that could not
+    be established, so every failure is carried in the report instead.
 
     Parameters
     ----------
@@ -233,14 +252,15 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
     Returns
     -------
     CheckReport
-        Keyed by dataset, alongside every manifest that could not be read.
+        Keyed by dataset, alongside the manifests that could not be read and
+        the datasets that could not be resolved.
     """
     from fwl_io.manifest import _discover
 
     model = model.lower()
     datasets: dict[str, DatasetCheck] = {}
-    providers, errors = _discover()
-    manifest_errors = dict(errors)
+    dataset_errors: dict[str, str] = {}
+    providers, manifest_errors = _discover()
     for provider_datasets in providers.values():
         for ds in provider_datasets:
             if model not in tuple(r.lower() for r in ds.required_by):
@@ -254,9 +274,12 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
                     data_root=data_root,
                     extract=ds.extract,
                 )
+                datasets[ds.key] = check_dataset(fetcher, key=ds.key)
             except Exception as exc:  # noqa: BLE001 -- reported, never raised
-                manifest_errors[ds.key] = str(exc)
+                dataset_errors[ds.key] = str(exc)
                 log.warning('cannot check dataset %r: %s', ds.key, exc)
-                continue
-            datasets[ds.key] = check_dataset(fetcher, key=ds.key)
-    return CheckReport(datasets=datasets, manifest_errors=manifest_errors)
+    return CheckReport(
+        datasets=datasets,
+        manifest_errors=dict(manifest_errors),
+        dataset_errors=dataset_errors,
+    )

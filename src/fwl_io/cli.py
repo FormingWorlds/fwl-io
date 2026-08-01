@@ -1,4 +1,4 @@
-"""Command-line interface: ``fwl-io sync | list | fetch | mirror``.
+"""Command-line interface: ``fwl-io sync | list | fetch | check | mirror``.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -54,7 +54,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from fwl_io.check import check_for
 
     report = check_for(args.model, data_root=args.data_root)
-    if not report.datasets and not report.manifest_errors:
+    if not (report.datasets or report.manifest_errors or report.dataset_errors):
         print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
         return 1
     # The summary goes to stdout whatever the verdict: a caller running this to

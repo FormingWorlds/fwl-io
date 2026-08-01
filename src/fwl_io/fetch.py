@@ -493,7 +493,61 @@ class Fetcher:
             target_dir.unlink()
         os.replace(src_dir, target_dir)
 
-    def _archive_tree_intact(self, stamp: Path) -> bool:
+    def file_matches(self, fname: str) -> bool:
+        """True when the local file for ``fname`` matches its registry digest.
+
+        Reads the file; it does not fetch, and it does not check that the file
+        exists first, so a caller wanting to tell an absent file from a corrupt
+        one tests for presence itself. An unreadable file raises ``OSError``
+        rather than reporting a mismatch, since a permission problem on the
+        tree is a different fault from wrong contents.
+        """
+        if fname not in self.registry:
+            raise KeyError(f'{fname!r} is not in the registry for {self.subdir!r}')
+        return _hash_matches(self.target_dir / fname, self.registry[fname])
+
+    def recorded_members(self) -> list[str] | None:
+        """Return the extracted members this dataset's stamp records.
+
+        ``None`` when there is no stamp describing this dataset's tree, which
+        says the tree is not there to be examined rather than that it is empty.
+        Callers must keep those apart: an empty list would read as a complete
+        tree of no files.
+
+        A stamp qualifies only when it describes this archive kind and this
+        record id. One left by a different fetch of the same subdirectory, a
+        plain fetch or another version, does not describe this tree.
+
+        Members that would resolve outside the dataset directory are dropped.
+        A stamp is a file on disk like any other and can be edited or replaced,
+        so a name in it is treated with the same suspicion as a name inside an
+        archive rather than joined onto the tree unchecked.
+        """
+        stamp = self.target_dir / _STAMP_FILENAME
+        try:
+            record = json.loads(stamp.read_text())
+        except (OSError, ValueError):
+            return None
+        if record.get('extract') != self.extract:
+            return None
+        if record.get('record_id') != self.record_id:
+            return None
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            return None
+        root = self.target_dir.resolve()
+        safe = []
+        for member in members:
+            if not isinstance(member, str):
+                continue
+            resolved = (self.target_dir / member).resolve()
+            if resolved == root or not resolved.is_relative_to(root):
+                log.warning('stamp for %s names a member outside it: %r', self.subdir, member)
+                continue
+            safe.append(member)
+        return safe or None
+
+    def _archive_tree_intact(self) -> bool:
         """True when every member the stamp recorded is still present on disk.
 
         This detects a member deleted after extraction, so the tree is
@@ -501,18 +555,8 @@ class Fetcher:
         the archive-only checksum policy records member names, not per-file
         digests, so a truncated member is not detected here.
         """
-        try:
-            record = json.loads(stamp.read_text())
-        except (OSError, ValueError):
-            return False
-        if record.get('extract') != self.extract:
-            # The stamp describes a different fetch of this deposit, a plain
-            # one or a different archive kind, so its tree is not this dataset.
-            return False
-        members = record.get('members')
-        if not isinstance(members, list) or not members:
-            # An absent or empty member list describes no tree at all, and must
-            # never read as a complete one.
+        members = self.recorded_members()
+        if members is None:
             return False
         return all((self.target_dir / m).is_file() for m in members)
 
@@ -528,7 +572,7 @@ class Fetcher:
         """
         archive_name, known_hash = next(iter(self.registry.items()))
         stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp) and self._archive_tree_intact(stamp):
+        if self._stamp_is_current(stamp) and self._archive_tree_intact():
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()
 
