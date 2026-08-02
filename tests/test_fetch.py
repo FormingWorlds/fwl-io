@@ -726,12 +726,9 @@ def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
     assert healed['record_id'] == RECID, 'the unusable stamp is replaced by a real one'
     assert healed['members'] == ['m0p1.txt', 'nested/m1p0.txt']
 
-    # Discrimination: put the unusable stamp back over the tree that is now
-    # fully populated, and go offline. The members are all on disk, so the only
-    # thing that can decide the dataset is unservable is the stamp, and the
-    # answer has to be the honest "nothing here to serve" rather than an error
-    # about the shape of a provenance file. Pointing this at an empty root
-    # instead would raise the same error whatever the stamp reader did.
+    # Discrimination: the members are all on disk now, so only the stamp can
+    # make the dataset unservable. Pointing this at an empty root instead would
+    # raise the same error whatever the stamp reader did.
     (version_dir / '.fwl-io.json').write_text(stamp_body)
     assert (version_dir / 'm0p1.txt').is_file(), 'the tree must be intact, or this proves nothing'
     with pytest.raises(OfflineDataError):

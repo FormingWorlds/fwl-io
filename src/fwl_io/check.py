@@ -44,12 +44,9 @@ MISMATCH = 'mismatch'
 UNREADABLE = 'unreadable'
 PRESENT = 'present'
 
-#: States that mean the tree is not usable as the manifest describes it, each
-#: with the word the report prints for it. A file that cannot be read counts:
-#: whether its contents are right is unknown, and a check reports what it could
-#: not establish rather than assuming the best. The summary counts these by
-#: walking this mapping, so a state added here is named in the report rather
-#: than failing a dataset for a reason the text never gives.
+#: States that make the tree unusable, each with the word the report prints.
+#: Unreadable counts: its contents are unknown, not correct. The summary walks
+#: this mapping, so a state added here is named rather than silently dropped.
 FAULT_LABELS = {MISSING: 'missing', MISMATCH: 'corrupt', UNREADABLE: 'unreadable'}
 FAULT_STATES = tuple(FAULT_LABELS)
 
