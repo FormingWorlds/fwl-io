@@ -167,8 +167,10 @@ def _legacy_locations() -> dict[str, str]:
     table = dict(tomllib.loads(text).get('legacy', {}))
     safe = {}
     for key, location in table.items():
-        parts = Path(location).parts
-        if not isinstance(location, str) or Path(location).is_absolute() or '..' in parts:
+        if not isinstance(location, str):
+            log.warning('legacy location for %s is not a path: %r', key, location)
+            continue
+        if Path(location).is_absolute() or '..' in Path(location).parts:
             log.warning('legacy location for %s is not inside the data root: %r', key, location)
             continue
         safe[key] = location
@@ -181,6 +183,25 @@ def _inside(path: Path, root: Path) -> bool:
         return path.resolve().is_relative_to(root.resolve())
     except OSError:
         return False
+
+
+def _escaping(
+    legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path
+) -> Path | None:
+    """The first path here that leaves ``root``, or ``None`` if all stay inside.
+
+    Every file is checked, not just the two directories: a registry name may
+    nest, and a symlinked component inside it resolves somewhere else entirely
+    while the directory holding it looks perfectly ordinary.
+    """
+    for path in (legacy_dir, target_dir):
+        if not _inside(path, root):
+            return path
+    for name in names:
+        for path in (legacy_dir / name, target_dir / name):
+            if not _inside(path, root):
+                return path
+    return None
 
 
 def _classify(legacy_dir: Path, target_dir: Path, registry: dict[str, str]) -> tuple[str, str]:
@@ -252,24 +273,26 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 continue
             seen.add(ds.key)
             legacy_dir = root / legacy
-            if legacy_dir.exists() and not _inside(legacy_dir, root):
-                # A symlink is the way this happens in a real tree: the joined
-                # path is clean, and only resolving it shows it leaves the root.
-                entries.append(
-                    Relocation(
-                        ds.key,
-                        UNRESOLVABLE,
-                        legacy_dir=legacy_dir,
-                        detail=f'{legacy_dir} resolves outside the data root {root}',
-                    )
-                )
-                continue
             try:
                 registry = ds.registry()
                 target_dir = root / _version_dir(ds)
             except Exception as exc:  # noqa: BLE001 -- reported, never raised
                 entries.append(
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
+                )
+                continue
+            outside = _escaping(legacy_dir, target_dir, tuple(registry), root)
+            if outside is not None:
+                # A symlink is how this happens in a real tree: every joined
+                # path looks clean and only resolving one shows it leaves.
+                entries.append(
+                    Relocation(
+                        ds.key,
+                        UNRESOLVABLE,
+                        legacy_dir=legacy_dir,
+                        target_dir=target_dir,
+                        detail=f'{outside} resolves outside the data root {root}',
+                    )
                 )
                 continue
             state, detail = _classify(legacy_dir, target_dir, registry)
@@ -297,7 +320,8 @@ def _version_dir(ds: Dataset) -> str:
 def _move_one(entry: Relocation, root: Path) -> Relocation:
     """Move one verified legacy tree, leaving nothing half-moved behind."""
     assert entry.legacy_dir is not None and entry.target_dir is not None
-    if not _inside(entry.legacy_dir, root) or not _inside(entry.target_dir, root):
+    outside = _escaping(entry.legacy_dir, entry.target_dir, entry.files, root)
+    if outside is not None:
         # Checked here as well as when the plan is built, so the guarantee that
         # this only ever moves files inside the data root belongs to the code
         # that does the moving rather than to whoever called it.
@@ -306,7 +330,7 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
             UNRESOLVABLE,
             legacy_dir=entry.legacy_dir,
             target_dir=entry.target_dir,
-            detail=f'refusing to move files outside the data root {root}',
+            detail=f'{outside} resolves outside the data root {root}',
         )
     done: list[str] = []
     try:
@@ -371,16 +395,25 @@ def _prune(directory: Path, root: Path) -> None:
     """
     root = root.resolve()
     if directory.is_dir():
-        for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
-            if path.is_dir() and not any(path.iterdir()):
-                try:
+        # Deepest first so a child is gone before its parent is tried, and the
+        # name breaks the tie so the walk is the same on every filesystem.
+        for path in sorted(
+            directory.rglob('*'), key=lambda p: (len(p.parts), str(p)), reverse=True
+        ):
+            # A symlink answers is_dir() for whatever it points at, and rmdir
+            # refuses it, so following one here would both leave the tree
+            # standing and reach outside it.
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                if not any(path.iterdir()):
                     path.rmdir()
-                except OSError:
-                    return
+            except OSError:
+                continue
     while directory.resolve() != root and directory.resolve().is_relative_to(root):
-        if any(directory.iterdir()):
-            return
         try:
+            if any(directory.iterdir()):
+                return
             directory.rmdir()
         except OSError:
             return

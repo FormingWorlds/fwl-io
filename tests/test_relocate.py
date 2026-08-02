@@ -527,3 +527,85 @@ def test_two_datasets_sharing_one_legacy_directory_come_apart(tmp_path, monkeypa
     assert (root / TARGET / 'BHAC15_tracks.dat').is_file()
     assert (root / 'star/tracks/spada_2013/r7654321/notes.txt').is_file()
     assert not (root / shared).exists(), 'the shared directory goes once both have moved'
+
+
+def test_a_nested_name_reaching_outside_the_root_is_refused(tmp_path):
+    """A symlinked component inside a member name escapes, and is caught.
+
+    The directory holding it looks perfectly ordinary and passes every check
+    on the directories alone, which is why the files are checked too: `rename`
+    follows symlinks in the middle of a path, so the file that moves in is one
+    from outside the tree and the original is gone.
+    """
+    from fwl_io.relocate import _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    legacy.mkdir(parents=True)
+    outside = tmp_path / 'elsewhere'
+    outside.mkdir()
+    (outside / 'nested.dat').write_bytes(CONTENTS['notes.txt'])
+    (legacy / 'sub').symlink_to(outside, target_is_directory=True)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=('sub/nested.dat',)
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == UNRESOLVABLE
+    assert 'resolves outside the data root' in result.detail
+    assert (outside / 'nested.dat').is_file(), 'the file outside the tree is untouched'
+    assert not (root / TARGET / 'sub' / 'nested.dat').exists()
+
+
+def test_a_symlink_in_the_legacy_tree_does_not_abort_the_prune(tmp_path):
+    """One entry that cannot be removed must not stop the rest being removed.
+
+    A symlink answers ``is_dir`` for whatever it points at and ``rmdir``
+    refuses it, so treating that refusal as the end of the walk would leave
+    every emptied directory standing while the command reported success.
+    """
+    from fwl_io.relocate import _prune
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    (legacy / 'aaa_empty_one').mkdir(parents=True)
+    (legacy / 'aaa_empty_two').mkdir()
+    # Empty on purpose: a symlink to a non-empty directory is skipped by the
+    # emptiness test before the removal is ever tried, so it would prove nothing.
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    # Named to sort first, so the walk meets the symlink before the two empty
+    # directories and an abort there would leave both of them standing.
+    (legacy / 'zzz_link').symlink_to(elsewhere, target_is_directory=True)
+
+    _prune(legacy, root)
+
+    assert not (legacy / 'aaa_empty_one').exists(), 'the walk carried on past the symlink'
+    assert not (legacy / 'aaa_empty_two').exists()
+    assert (legacy / 'zzz_link').is_symlink(), 'the symlink itself is not ours to remove'
+    assert elsewhere.is_dir(), 'and what it points at is not ours to remove either'
+
+
+def test_a_table_value_that_is_not_a_path_is_dropped_not_raised(monkeypatch):
+    """A non-string entry is refused before anything tries to build a path from it.
+
+    Ordering matters here: constructing the path first raises ``TypeError`` out
+    of the command, so the check that is meant to reject the value has to come
+    before the value is used.
+    """
+    import fwl_io.relocate as module
+
+    table = '[legacy]\n"a.b" = 42\n"c.d" = ["x"]\n"e.f" = "good/place"\n'
+
+    class _Resource:
+        def read_text(self):
+            return table
+
+    class _Package:
+        def joinpath(self, name):
+            return _Resource()
+
+    monkeypatch.setattr(module, 'files', lambda package: _Package())
+
+    assert module._legacy_locations() == {'e.f': 'good/place'}
