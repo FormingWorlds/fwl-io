@@ -446,3 +446,84 @@ def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monk
     assert [e.state for e in report.entries] == [FAILED, READY]
     assert [e.key for e in report.ready] == ['b.second'], 'the untried one is still ready'
     assert len(report.faults) == 1
+
+
+def test_pruning_never_removes_the_data_root(tmp_path):
+    """The walk upward stops at the root even when the root is left empty.
+
+    Discriminating on purpose: after a real move the root holds the new tree,
+    so it is never a candidate for removal and the guard is never reached. Here
+    it is the only thing standing between an emptied chain and the root itself.
+    """
+    from fwl_io.relocate import _prune
+
+    root = tmp_path / 'data'
+    nested = root / 'stellar_evolution_tracks' / 'Baraffe'
+    nested.mkdir(parents=True)
+
+    _prune(nested, root)
+
+    assert not (root / 'stellar_evolution_tracks').exists(), 'the emptied chain goes'
+    assert root.is_dir(), 'the root is not a leftover of the previous layout'
+    assert list(root.iterdir()) == [], 'and it really was left empty, or this proves nothing'
+
+
+def test_pruning_stops_at_a_parent_that_still_holds_something(tmp_path):
+    """A shared parent survives while another dataset still lives under it."""
+    from fwl_io.relocate import _prune
+
+    root = tmp_path / 'data'
+    legacy = root / 'stellar_evolution_tracks' / 'Baraffe'
+    legacy.mkdir(parents=True)
+    sibling = root / 'stellar_evolution_tracks' / 'Spada'
+    sibling.mkdir()
+    (sibling / 'keep.dat').write_bytes(b'x')
+
+    _prune(legacy, root)
+
+    assert not legacy.exists()
+    assert (sibling / 'keep.dat').read_bytes() == b'x', 'the neighbour is untouched'
+    assert (root / 'stellar_evolution_tracks').is_dir(), 'a parent still in use stays'
+
+
+def test_two_datasets_sharing_one_legacy_directory_come_apart(tmp_path, monkeypatch):
+    """Each dataset moves only the files its own registry names.
+
+    A directory that held more than one dataset is the case where a prune
+    keyed on the directory rather than on the files would take a neighbour's
+    data with it, so the shared parent may go only once both have moved.
+    """
+    import fwl_io.relocate as module
+
+    shared = 'stellar_evolution_tracks'
+    first, second = 'star.tracks.baraffe_2015', 'star.tracks.spada_2013'
+    monkeypatch.setattr(module, '_legacy_locations', lambda: {first: shared, second: shared})
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[{first}]\nzenodo = "10.5281/zenodo.15729114"\n\n'
+        f'[{second}]\nzenodo = "10.5281/zenodo.7654321"\n'
+    )
+    (tmp_path / f'{first}.registry.txt').write_text(
+        f'BHAC15_tracks.dat {_digests(["BHAC15_tracks.dat"])["BHAC15_tracks.dat"]}\n'
+    )
+    (tmp_path / f'{second}.registry.txt').write_text(
+        f'notes.txt {_digests(["notes.txt"])["notes.txt"]}\n'
+    )
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    root = tmp_path / 'data'
+    _populate(root / shared)
+
+    report = module.relocate_all(data_root=root)
+
+    assert sorted(e.state for e in report.entries) == [MOVED, MOVED]
+    assert (root / TARGET / 'BHAC15_tracks.dat').is_file()
+    assert (root / 'star/tracks/spada_2013/r7654321/notes.txt').is_file()
+    assert not (root / shared).exists(), 'the shared directory goes once both have moved'

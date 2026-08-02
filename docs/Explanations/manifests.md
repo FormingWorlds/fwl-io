@@ -95,7 +95,7 @@ FWL_DATA/
 
 The tree holds **immutable fetched reference data only**: anything generated at runtime (derived tables, interpolation caches, solver caches) belongs in run output or cache directories, never below `FWL_DATA`. This keeps a shared read-only cache trustworthy as a whole.
 
-Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. The mapping from the legacy locations, which the package carries in `legacy_layout.toml` and the command reads:
+Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. It acts on the datasets listed in the package's `legacy_layout.toml`, which grows as each model migrates and today names three of the families below; the rest are the historical mapping, and a tree holding one of them is left alone until its dataset is declared. The mapping from the legacy locations:
 
 | Legacy location (live today) | Target location |
 |---|---|
