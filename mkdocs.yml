@@ -28,6 +28,7 @@ nav:
           - Overview: Reference/api/index.md
           - Fetching: Reference/api/fetch.md
           - Checking: Reference/api/check.md
+          - Relocating: Reference/api/relocate.md
           - Manifests: Reference/api/manifest.md
           - Registries: Reference/api/registry.md
           - Sync: Reference/api/sync.md

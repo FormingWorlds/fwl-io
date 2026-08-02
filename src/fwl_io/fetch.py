@@ -557,7 +557,21 @@ class Fetcher:
             record = json.loads((directory / _STAMP_FILENAME).read_text())
         except (OSError, ValueError):
             return None
-        if not isinstance(record, dict) or record.get('schema') != _STAMP_SCHEMA:
+        if not isinstance(record, dict):
+            return None
+        if record.get('schema') != _STAMP_SCHEMA:
+            # Worth saying out loud, because the cost is visible and the cause
+            # is not: the dataset is refetched in full, and it will be again on
+            # every run that shares this tree with the version that wrote the
+            # stamp. Someone watching a cluster job redownload the same data
+            # nightly needs the reason named.
+            log.warning(
+                'stamp in %s is schema %r, not %r, so it cannot be read and the '
+                'dataset will be fetched again',
+                directory,
+                record.get('schema'),
+                _STAMP_SCHEMA,
+            )
             return None
         return record
 

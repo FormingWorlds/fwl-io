@@ -1,0 +1,28 @@
+# Where each dataset lived before the current FWL_DATA layout.
+#
+# One entry per dataset, keyed by the dotted manifest key, whose value is the
+# directory the dataset occupied relative to the data root. The current
+# location is not repeated here: it is the key with its dots turned into
+# separators, plus the version directory derived from the manifest's Zenodo
+# pin, which is where the manifest already says the dataset belongs.
+#
+#   "star.tracks.baraffe_2015" = "stellar_evolution_tracks/Baraffe"
+#
+# `fwl-io relocate` reads this together with the installed manifests: the
+# manifest supplies the record id and the file checksums, this file supplies
+# the only thing the manifest cannot know, which is where the files used to
+# be. A dataset absent from this file has no legacy location and is left
+# alone, so a dataset added after the migration needs no entry.
+#
+# Several datasets may name the same legacy directory. Each moves only the
+# files its own registry declares, so a directory that held more than one
+# dataset comes apart correctly.
+#
+# This is a record of what happened, not configuration: entries are added when
+# a model migrates its data paths, and are never edited afterwards, since a
+# tree that was laid out that way is laid out that way forever.
+
+[legacy]
+"star.tracks.baraffe_2015" = "stellar_evolution_tracks/Baraffe"
+"observe.exoplanet_reference" = "planet_reference/Exoplanets"
+"observe.mass_radius.zeng_2019" = "mass_radius/Zeng2019"

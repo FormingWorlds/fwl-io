@@ -67,7 +67,7 @@ For every requested file:
 
 ## The FWL_DATA layout
 
-This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; a command that relocates such trees in place is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13).
+This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; `fwl-io relocate` moves such a tree into its current location instead, once its files have been checked against the registry.
 
 The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both.
 
@@ -95,7 +95,7 @@ FWL_DATA/
 
 The tree holds **immutable fetched reference data only**: anything generated at runtime (derived tables, interpolation caches, solver caches) belongs in run output or cache directories, never below `FWL_DATA`. This keeps a shared read-only cache trustworthy as a whole.
 
-Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates (a relocate command for cleaning local trees immediately is tracked in [#13](https://github.com/FormingWorlds/fwl-io/issues/13)). The mapping from the legacy locations:
+Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. The mapping from the legacy locations, which the package carries in `legacy_layout.toml` and the command reads:
 
 | Legacy location (live today) | Target location |
 |---|---|

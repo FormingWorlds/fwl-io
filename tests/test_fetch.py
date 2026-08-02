@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import socket
 import tarfile
 import zipfile
@@ -735,6 +736,42 @@ def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
     assert (version_dir / 'm0p1.txt').is_file(), 'the tree must be intact, or this proves nothing'
     with pytest.raises(OfflineDataError):
         _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all(offline=True)
+
+
+def test_a_stamp_at_an_unknown_schema_costs_a_refetch_and_says_so(http_server, tmp_path, caplog):
+    """An unreadable schema means the whole dataset comes down again, loudly.
+
+    This is the price of refusing to read a stamp written to rules this
+    version does not know, and it is the right price: the alternative is
+    reading fields whose meaning may have changed. It is worth naming in the
+    log because two versions sharing one data root will pay it on every run,
+    and a nightly job redownloading the same tree gives no other clue why.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    version_dir = tmp_path / VERSIONED
+    stamp_path = version_dir / '.fwl-io.json'
+    record = json.loads(stamp_path.read_text())
+    assert record['schema'] == 1, 'the fixture must start from a stamp this version wrote'
+
+    # A later version stamps the same intact tree to rules this one lacks.
+    stamp_path.write_text(json.dumps(dict(record, schema=2, added_later='meaning-changed')))
+    with caplog.at_level(logging.WARNING, logger='fwl.fwl_io.fetch'):
+        paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    healed = json.loads(stamp_path.read_text())
+    assert healed['schema'] == 1, 'the tree is restamped to the schema this version writes'
+    assert 'added_later' not in healed, 'the unreadable stamp is replaced, not edited'
+    assert any('schema 2' in r.getMessage() for r in caplog.records), (
+        'the refetch has to name the schema that caused it'
+    )
+
+    # Discrimination: with the stamp left alone the same call serves locally,
+    # so the refetch above is the schema and not the fetch path in general.
+    offline = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path, 'tar')
+    assert sorted(p.name for p in offline.fetch_all(offline=True)) == ['m0p1.txt', 'm1p0.txt']
 
 
 def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(

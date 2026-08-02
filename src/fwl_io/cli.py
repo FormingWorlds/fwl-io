@@ -1,4 +1,4 @@
-"""Command-line interface: ``fwl-io sync | list | fetch | check | mirror``.
+"""Command-line interface: ``fwl-io sync | list | fetch | check | relocate | mirror``.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -63,6 +63,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_relocate(args: argparse.Namespace) -> int:
+    from fwl_io.relocate import relocate
+
+    report = relocate(data_root=args.data_root, dry_run=args.dry_run)
+    print(report.summary())
+    # A tree that was already tidy is a success, so only a legacy tree that
+    # could not be moved fails the command. Nothing was changed in that case,
+    # which is what the exit code has to make actionable.
+    return 1 if report.faults else 0
+
+
 def _cmd_mirror(args: argparse.Namespace) -> int:
     from fwl_io.mirror import mirror_to_dataverse
 
@@ -117,6 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument('model', help='model name matched against required_by')
     p_check.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_check.set_defaults(func=_cmd_check)
+
+    p_relocate = sub.add_parser(
+        'relocate', help='move data left by the previous layout into the current one'
+    )
+    p_relocate.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_relocate.add_argument(
+        '--dry-run', action='store_true', help='report what would move without moving it'
+    )
+    p_relocate.set_defaults(func=_cmd_relocate)
 
     p_mirror = sub.add_parser('mirror', help='mirror a Zenodo deposit to a Dataverse collection')
     p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')

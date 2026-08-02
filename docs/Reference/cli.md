@@ -42,6 +42,20 @@ Checking reads and hashes every file a plain dataset declares, so for those the 
 
 Nothing is downloaded and no dataset directory or file is written, which makes this safe to run against a tree another process is reading. Resolving the data root creates that root if it does not exist, as it does for every other subcommand. The equivalent Python entry point is `fwl_io.check_for`, whose `CheckReport.ok` is false when nothing was checked, so a model that matches no dataset can never read as a clean tree. `CheckReport.verified` is the stricter question, false whenever any part of the tree was checked by presence alone.
 
+## fwl-io relocate
+
+```bash
+fwl-io relocate [--data-root PATH] [--dry-run]
+```
+
+Moves data left by the previous layout into the place it belongs now, for a tree fetched before the current layout existed. Unmigrated code still reads the old directories, so they are otherwise left alone and age out as their consumers migrate; this is for cleaning a tree up straight away instead.
+
+A dataset moves only when every file its registry declares is present in the old location and matches its recorded digest. Anything else is reported and left exactly where it is: an incomplete tree, a file whose contents differ, or a dataset whose registry has not been generated. Verifying first is the point, since moving a stale copy would put it where the fetcher then trusts it. Once a dataset's files have moved, the emptied directories are removed, and the walk upward stops at the data root.
+
+A dataset already at its current location is not a fault, and a copy still sitting at the old location beside it is named rather than deleted. Nothing here removes data: the only directories it removes are ones it has just emptied itself.
+
+Exit is 1 when a legacy tree was found and could not be moved, or when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate` and `fwl_io.plan_relocations`.
+
 ## fwl-io mirror
 
 ```bash
