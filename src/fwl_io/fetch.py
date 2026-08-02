@@ -627,8 +627,26 @@ class Fetcher:
         the per-file path it does not re-hash contents (the archive-only
         checksum policy records member names, not per-file digests). Extraction
         is staged and the tree is moved into place atomically.
+
+        Serialised per dataset like the per-file path, and for a sharper
+        reason: rebuilding replaces the whole version directory, so two
+        processes doing it at once would move a tree in from under each other
+        while a third reads it. Unrelated datasets still fetch in parallel.
         """
         archive_name, known_hash = next(iter(self.registry.items()))
+        if self._stamp_is_current(self.target_dir) and self._archive_tree_intact():
+            self._sources.setdefault(archive_name, 'local')
+            return self._extracted_files()
+
+        with self._fetch_lock(archive_name, self.target_dir):
+            return self._rebuild_archive(archive_name, known_hash, offline)
+
+    def _rebuild_archive(
+        self, archive_name: str, known_hash: str, offline: bool | None
+    ) -> list[Path]:
+        """Populate the version directory, with the dataset's lock already held."""
+        # Re-check under the lock: another process may have finished the whole
+        # rebuild while this one waited for it.
         if self._stamp_is_current(self.target_dir) and self._archive_tree_intact():
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()

@@ -735,6 +735,92 @@ def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
         _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all(offline=True)
 
 
+def test_an_archive_rebuild_takes_the_lock_and_an_intact_tree_does_not(
+    http_server, tmp_path, monkeypatch
+):
+    """Rebuilding is serialised per dataset; serving an intact tree is not.
+
+    A rebuild replaces the whole version directory, so two processes doing it
+    at once would move a tree out from under each other. The second half is
+    what keeps that from costing anything: the common case, where the data is
+    already there, must not queue behind a lock.
+    """
+    from filelock import FileLock
+
+    taken = []
+    acquire = FileLock.acquire
+
+    def spy(self, *args, **kwargs):
+        taken.append(self.lock_file)
+        return acquire(self, *args, **kwargs)
+
+    monkeypatch.setattr(FileLock, 'acquire', spy)
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    assert len(taken) == 1, 'the rebuild has to be serialised'
+
+    taken.clear()
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert taken == [], 'an intact tree is served without waiting for anything'
+
+
+def test_a_rebuild_rechecks_the_tree_under_the_lock(http_server, tmp_path, monkeypatch):
+    """Whoever waited for the lock serves what the winner built, not a second copy.
+
+    Without the re-check, every process queued behind a rebuild would redo it
+    in turn, which is the thundering herd the lock exists to stop rather than
+    merely stagger.
+    """
+    import shutil
+    from contextlib import contextmanager
+
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    built = tmp_path / VERSIONED
+
+    # A mirror that cannot answer, so anything but the re-check fails loudly.
+    fetcher = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'other', 'tar')
+
+    @contextmanager
+    def another_process_finishes_first(fname, target):
+        shutil.copytree(built, fetcher.target_dir)
+        yield
+
+    monkeypatch.setattr(fetcher, '_fetch_lock', another_process_finishes_first)
+    paths = fetcher.fetch_all(offline=True)
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert fetcher.provenance()[0]['source'] == 'local', 'it served the tree, it did not rebuild'
+
+
+def test_an_archive_fetch_proceeds_when_the_lock_manager_is_unavailable(
+    http_server, tmp_path, monkeypatch
+):
+    """A filesystem without a working lock manager still fetches an archive.
+
+    The lock never carries correctness, only politeness towards the mirrors,
+    so an ENOLCK mount degrades to an unguarded fetch exactly as the per-file
+    path does rather than failing the dataset.
+    """
+    from filelock import FileLock
+
+    def enolck(self, *args, **kwargs):
+        raise OSError(37, 'No locks available')
+
+    monkeypatch.setattr(FileLock, 'acquire', enolck)
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert (tmp_path / VERSIONED / '.fwl-io.json').is_file(), 'the stamp is still written'
+
+
 def test_a_stamp_at_an_unknown_schema_costs_a_refetch_and_says_so(http_server, tmp_path, caplog):
     """An unreadable schema means the whole dataset comes down again, loudly.
 
