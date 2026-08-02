@@ -539,17 +539,27 @@ class Fetcher:
         """The stamp record in ``directory``, or ``None`` if there is no usable one.
 
         Every reader of a stamp goes through here, so none of them has to
-        rediscover that the file may be absent, unreadable, not JSON, or JSON
-        that is not an object. The last is the one worth naming: a stamp is an
-        ordinary file that can be edited or truncated, and a reader that parsed
-        ``[]`` and then asked it for a key would raise where it should have
-        decided the stamp says nothing.
+        rediscover that the file may be absent, unreadable, not JSON, JSON that
+        is not an object, or an object written to a schema this version does
+        not know. The third is the one worth naming: a stamp is an ordinary
+        file that can be edited or truncated, and a reader that parsed ``[]``
+        and then asked it for a key would raise where it should have decided
+        the stamp says nothing.
+
+        The schema is what makes the rest of that safe over time. A stamp
+        written by a future version can be well-formed JSON in a shape whose
+        fields no longer mean what they did, and the fields this version reads
+        would then be trusted while meaning something else; an unrecognised
+        schema is treated as no stamp, so the tree is refetched and restamped
+        rather than misread.
         """
         try:
             record = json.loads((directory / _STAMP_FILENAME).read_text())
         except (OSError, ValueError):
             return None
-        return record if isinstance(record, dict) else None
+        if not isinstance(record, dict) or record.get('schema') != _STAMP_SCHEMA:
+            return None
+        return record
 
     def _stamp_members(self, directory: Path) -> list[str] | None:
         """Members recorded by the stamp in ``directory``, or ``None``.

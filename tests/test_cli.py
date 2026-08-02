@@ -190,6 +190,7 @@ def test_check_exits_zero_and_says_which_verdict_it_reached(tmp_path, capsys, mo
     (arc_dir / '.fwl-io.json').write_text(
         json.dumps(
             {
+                'schema': 1,
                 'extract': 'tar',
                 'record_id': '7654321',
                 'zenodo': '10.5281/zenodo.7654321',

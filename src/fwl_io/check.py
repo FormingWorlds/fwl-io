@@ -44,10 +44,14 @@ MISMATCH = 'mismatch'
 UNREADABLE = 'unreadable'
 PRESENT = 'present'
 
-#: States that mean the tree is not usable as the manifest describes it. A file
-#: that cannot be read counts: whether its contents are right is unknown, and a
-#: check reports what it could not establish rather than assuming the best.
-FAULT_STATES = (MISSING, MISMATCH, UNREADABLE)
+#: States that mean the tree is not usable as the manifest describes it, each
+#: with the word the report prints for it. A file that cannot be read counts:
+#: whether its contents are right is unknown, and a check reports what it could
+#: not establish rather than assuming the best. The summary counts these by
+#: walking this mapping, so a state added here is named in the report rather
+#: than failing a dataset for a reason the text never gives.
+FAULT_LABELS = {MISSING: 'missing', MISMATCH: 'corrupt', UNREADABLE: 'unreadable'}
+FAULT_STATES = tuple(FAULT_LABELS)
 
 
 @dataclass(frozen=True)
@@ -114,11 +118,8 @@ class DatasetCheck:
     def summary(self) -> str:
         """One line naming the counts, for a report a person reads."""
         parts = [f'{len(self.files)} file(s)']
-        for label, group in (
-            ('missing', self.missing),
-            ('corrupt', self.mismatched),
-            ('unreadable', self.unreadable),
-        ):
+        for state, label in FAULT_LABELS.items():
+            group = self._in_state(state)
             if group:
                 parts.append(f'{len(group)} {label}')
         if not self.verifiable:

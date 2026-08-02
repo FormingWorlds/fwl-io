@@ -557,6 +557,59 @@ def test_a_stamp_member_escaping_the_dataset_is_refused(tmp_path, escaping):
     assert outside.is_file(), 'the check reads only; it never touches what it refused'
 
 
+def test_a_stamp_written_to_an_unknown_schema_is_not_read(tmp_path):
+    """A stamp whose schema this version does not know describes nothing.
+
+    Its fields can be well-formed and still mean something else, so reading
+    them would be trusting a format nobody here has seen. The tree is reported
+    absent, which sends the dataset back through a fetch that restamps it.
+    """
+    fetcher = _archive_fetcher(tmp_path)
+    fetcher.target_dir.mkdir(parents=True, exist_ok=True)
+    (fetcher.target_dir / STAMP).write_text(
+        json.dumps(
+            {
+                'schema': 99,
+                'extract': 'tar',
+                'record_id': RECID,
+                'zenodo': ZENODO,
+                'members': ['inner/one.dat'],
+            }
+        )
+    )
+    member = fetcher.target_dir / 'inner/one.dat'
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_bytes(b'x')
+
+    assert fetcher.recorded_members() is None
+    assert not check_dataset(fetcher).complete
+
+    # Discrimination: the same stamp at the known schema is read, so it is the
+    # schema and not some other field that decided the answer above.
+    _write_stamp(fetcher, ['inner/one.dat'])
+    assert fetcher.recorded_members() == ['inner/one.dat']
+    assert check_dataset(fetcher).complete
+
+
+def test_every_fault_state_is_named_in_the_summary(tmp_path):
+    """Each way a file can be at fault is counted in the line a person reads.
+
+    The states that fail a dataset and the words the report prints for them
+    come from one mapping, so a dataset can never fail for a reason the text
+    leaves out.
+    """
+    from fwl_io.check import FAULT_LABELS, FAULT_STATES
+
+    files = tuple(_file(f'f{i}.dat', state) for i, state in enumerate(FAULT_STATES))
+    dataset = DatasetCheck('demo', SUBDIR, tmp_path, files, verifiable=True)
+    line = dataset.summary()
+
+    assert not dataset.complete
+    assert len(dataset.faults) == len(FAULT_STATES), 'every state here has to be a fault'
+    for label in FAULT_LABELS.values():
+        assert f'1 {label}' in line, f'the report never says {label!r}'
+
+
 def test_a_member_that_is_not_a_name_is_dropped(tmp_path):
     """A member entry of the wrong type is skipped, not joined onto the tree.
 

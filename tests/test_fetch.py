@@ -725,11 +725,16 @@ def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
     assert healed['record_id'] == RECID, 'the unusable stamp is replaced by a real one'
     assert healed['members'] == ['m0p1.txt', 'nested/m1p0.txt']
 
-    # Discrimination: offline, the same unusable stamp yields the honest
-    # "nothing here to serve" error rather than one about the stamp itself.
+    # Discrimination: put the unusable stamp back over the tree that is now
+    # fully populated, and go offline. The members are all on disk, so the only
+    # thing that can decide the dataset is unservable is the stamp, and the
+    # answer has to be the honest "nothing here to serve" rather than an error
+    # about the shape of a provenance file. Pointing this at an empty root
+    # instead would raise the same error whatever the stamp reader did.
     (version_dir / '.fwl-io.json').write_text(stamp_body)
+    assert (version_dir / 'm0p1.txt').is_file(), 'the tree must be intact, or this proves nothing'
     with pytest.raises(OfflineDataError):
-        _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
+        _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all(offline=True)
 
 
 def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(
@@ -756,6 +761,14 @@ def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(
     cached_stamp.write_text(json.dumps(tampered))
     with pytest.raises(OfflineDataError):
         _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'a', 'tar').fetch_all(
+            offline=True
+        )
+
+    # A cache stamp that is malformed rather than tampered is refused the same
+    # way, by the reader both trees share, rather than raising out of the copy.
+    cached_stamp.write_text('[1, 2, 3]')
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'c', 'tar').fetch_all(
             offline=True
         )
 
