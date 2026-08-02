@@ -66,12 +66,20 @@ class FileCheck:
 
 @dataclass(frozen=True)
 class DatasetCheck:
-    """The state of every file in one dataset."""
+    """The state of every file in one dataset.
+
+    ``verifiable`` says whether this dataset's registry carries a digest for
+    each file it declares. It is false for an archive dataset, whose members
+    are recorded by name only, and it is a property of the dataset rather than
+    of what happens to be on disk, so an archive dataset with no members left
+    cannot read as verifiable.
+    """
 
     key: str
     subdir: str
     directory: Path
     files: tuple[FileCheck, ...]
+    verifiable: bool = True
 
     def _in_state(self, state: str) -> tuple[FileCheck, ...]:
         return tuple(f for f in self.files if f.state == state)
@@ -101,15 +109,6 @@ class DatasetCheck:
         """True when nothing is missing, corrupt, or unreadable."""
         return not self.faults
 
-    @property
-    def hashed(self) -> bool:
-        """True when every file present was checked against a known digest.
-
-        False for an archive dataset, whose members are recorded by name only,
-        so a truncated member is indistinguishable from an intact one here.
-        """
-        return not self._in_state(PRESENT)
-
     def summary(self) -> str:
         """One line naming the counts, for a report a person reads."""
         parts = [f'{len(self.files)} file(s)']
@@ -120,7 +119,7 @@ class DatasetCheck:
         ):
             if group:
                 parts.append(f'{len(group)} {label}')
-        if not self.hashed:
+        if not self.verifiable:
             parts.append('presence only')
         state = 'ok' if self.complete else 'FAILED'
         return f'{self.key}: {state}, ' + ', '.join(parts)
@@ -157,6 +156,23 @@ class CheckReport:
         return all(d.complete for d in self.datasets.values())
 
     @property
+    def verified(self) -> bool:
+        """True when the tree is sound and every file in it was hashed.
+
+        Stricter than ``ok``, which a presence-only dataset satisfies. Presence
+        is all the archive-only checksum policy makes checkable, so such a
+        dataset is not a fault; but a caller that needs to know the contents
+        were compared against a digest must ask this and not ``ok``.
+        """
+        return self.ok and all(d.verifiable for d in self.datasets.values())
+
+    @property
+    def presence_only(self) -> tuple[DatasetCheck, ...]:
+        """Datasets whose files carry no digest to be checked against."""
+        unhashed = [d for d in self.datasets.values() if not d.verifiable]
+        return tuple(sorted(unhashed, key=lambda d: d.key))
+
+    @property
     def faults(self) -> tuple[DatasetCheck, ...]:
         """Datasets with something wrong, the worst affected named first."""
         broken = [d for d in self.datasets.values() if not d.complete]
@@ -171,8 +187,19 @@ class CheckReport:
             lines.append(f'{key}: NOT CHECKED, {error}')
         if not lines:
             return 'nothing was checked'
-        lines.append('all data present and verified' if self.ok else 'data check FAILED')
+        lines.append(self._verdict())
         return '\n'.join(lines)
+
+    def _verdict(self) -> str:
+        """The closing line, which must not claim more than was established."""
+        if not self.ok:
+            return 'data check FAILED'
+        if self.verified:
+            return 'all data present and verified'
+        # Sound, but part of it was checked by name alone. Saying "verified"
+        # here is the overstatement this module exists to avoid.
+        count = len(self.presence_only)
+        return f'all data present, {count} dataset(s) by presence only'
 
 
 def _file_state(fetcher: Fetcher, name: str) -> str:
@@ -186,6 +213,20 @@ def _file_state(fetcher: Fetcher, name: str) -> str:
         # A file the checker cannot read is not evidence of a good tree. This
         # is reported rather than raised so one unreadable file cannot abort a
         # report covering every other dataset.
+        log.warning('cannot read %s: %s', path, exc)
+        return UNREADABLE
+
+
+def _member_state(path: Path) -> str:
+    """Classify one extracted member, which has no digest to be checked against.
+
+    Reporting rather than raising for the same reason ``_file_state`` does: a
+    member the checker cannot reach, most often because a directory above it
+    denies traversal, must cost that one entry and not the whole report.
+    """
+    try:
+        return PRESENT if path.is_file() else MISSING
+    except OSError as exc:
         log.warning('cannot read %s: %s', path, exc)
         return UNREADABLE
 
@@ -218,12 +259,14 @@ def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
             # rather than as zero items, which would read as complete.
             archive_name = next(iter(fetcher.registry))
             files = (FileCheck(archive_name, fetcher.target_dir / archive_name, MISSING),)
-            return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, files)
-        checks = []
-        for name in sorted(members):
-            path = fetcher.target_dir / name
-            checks.append(FileCheck(name, path, PRESENT if path.is_file() else MISSING))
-        return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, tuple(checks))
+            return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, files, verifiable=False)
+        checks = [
+            FileCheck(name, fetcher.target_dir / name, _member_state(fetcher.target_dir / name))
+            for name in sorted(members)
+        ]
+        return DatasetCheck(
+            key, fetcher.subdir, fetcher.target_dir, tuple(checks), verifiable=False
+        )
 
     checks = [
         FileCheck(name, fetcher.target_dir / name, _file_state(fetcher, name))

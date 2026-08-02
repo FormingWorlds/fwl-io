@@ -697,6 +697,43 @@ def test_shared_cache_serves_an_archive_dataset_offline(http_server, tmp_path, m
         _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
 
 
+def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(
+    http_server, tmp_path, monkeypatch
+):
+    """A shared-cache stamp gets the same suspicion as a local one.
+
+    The cache is group-writable by design, so its stamp is no more trustworthy
+    than the dataset's own. A stamp whose members resolve outside the cached
+    directory describes no tree there, and the copy has to be refused rather
+    than accepted because some file somewhere answered to the name.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    cache_root = tmp_path / 'shared_cache'
+    _archive_fetcher(base_url, registry, cache_root, 'tar').fetch_all()
+    cached_stamp = cache_root / VERSIONED / '.fwl-io.json'
+    record = json.loads(cached_stamp.read_text())
+    outside = tmp_path / 'planted.txt'
+    outside.write_bytes(b'not part of the cached tree\n')
+
+    monkeypatch.setenv('FWL_DATA_CACHE', str(cache_root))
+    tampered = dict(record, members=['../../../../planted.txt'])
+    cached_stamp.write_text(json.dumps(tampered))
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'a', 'tar').fetch_all(
+            offline=True
+        )
+
+    # Discrimination: the same cache with its real member list does serve, so
+    # the refusal above is the escaping name and not a broken fixture.
+    cached_stamp.write_text(json.dumps(record))
+    paths = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'b', 'tar').fetch_all(
+        offline=True
+    )
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert outside.is_file(), 'the refused name is read only, never touched'
+
+
 def test_archive_extracts_a_top_level_directory_member(http_server, tmp_path):
     """A tar whose members sit under a top-level directory keeps that structure.
 

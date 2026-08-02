@@ -501,6 +501,14 @@ class Fetcher:
         one tests for presence itself. An unreadable file raises ``OSError``
         rather than reporting a mismatch, since a permission problem on the
         tree is a different fault from wrong contents.
+
+        Raises
+        ------
+        KeyError
+            ``fname`` is not declared in this dataset's registry, so there is
+            no digest to compare it against.
+        OSError
+            The file is present but could not be read.
         """
         if fname not in self.registry:
             raise KeyError(f'{fname!r} is not in the registry for {self.subdir!r}')
@@ -514,33 +522,44 @@ class Fetcher:
         Callers must keep those apart: an empty list would read as a complete
         tree of no files.
 
-        A stamp qualifies only when it describes this archive kind and this
-        record id. One left by a different fetch of the same subdirectory, a
-        plain fetch or another version, does not describe this tree.
+        A stamp qualifies only when it describes this deposit and this archive
+        kind. One left by a different fetch of the same subdirectory, a plain
+        fetch or another version, does not describe this tree.
 
         Members that would resolve outside the dataset directory are dropped.
         A stamp is a file on disk like any other and can be edited or replaced,
         so a name in it is treated with the same suspicion as a name inside an
         archive rather than joined onto the tree unchecked.
         """
-        stamp = self.target_dir / _STAMP_FILENAME
+        return self._stamp_members(self.target_dir)
+
+    def _stamp_members(self, directory: Path) -> list[str] | None:
+        """Members recorded by the stamp in ``directory``, or ``None``.
+
+        The single reader for both the dataset's own tree and a copy of it in
+        the shared cache. They are held to one standard on purpose: a cache
+        stamp is no more trustworthy than a local one, and two readers with
+        their own qualifying rules drift apart.
+        """
         try:
-            record = json.loads(stamp.read_text())
+            record = json.loads((directory / _STAMP_FILENAME).read_text())
         except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict):
             return None
         if record.get('extract') != self.extract:
             return None
-        if record.get('record_id') != self.record_id:
+        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
             return None
         members = record.get('members')
         if not isinstance(members, list) or not members:
             return None
-        root = self.target_dir.resolve()
+        root = directory.resolve()
         safe = []
         for member in members:
             if not isinstance(member, str):
                 continue
-            resolved = (self.target_dir / member).resolve()
+            resolved = (directory / member).resolve()
             if resolved == root or not resolved.is_relative_to(root):
                 log.warning('stamp for %s names a member outside it: %r', self.subdir, member)
                 continue
@@ -634,23 +653,14 @@ class Fetcher:
         archive, since the archive is dropped after extraction. The cached
         stamp has to describe this deposit and the same archive kind, and
         every member it names has to be present, which is the same standard
-        the local tree is held to.
+        the local tree is held to, read by the same method.
         """
         cache_root = resolve_cache_root()
         if cache_root is None:
             return False
         cached_dir = cache_root / self.rel_dir
-        cached_stamp = cached_dir / _STAMP_FILENAME
-        try:
-            record = json.loads(cached_stamp.read_text())
-        except (OSError, ValueError):
-            return False
-        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
-            return False
-        if record.get('extract') != self.extract:
-            return False
-        members = record.get('members')
-        if not isinstance(members, list) or not members:
+        members = self._stamp_members(cached_dir)
+        if members is None:
             return False
         if not all((cached_dir / m).is_file() for m in members):
             return False

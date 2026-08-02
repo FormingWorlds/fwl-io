@@ -85,10 +85,24 @@ def _populate(fetcher, names=None, corrupt=()):
         (fetcher.target_dir / name).write_bytes(body)
 
 
-def _write_stamp(fetcher, members, record_id=RECID):
-    fetcher.target_dir.mkdir(parents=True, exist_ok=True)
-    (fetcher.target_dir / STAMP).write_text(
-        json.dumps({'schema': 1, 'extract': 'tar', 'record_id': record_id, 'members': members})
+def _write_stamp(fetcher, members, record_id=RECID, zenodo=ZENODO, directory=None):
+    """Write a stamp of the shape the fetcher itself writes after an extraction.
+
+    Every field the reader qualifies on is present, so a test that changes one
+    of them is changing the one thing under examination.
+    """
+    directory = fetcher.target_dir if directory is None else directory
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / STAMP).write_text(
+        json.dumps(
+            {
+                'schema': 1,
+                'extract': 'tar',
+                'record_id': record_id,
+                'zenodo': zenodo,
+                'members': members,
+            }
+        )
     )
 
 
@@ -100,7 +114,7 @@ def test_a_complete_tree_is_reported_complete_and_verified(tmp_path):
     result = check_dataset(fetcher, key='demo')
 
     assert result.complete
-    assert result.hashed, 'a plain dataset has digests, so it must not report presence only'
+    assert result.verifiable, 'a plain dataset has digests, so it must not report presence only'
     assert [f.name for f in result.files] == ['alpha.dat', 'beta.dat']
     assert {f.state for f in result.files} == {OK}
     assert result.missing == () and result.mismatched == ()
@@ -178,7 +192,7 @@ def test_archive_members_are_present_not_verified(tmp_path):
     result = check_dataset(fetcher)
 
     assert result.complete
-    assert not result.hashed, 'an archive dataset cannot claim its members were verified'
+    assert not result.verifiable, 'an archive dataset cannot claim its members were verified'
     assert {f.state for f in result.files} == {PRESENT}
     assert 'presence only' in result.summary()
 
@@ -196,6 +210,62 @@ def test_a_deleted_archive_member_is_reported_missing(tmp_path):
     assert not result.complete
     assert [f.name for f in result.missing] == ['inner/two.dat']
     assert [f.name for f in result.files if f.state == PRESENT] == ['inner/one.dat']
+
+
+def test_an_unreadable_archive_member_costs_one_entry_not_the_dataset(tmp_path):
+    """A member the checker cannot reach is one fault, not a lost report.
+
+    The plain-file path already reports an unreadable file and carries on. The
+    archive path has to do the same, or a single directory denying traversal
+    turns every other member of that dataset into no information at all.
+    """
+    fetcher = _archive_fetcher(tmp_path)
+    _write_stamp(fetcher, ['locked/one.dat', 'inner/two.dat'])
+    for member in ('locked/one.dat', 'inner/two.dat'):
+        path = fetcher.target_dir / member
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'x')
+    locked = fetcher.target_dir / 'locked'
+    locked.chmod(0o000)
+    try:
+        result = check_dataset(fetcher)
+    finally:
+        locked.chmod(0o755)
+
+    states = {f.name: f.state for f in result.files}
+    assert states['locked/one.dat'] == UNREADABLE
+    assert states['inner/two.dat'] == PRESENT, 'the reachable member must still be reported'
+    assert not result.complete
+    assert [f.name for f in result.unreadable] == ['locked/one.dat']
+
+
+def test_a_presence_only_report_does_not_claim_verification(tmp_path):
+    """A sound archive tree is reported present, and the verdict says only that.
+
+    An archive dataset carries no per-file digests, so nothing about its
+    contents was established. A verdict reading "verified" over a line reading
+    "presence only" is the overstatement this module exists to avoid, and a
+    caller needing the stronger statement asks ``verified`` rather than ``ok``.
+    """
+    archive = _archive_fetcher(tmp_path)
+    _write_stamp(archive, ['inner/one.dat'])
+    member = archive.target_dir / 'inner/one.dat'
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_bytes(b'x')
+    plain = _plain_fetcher(tmp_path / 'other')
+    _populate(plain)
+
+    by_presence = CheckReport(datasets={'arc': check_dataset(archive, key='arc')})
+    by_digest = CheckReport(datasets={'plain': check_dataset(plain, key='plain')})
+
+    assert by_presence.ok, 'presence is all that is checkable there, so it is not a fault'
+    assert not by_presence.verified, 'nothing was hashed, so nothing was verified'
+    assert [d.key for d in by_presence.presence_only] == ['arc']
+    assert 'verified' not in by_presence.summary()
+    assert '1 dataset(s) by presence only' in by_presence.summary()
+
+    assert by_digest.verified, 'a hashed tree must still reach the stronger verdict'
+    assert 'all data present and verified' in by_digest.summary()
 
 
 @pytest.mark.parametrize(
@@ -219,6 +289,11 @@ def test_an_archive_without_a_usable_stamp_is_not_complete(tmp_path, stamp_body)
     assert result.files, 'an unusable stamp must not produce an empty, complete report'
     assert not result.complete
     assert [f.name for f in result.missing] == ['bundle.tar.gz']
+    assert not result.verifiable, (
+        'an archive dataset carries no per-file digests whatever its stamp says, '
+        'so it can never report itself checkable against one'
+    )
+    assert 'presence only' in result.summary()
 
 
 def test_an_unreadable_manifest_fails_the_report(tmp_path):
@@ -422,20 +497,32 @@ def test_a_stamp_from_another_record_does_not_describe_this_tree(tmp_path):
     assert [f.name for f in result.missing] == ['bundle.tar.gz']
 
 
-def test_a_stamp_member_escaping_the_dataset_is_refused(tmp_path):
+@pytest.mark.parametrize(
+    'escaping',
+    ['../../../outside.dat', 'ABSOLUTE', 'link/outside.dat', '.', 'inner/../..'],
+    ids=['relative', 'absolute', 'through-a-symlink', 'the-directory-itself', 'trailing'],
+)
+def test_a_stamp_member_escaping_the_dataset_is_refused(tmp_path, escaping):
     """A member name pointing outside the dataset directory is dropped.
 
     A stamp is an ordinary file on disk and can be edited or replaced, so a
     name inside it gets the same suspicion as a name inside an archive rather
     than being joined onto the tree and reported on.
+
+    The symlink case is why containment is decided on the resolved path rather
+    than on the spelling of the name: ``link/outside.dat`` has no ``..``, no
+    leading separator, and nothing else a lexical check could object to.
     """
     fetcher = _archive_fetcher(tmp_path)
     outside = tmp_path / 'outside.dat'
     outside.write_bytes(b'not part of the dataset\n')
-    _write_stamp(fetcher, ['../../../outside.dat', 'inner/one.dat'])
+    if escaping == 'ABSOLUTE':
+        escaping = str(outside)
+    _write_stamp(fetcher, [escaping, 'inner/one.dat'])
     member = fetcher.target_dir / 'inner/one.dat'
     member.parent.mkdir(parents=True, exist_ok=True)
     member.write_bytes(b'x')
+    (fetcher.target_dir / 'link').symlink_to(tmp_path, target_is_directory=True)
 
     members = fetcher.recorded_members()
 
@@ -443,6 +530,40 @@ def test_a_stamp_member_escaping_the_dataset_is_refused(tmp_path):
     reported = {f.name for f in check_dataset(fetcher).files}
     assert reported == {'inner/one.dat'}
     assert outside.is_file(), 'the check reads only; it never touches what it refused'
+
+
+def test_a_stamp_naming_only_escaping_members_describes_no_tree(tmp_path):
+    """Every name dropped leaves no tree, not a complete tree of nothing.
+
+    The boundary of the rule above: an empty survivor list must read the same
+    as an absent stamp, or a stamp holding nothing but escaping names would
+    certify a dataset whose files were never looked at.
+    """
+    fetcher = _archive_fetcher(tmp_path)
+    (tmp_path / 'outside.dat').write_bytes(b'not part of the dataset\n')
+    _write_stamp(fetcher, ['../../../outside.dat'])
+
+    assert fetcher.recorded_members() is None
+
+    result = check_dataset(fetcher)
+    assert not result.complete
+    assert [f.name for f in result.missing] == ['bundle.tar.gz']
+
+
+def test_a_stamp_from_another_deposit_does_not_describe_this_tree(tmp_path):
+    """A stamp naming a different DOI is rejected like one naming another record.
+
+    The cache path and the local path qualify a stamp by the same fields, so
+    the deposit has to match and not only the record id parsed out of it.
+    """
+    fetcher = _archive_fetcher(tmp_path)
+    _write_stamp(fetcher, ['inner/one.dat'], zenodo='10.5281/zenodo.7654321')
+    member = fetcher.target_dir / 'inner/one.dat'
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_bytes(b'x')
+
+    assert fetcher.recorded_members() is None
+    assert not check_dataset(fetcher).complete
 
 
 def test_one_unresolvable_dataset_fails_a_report_of_sound_ones(tmp_path, monkeypatch):
