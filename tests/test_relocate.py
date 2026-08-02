@@ -23,8 +23,9 @@ from fwl_io.relocate import (
     MOVED,
     READY,
     UNRESOLVABLE,
+    Relocation,
     plan_relocations,
-    relocate,
+    relocate_all,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
@@ -83,7 +84,7 @@ def test_a_verified_legacy_tree_moves_and_leaves_nothing_behind(tmp_path, monkey
     root = tmp_path / 'data'
     _populate(root / LEGACY)
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [MOVED]
     for name, body in CONTENTS.items():
@@ -104,7 +105,7 @@ def test_a_file_that_differs_from_the_registry_stops_the_move(tmp_path, monkeypa
     root = tmp_path / 'data'
     _populate(root / LEGACY, corrupt=['notes.txt'])
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [MISMATCH]
     assert report.faults, 'a legacy tree that cannot be moved has to fail the run'
@@ -124,7 +125,7 @@ def test_a_legacy_tree_missing_a_file_is_reported_not_half_moved(tmp_path, monke
     root = tmp_path / 'data'
     _populate(root / LEGACY, names=['BHAC15_tracks.dat'])
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [INCOMPLETE]
     assert '1 of 2 file(s) absent' in report.entries[0].detail
@@ -143,7 +144,7 @@ def test_a_tree_already_at_its_current_location_is_left_alone(tmp_path, monkeypa
     _populate(root / TARGET)
     _populate(root / LEGACY)
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [ALREADY_CURRENT]
     assert not report.faults, 'an already-tidy tree is a success'
@@ -168,7 +169,7 @@ def test_a_current_tree_with_no_old_copy_beside_it_reports_nothing_to_reclaim(
     root = tmp_path / 'data'
     _populate(root / TARGET)
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [ALREADY_CURRENT]
     assert report.redundant == ()
@@ -181,7 +182,7 @@ def test_nothing_on_disk_is_reported_absent_rather_than_missing(tmp_path, monkey
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [ABSENT]
     assert not report.faults, 'never having had the old layout is not a fault'
@@ -196,7 +197,7 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
     _populate(root / LEGACY)
     before = {p.name: p.read_bytes() for p in sorted((root / LEGACY).iterdir())}
 
-    report = relocate(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root, dry_run=True)
 
     assert [e.state for e in report.entries] == [READY]
     assert report.ready and not report.moved
@@ -206,7 +207,7 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
 
     # Discrimination: the same call without dry_run does move it, so the
     # assertions above pin the flag and not some other refusal.
-    assert relocate(data_root=root).moved
+    assert relocate_all(data_root=root).moved
     assert (root / TARGET / 'notes.txt').is_file()
 
 
@@ -220,7 +221,7 @@ def test_a_dataset_whose_registry_is_missing_is_reported_not_moved(tmp_path, mon
     root = tmp_path / 'data'
     _populate(root / LEGACY)
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
     assert report.faults
@@ -248,7 +249,7 @@ def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(tmp
     root = tmp_path / 'data'
     _populate(root / LEGACY)
 
-    report = relocate(data_root=root)
+    report = relocate_all(data_root=root)
 
     assert report.entries == (), 'no dataset was declared, so none could be considered'
     assert list(report.manifest_errors) == ['demoprovider']
@@ -256,6 +257,82 @@ def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(tmp
     assert 'MANIFEST UNREADABLE' in report.summary()
     assert 'may be partial' in report.summary()
     assert (root / LEGACY / 'notes.txt').is_file(), 'the tree it could not judge is untouched'
+
+
+def test_a_nested_member_leaves_no_husk_behind(tmp_path, monkeypatch):
+    """A registry name may nest, and the emptied subdirectory goes too.
+
+    Removing only the directories above the legacy one leaves an empty `sub/`
+    inside it, which keeps the whole legacy tree standing and then reads on a
+    later run as an old copy still holding data, when it holds nothing.
+    """
+    from fwl_io.relocate import MOVED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    (legacy / 'sub').mkdir(parents=True)
+    (legacy / 'sub' / 'nested.dat').write_bytes(CONTENTS['notes.txt'])
+    target = root / TARGET
+    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=target, files=('sub/nested.dat',))
+
+    result = _move_one(entry, root)
+
+    assert result.state == MOVED
+    assert (target / 'sub' / 'nested.dat').read_bytes() == CONTENTS['notes.txt']
+    assert not legacy.exists(), 'the emptied subdirectory must not keep the tree alive'
+    assert not (root / 'stellar_evolution_tracks').exists()
+
+
+@pytest.mark.parametrize('escape', ['relative', 'absolute'], ids=['dot-dot', 'absolute'])
+def test_files_outside_the_data_root_are_never_moved(tmp_path, escape):
+    """A legacy path leaving the root is refused rather than followed.
+
+    The table ships with the package, but it still becomes a path that files
+    are moved out of, so it gets the same suspicion as a name inside a stamp.
+    A symlinked legacy directory escapes the same way and only shows it when
+    the path is resolved.
+    """
+    from fwl_io.relocate import _move_one
+
+    root = tmp_path / 'data'
+    root.mkdir()
+    outside = tmp_path / 'outside_dataset'
+    outside.mkdir()
+    (outside / 'a.dat').write_bytes(CONTENTS['notes.txt'])
+    legacy = root / '../outside_dataset' if escape == 'relative' else outside
+    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=('a.dat',))
+
+    result = _move_one(entry, root)
+
+    assert result.state == UNRESOLVABLE
+    assert 'outside the data root' in result.detail
+    assert (outside / 'a.dat').is_file(), 'the file outside the root is untouched'
+    assert not (root / TARGET).exists()
+
+
+def test_the_shipped_table_is_filtered_at_the_point_it_is_read(monkeypatch):
+    """An entry naming a path outside the root is dropped, not merely asserted about.
+
+    A test over the shipped file proves what ships today; this proves the code
+    refuses a bad entry, which is what protects a tree if the file ever changes.
+    """
+    import fwl_io.relocate as module
+
+    table = '[legacy]\n"a.b" = "../escape"\n"c.d" = "/etc"\n"e.f" = "good/place"\n'
+
+    class _Resource:
+        def read_text(self):
+            return table
+
+    class _Package:
+        def joinpath(self, name):
+            return _Resource()
+
+    monkeypatch.setattr(module, 'files', lambda package: _Package())
+
+    kept = module._legacy_locations()
+
+    assert kept == {'e.f': 'good/place'}, 'only the contained entry survives'
 
 
 def test_a_dataset_with_no_legacy_location_is_not_considered(tmp_path, monkeypatch):
@@ -300,3 +377,72 @@ def test_the_shipped_table_names_only_datasets_and_relative_locations():
         assert not Path(location).is_absolute(), f'{location!r} is absolute'
         assert '..' not in Path(location).parts, f'{location!r} climbs out of the data root'
         assert location.strip('/') == location, f'{location!r} is not a clean relative path'
+
+
+def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, monkeypatch):
+    """When the files cannot be put back, say so rather than call it a failure.
+
+    A plain failure means the tree is as it was and a rerun is the remedy. This
+    one means the dataset is in two places at once, which no rerun fixes and a
+    person has to look at, so it gets a state of its own.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import SPLIT, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    real_replace = module.os.replace
+    calls = []
+
+    def failing_replace(src, dst):
+        calls.append((str(src), str(dst)))
+        if len(calls) == 1:
+            return real_replace(src, dst)
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(module.os, 'replace', failing_replace)
+    entry = Relocation(
+        KEY,
+        READY,
+        legacy_dir=legacy,
+        target_dir=root / TARGET,
+        files=tuple(sorted(CONTENTS)),
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == SPLIT, 'a tree in two places is not the same as an untouched one'
+    assert 'split between' in result.detail
+    assert result.faulty
+    assert len(calls) == 3, 'one move succeeded, one failed, one rollback was attempted'
+
+
+def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monkeypatch):
+    """After a dataset fails to move, the ones behind it are left alone.
+
+    Continuing would move more data past a tree somebody already has to look
+    at, and the entries that never ran are reported still ready rather than
+    quietly dropped.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import FAILED, RelocationReport
+
+    planned = RelocationReport(
+        (
+            Relocation('a.first', READY, legacy_dir=tmp_path / 'l1', target_dir=tmp_path / 't1'),
+            Relocation('b.second', READY, legacy_dir=tmp_path / 'l2', target_dir=tmp_path / 't2'),
+        )
+    )
+    monkeypatch.setattr(module, 'plan_relocations', lambda data_root=None: planned)
+    monkeypatch.setattr(
+        module,
+        '_move_one',
+        lambda entry, root: Relocation(entry.key, FAILED, detail='disk full'),
+    )
+
+    report = module.relocate_all(data_root=tmp_path)
+
+    assert [e.state for e in report.entries] == [FAILED, READY]
+    assert [e.key for e in report.ready] == ['b.second'], 'the untried one is still ready'
+    assert len(report.faults) == 1

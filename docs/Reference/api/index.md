@@ -8,7 +8,7 @@ from fwl_io import (
     load_manifest, discover_manifests,  # manifests
     fetch_for, Dataset,
     check_for, check_dataset,           # validate-only checking
-    relocate, plan_relocations,         # moving a legacy tree into the current layout
+    relocate_all, plan_relocations,         # moving a legacy tree into the current layout
     CheckReport, DatasetCheck, FileCheck,
     resolve_data_root, resolve_cache_root,
     DownloadError, OfflineDataError, MissingDataRootError,
@@ -20,7 +20,7 @@ Per-module reference pages:
 
 - [Fetching](fetch.md): `Fetcher`, `create_fetcher`, error types
 - [Checking](check.md): `check_for`, `check_dataset`, `CheckReport`, `DatasetCheck`, `FileCheck`
-- [Relocating](relocate.md): `relocate`, `plan_relocations`, `RelocationReport`, `Relocation`
+- [Relocating](relocate.md): `relocate_all`, `plan_relocations`, `RelocationReport`, `Relocation`
 - [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`, `ManifestSchemaError`
 - [Registries](registry.md): registry file reading and writing
 - [Sync](sync.md): registry generation from the Zenodo API

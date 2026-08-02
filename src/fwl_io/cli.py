@@ -64,14 +64,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 
 def _cmd_relocate(args: argparse.Namespace) -> int:
-    from fwl_io.relocate import relocate
+    from fwl_io.relocate import relocate_all
 
-    report = relocate(data_root=args.data_root, dry_run=args.dry_run)
+    report = relocate_all(data_root=args.data_root, dry_run=args.dry_run)
     print(report.summary())
-    # A tree that was already tidy is a success, so only a legacy tree that
-    # could not be moved fails the command. Nothing was changed in that case,
-    # which is what the exit code has to make actionable.
-    return 1 if report.faults else 0
+    # Matches the summary: an unread manifest may be the one declaring the
+    # tree still sitting there, so it cannot exit as a clean run either.
+    return 0 if report.ok else 1
 
 
 def _cmd_mirror(args: argparse.Namespace) -> int:

@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has five subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has six subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -54,7 +54,7 @@ A dataset moves only when every file its registry declares is present in the old
 
 A dataset already at its current location is not a fault, and a copy still sitting at the old location beside it is named rather than deleted. Nothing here removes data: the only directories it removes are ones it has just emptied itself.
 
-Exit is 1 when a legacy tree was found and could not be moved, or when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate` and `fwl_io.plan_relocations`.
+Exit is 1 when a legacy tree was found and could not be moved, or when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
 
 ## fwl-io mirror
 

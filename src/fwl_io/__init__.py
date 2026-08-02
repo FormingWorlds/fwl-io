@@ -19,7 +19,7 @@ from fwl_io.manifest import (
     load_manifest,
 )
 from fwl_io.paths import MissingDataRootError, resolve_cache_root, resolve_data_root
-from fwl_io.relocate import Relocation, RelocationReport, plan_relocations, relocate
+from fwl_io.relocate import Relocation, RelocationReport, plan_relocations, relocate_all
 
 try:
     __version__ = version('fwl-io')
@@ -46,7 +46,7 @@ __all__ = [
     'fetch_for',
     'load_manifest',
     'plan_relocations',
-    'relocate',
+    'relocate_all',
     'resolve_cache_root',
     'resolve_data_root',
 ]

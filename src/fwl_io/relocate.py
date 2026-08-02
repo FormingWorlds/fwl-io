@@ -51,9 +51,10 @@ MISMATCH = 'mismatch'
 UNRESOLVABLE = 'unresolvable'
 MOVED = 'moved'
 FAILED = 'failed'
+SPLIT = 'split'
 
 #: States that mean a legacy tree is there but cannot be moved as it stands.
-FAULT_STATES = (INCOMPLETE, MISMATCH, UNRESOLVABLE, FAILED)
+FAULT_STATES = (INCOMPLETE, MISMATCH, UNRESOLVABLE, FAILED, SPLIT)
 
 
 @dataclass(frozen=True)
@@ -155,9 +156,31 @@ class RelocationReport:
 
 
 def _legacy_locations() -> dict[str, str]:
-    """Read the shipped table of where each dataset used to live."""
+    """Read the shipped table of where each dataset used to live.
+
+    An entry naming an absolute path or climbing out of the data root is
+    dropped. The table ships with the package, but it is still a file being
+    turned into a path that files get moved out of, so it earns the same
+    suspicion as a name inside a provenance stamp.
+    """
     text = files('fwl_io.data').joinpath(_LAYOUT_RESOURCE).read_text()
-    return dict(tomllib.loads(text).get('legacy', {}))
+    table = dict(tomllib.loads(text).get('legacy', {}))
+    safe = {}
+    for key, location in table.items():
+        parts = Path(location).parts
+        if not isinstance(location, str) or Path(location).is_absolute() or '..' in parts:
+            log.warning('legacy location for %s is not inside the data root: %r', key, location)
+            continue
+        safe[key] = location
+    return safe
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """True when ``path`` resolves within ``root``, symlinks followed."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
 
 
 def _classify(legacy_dir: Path, target_dir: Path, registry: dict[str, str]) -> tuple[str, str]:
@@ -229,6 +252,18 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 continue
             seen.add(ds.key)
             legacy_dir = root / legacy
+            if legacy_dir.exists() and not _inside(legacy_dir, root):
+                # A symlink is the way this happens in a real tree: the joined
+                # path is clean, and only resolving it shows it leaves the root.
+                entries.append(
+                    Relocation(
+                        ds.key,
+                        UNRESOLVABLE,
+                        legacy_dir=legacy_dir,
+                        detail=f'{legacy_dir} resolves outside the data root {root}',
+                    )
+                )
+                continue
             try:
                 registry = ds.registry()
                 target_dir = root / _version_dir(ds)
@@ -262,6 +297,17 @@ def _version_dir(ds: Dataset) -> str:
 def _move_one(entry: Relocation, root: Path) -> Relocation:
     """Move one verified legacy tree, leaving nothing half-moved behind."""
     assert entry.legacy_dir is not None and entry.target_dir is not None
+    if not _inside(entry.legacy_dir, root) or not _inside(entry.target_dir, root):
+        # Checked here as well as when the plan is built, so the guarantee that
+        # this only ever moves files inside the data root belongs to the code
+        # that does the moving rather than to whoever called it.
+        return Relocation(
+            entry.key,
+            UNRESOLVABLE,
+            legacy_dir=entry.legacy_dir,
+            target_dir=entry.target_dir,
+            detail=f'refusing to move files outside the data root {root}',
+        )
     done: list[str] = []
     try:
         entry.target_dir.mkdir(parents=True, exist_ok=True)
@@ -272,13 +318,29 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
             done.append(name)
     except OSError as exc:
         # Put back what was moved, so a failure part way leaves the tree as it
-        # was rather than split across two layouts, which is the one state
-        # neither the reader nor the fetcher knows how to interpret.
+        # was rather than split across two layouts.
+        unrestored = []
         for name in done:
             try:
                 os.replace(entry.target_dir / name, entry.legacy_dir / name)
             except OSError:
-                log.error('could not restore %s to %s', name, entry.legacy_dir)
+                unrestored.append(name)
+        if unrestored:
+            # The state the rollback exists to prevent, reached anyway. It is
+            # reported as its own thing because the remedy is a person looking
+            # at two directories, not a rerun.
+            log.error('could not restore %s to %s', ', '.join(unrestored), entry.legacy_dir)
+            return Relocation(
+                entry.key,
+                SPLIT,
+                legacy_dir=entry.legacy_dir,
+                target_dir=entry.target_dir,
+                files=entry.files,
+                detail=(
+                    f'{exc}; {len(unrestored)} file(s) could not be put back, so this '
+                    f'dataset is now split between {entry.legacy_dir} and {entry.target_dir}'
+                ),
+            )
         return Relocation(
             entry.key,
             FAILED,
@@ -299,13 +361,22 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
 
 
 def _prune(directory: Path, root: Path) -> None:
-    """Remove the emptied legacy directory, and any parent it leaves empty.
+    """Remove the emptied legacy tree, and any parent it leaves empty.
 
     Only ever removes a directory with nothing in it, so no data can be lost
     here, and the walk upward stops at the data root: the root itself is not a
-    leftover of the previous layout and other datasets live beside it.
+    leftover of the previous layout and other datasets live beside it. A
+    registry name may nest, so the emptied subdirectories inside go first, or
+    the husk they leave keeps the whole legacy directory standing.
     """
     root = root.resolve()
+    if directory.is_dir():
+        for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                try:
+                    path.rmdir()
+                except OSError:
+                    return
     while directory.resolve() != root and directory.resolve().is_relative_to(root):
         if any(directory.iterdir()):
             return
@@ -316,7 +387,7 @@ def _prune(directory: Path, root: Path) -> None:
         directory = directory.parent
 
 
-def relocate(data_root: str | Path | None = None, dry_run: bool = False) -> RelocationReport:
+def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> RelocationReport:
     """Move every legacy tree that checks out into the current layout.
 
     A dataset is moved only when every file its registry declares is present
@@ -340,7 +411,16 @@ def relocate(data_root: str | Path | None = None, dry_run: bool = False) -> Relo
     if dry_run:
         return plan
     root = resolve_data_root(data_root)
-    return RelocationReport(
-        tuple(_move_one(e, root) if e.state == READY else e for e in plan.entries),
-        dict(plan.manifest_errors),
-    )
+    done, halted = [], False
+    for entry in plan.entries:
+        if entry.state != READY or halted:
+            done.append(entry)
+            continue
+        moved = _move_one(entry, root)
+        done.append(moved)
+        if moved.state in (FAILED, SPLIT):
+            # Stop rather than move more data past a tree that is already in a
+            # state somebody has to look at.
+            log.error('stopping after %s could not be relocated', moved.key)
+            halted = True
+    return RelocationReport(tuple(done), dict(plan.manifest_errors))
