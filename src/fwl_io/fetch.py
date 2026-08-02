@@ -508,7 +508,8 @@ class Fetcher:
             ``fname`` is not declared in this dataset's registry, so there is
             no digest to compare it against.
         OSError
-            The file is present but could not be read.
+            The file could not be read, whether because it is absent or
+            because the tree denies access to it.
         """
         if fname not in self.registry:
             raise KeyError(f'{fname!r} is not in the registry for {self.subdir!r}')
@@ -533,6 +534,23 @@ class Fetcher:
         """
         return self._stamp_members(self.target_dir)
 
+    @staticmethod
+    def _read_stamp(directory: Path) -> dict | None:
+        """The stamp record in ``directory``, or ``None`` if there is no usable one.
+
+        Every reader of a stamp goes through here, so none of them has to
+        rediscover that the file may be absent, unreadable, not JSON, or JSON
+        that is not an object. The last is the one worth naming: a stamp is an
+        ordinary file that can be edited or truncated, and a reader that parsed
+        ``[]`` and then asked it for a key would raise where it should have
+        decided the stamp says nothing.
+        """
+        try:
+            record = json.loads((directory / _STAMP_FILENAME).read_text())
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
     def _stamp_members(self, directory: Path) -> list[str] | None:
         """Members recorded by the stamp in ``directory``, or ``None``.
 
@@ -541,11 +559,8 @@ class Fetcher:
         stamp is no more trustworthy than a local one, and two readers with
         their own qualifying rules drift apart.
         """
-        try:
-            record = json.loads((directory / _STAMP_FILENAME).read_text())
-        except (OSError, ValueError):
-            return None
-        if not isinstance(record, dict):
+        record = self._read_stamp(directory)
+        if record is None:
             return None
         if record.get('extract') != self.extract:
             return None
@@ -590,8 +605,7 @@ class Fetcher:
         is staged and the tree is moved into place atomically.
         """
         archive_name, known_hash = next(iter(self.registry.items()))
-        stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp) and self._archive_tree_intact():
+        if self._stamp_is_current(self.target_dir) and self._archive_tree_intact():
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()
 
@@ -676,15 +690,18 @@ class Fetcher:
         log.info('copied dataset from shared cache %s', cache_root)
         return True
 
-    def _stamp_is_current(self, stamp: Path) -> bool:
+    def _stamp_is_current(self, directory: Path) -> bool:
         """True when a valid stamp for this exact record id already exists.
 
-        A missing, unreadable, non-JSON, or mismatched stamp is not current,
-        so it is rewritten (healed) rather than trusted forever.
+        A missing, unreadable, malformed, or mismatched stamp is not current,
+        so it is rewritten (healed) rather than trusted forever. It asks less
+        than :meth:`_stamp_members`, which also has to agree about the archive
+        kind and the member list; both read the file through
+        :meth:`_read_stamp`, so neither can be broken by a stamp the other
+        would have refused.
         """
-        try:
-            existing = json.loads(stamp.read_text())
-        except (OSError, ValueError):
+        existing = self._read_stamp(directory)
+        if existing is None:
             return False
         return existing.get('record_id') == self.record_id and existing.get('zenodo') == self.zenodo
 
@@ -706,7 +723,7 @@ class Fetcher:
         if self.version_dir is None:
             return
         stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp):
+        if self._stamp_is_current(self.target_dir):
             return
         record = {
             'schema': _STAMP_SCHEMA,

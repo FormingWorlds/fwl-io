@@ -270,8 +270,26 @@ def test_a_presence_only_report_does_not_claim_verification(tmp_path):
 
 @pytest.mark.parametrize(
     'stamp_body',
-    ['', 'not json at all', json.dumps({'schema': 1}), json.dumps({'extract': 'zip'})],
-    ids=['empty', 'unparseable', 'no-members', 'wrong-kind'],
+    [
+        '',
+        'not json at all',
+        json.dumps({'schema': 1}),
+        json.dumps({'extract': 'zip'}),
+        json.dumps([1, 2, 3]),
+        json.dumps(None),
+        json.dumps(42),
+        json.dumps('a string'),
+    ],
+    ids=[
+        'empty',
+        'unparseable',
+        'no-members',
+        'wrong-kind',
+        'a-json-list',
+        'json-null',
+        'a-json-number',
+        'a-json-string',
+    ],
 )
 def test_an_archive_without_a_usable_stamp_is_not_complete(tmp_path, stamp_body):
     """No usable stamp means no tree, reported as one missing item.
@@ -279,6 +297,11 @@ def test_an_archive_without_a_usable_stamp_is_not_complete(tmp_path, stamp_body)
     The trap this guards is reporting zero files, which would make
     ``complete`` true and hand back a clean bill of health for a dataset that
     was never extracted.
+
+    The four JSON bodies that parse to something other than an object are the
+    ones a reader is most likely to trip over: a stamp truncated or replaced by
+    hand still parses, and asking a list for a key raises where the answer
+    should be that the stamp describes nothing.
     """
     fetcher = _archive_fetcher(tmp_path)
     fetcher.target_dir.mkdir(parents=True, exist_ok=True)
@@ -320,8 +343,10 @@ def test_an_unreadable_manifest_fails_the_report(tmp_path):
 
 def test_the_summary_names_the_worst_dataset_first(tmp_path):
     """Datasets with more faults are listed ahead of those with fewer."""
-    one_fault = DatasetCheck('one', SUBDIR, tmp_path, (_file('a', MISSING),))
-    two_faults = DatasetCheck('two', SUBDIR, tmp_path, (_file('a', MISSING), _file('b', MISMATCH)))
+    one_fault = DatasetCheck('one', SUBDIR, tmp_path, (_file('a', MISSING),), verifiable=True)
+    two_faults = DatasetCheck(
+        'two', SUBDIR, tmp_path, (_file('a', MISSING), _file('b', MISMATCH)), verifiable=True
+    )
     report = CheckReport(datasets={'one': one_fault, 'two': two_faults}, manifest_errors={})
 
     assert not report.ok
@@ -530,6 +555,44 @@ def test_a_stamp_member_escaping_the_dataset_is_refused(tmp_path, escaping):
     reported = {f.name for f in check_dataset(fetcher).files}
     assert reported == {'inner/one.dat'}
     assert outside.is_file(), 'the check reads only; it never touches what it refused'
+
+
+def test_a_member_that_is_not_a_name_is_dropped(tmp_path):
+    """A member entry of the wrong type is skipped, not joined onto the tree.
+
+    Alongside the escaping-name rule: the list in a stamp is as editable as the
+    names in it, and a number where a name belongs must not reach a path join.
+    """
+    fetcher = _archive_fetcher(tmp_path)
+    _write_stamp(fetcher, [123, None, {'not': 'a name'}, 'inner/one.dat'])
+    member = fetcher.target_dir / 'inner/one.dat'
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_bytes(b'x')
+
+    assert fetcher.recorded_members() == ['inner/one.dat']
+    result = check_dataset(fetcher)
+    assert result.complete, 'the one real member is present, so the tree is whole'
+    assert [f.name for f in result.files] == ['inner/one.dat']
+
+
+def test_a_faulty_but_hashed_tree_is_not_verified(tmp_path):
+    """Verification needs the tree to be sound as well as hashed.
+
+    A plain dataset carries digests for every file it declares, so nothing in
+    it is presence-only; a missing file still has to keep it from reading as
+    verified, or the stronger question would be weaker than ``ok`` for exactly
+    the trees that fail.
+    """
+    fetcher = _plain_fetcher(tmp_path)
+    _populate(fetcher, names=['alpha.dat'])
+    dataset = check_dataset(fetcher, key='demo')
+    report = CheckReport(datasets={'demo': dataset})
+
+    assert dataset.verifiable, 'a plain dataset carries digests, so it is checkable'
+    assert not report.ok
+    assert not report.verified, 'a tree with a missing file is not verified whatever it hashes'
+    assert report.presence_only == (), 'nothing here was checked by presence'
+    assert 'data check FAILED' in report.summary()
 
 
 def test_a_stamp_naming_only_escaping_members_describes_no_tree(tmp_path):

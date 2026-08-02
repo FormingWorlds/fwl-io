@@ -72,14 +72,16 @@ class DatasetCheck:
     each file it declares. It is false for an archive dataset, whose members
     are recorded by name only, and it is a property of the dataset rather than
     of what happens to be on disk, so an archive dataset with no members left
-    cannot read as verifiable.
+    cannot read as verifiable. It has no default: the wrong value is the one
+    that lets a presence-only dataset read as verified, so every caller states
+    it rather than inheriting it.
     """
 
     key: str
     subdir: str
     directory: Path
     files: tuple[FileCheck, ...]
-    verifiable: bool = True
+    verifiable: bool
 
     def _in_state(self, state: str) -> tuple[FileCheck, ...]:
         return tuple(f for f in self.files if f.state == state)
@@ -174,7 +176,13 @@ class CheckReport:
 
     @property
     def faults(self) -> tuple[DatasetCheck, ...]:
-        """Datasets with something wrong, the worst affected named first."""
+        """Datasets with something wrong, the worst affected named first.
+
+        Datasets only. A report failed by an unreadable manifest or a dataset
+        that could not be resolved has nothing to put here, so this being
+        empty is not the same as nothing being wrong; ``ok`` is the question
+        that covers every reason.
+        """
         broken = [d for d in self.datasets.values() if not d.complete]
         return tuple(sorted(broken, key=lambda d: (-len(d.faults), d.key)))
 
@@ -272,7 +280,7 @@ def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
         FileCheck(name, fetcher.target_dir / name, _file_state(fetcher, name))
         for name in sorted(fetcher.registry)
     ]
-    return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, tuple(checks))
+    return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, tuple(checks), verifiable=True)
 
 
 def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:

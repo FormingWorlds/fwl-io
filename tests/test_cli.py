@@ -148,3 +148,62 @@ def test_check_reports_missing_data_and_exits_nonzero(tmp_path, capsys, monkeypa
     # Resolving a path creates the data root, as it does for every entry point.
     # What a check must not do is populate it: no dataset directory, no file.
     assert list(data_root.iterdir()) == [], 'a check must not create the tree it inspects'
+
+
+@pytest.mark.unit
+def test_check_exits_zero_and_says_which_verdict_it_reached(tmp_path, capsys, monkeypatch):
+    """A sound tree exits 0, and the wording separates hashed from presence-only.
+
+    Both trees here are sound, so the exit code cannot tell them apart, which is
+    the intended contract: presence is all an archive dataset makes checkable and
+    it is not a fault. What must differ is the claim. Without the second half a
+    change tying the exit code to verification instead of soundness would go
+    unnoticed, and every archive dataset would start failing.
+    """
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        '[g.plain]\nzenodo = "10.5281/zenodo.1234567"\nrequired_by = ["demo"]\n\n'
+        '[g.arc]\nzenodo = "10.5281/zenodo.7654321"\nrequired_by = ["demo"]\n'
+        'extract = "tar"\n'
+    )
+    body = b'contents\n'
+    digest = hashlib.sha256(body).hexdigest()
+    (tmp_path / 'g.plain.registry.txt').write_text(f'alpha.dat sha256:{digest}\n')
+    (tmp_path / 'g.arc.registry.txt').write_text('bundle.tar sha256:' + 'a' * 64 + '\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    data_root = tmp_path / 'data'
+    plain_dir = data_root / 'g' / 'plain' / 'r1234567'
+    plain_dir.mkdir(parents=True)
+    (plain_dir / 'alpha.dat').write_bytes(body)
+    arc_dir = data_root / 'g' / 'arc' / 'r7654321'
+    arc_dir.mkdir(parents=True)
+    (arc_dir / 'inner.dat').write_bytes(b'x')
+    (arc_dir / '.fwl-io.json').write_text(
+        json.dumps(
+            {
+                'extract': 'tar',
+                'record_id': '7654321',
+                'zenodo': '10.5281/zenodo.7654321',
+                'members': ['inner.dat'],
+            }
+        )
+    )
+
+    code = main(['check', 'demo', '--data-root', str(data_root)])
+    out = capsys.readouterr().out
+
+    assert code == 0, 'a sound tree exits 0 even where only presence was checkable'
+    assert 'FAILED' not in out
+    assert 'g.plain: ok' in out and 'g.arc: ok' in out
+    assert 'presence only' in out, 'the archive dataset has to say what it could not check'
+    assert 'all data present, 1 dataset(s) by presence only' in out
+    assert 'and verified' not in out, 'one presence-only dataset forfeits the stronger claim'

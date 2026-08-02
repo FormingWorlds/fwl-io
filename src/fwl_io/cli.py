@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_check = sub.add_parser(
         'check',
-        help='report whether a model has its data, without downloading (hashes every file)',
+        help='report whether a model has its data, without downloading (hashes what it can)',
     )
     p_check.add_argument('model', help='model name matched against required_by')
     p_check.add_argument('--data-root', default=None, help='override the FWL_DATA root')

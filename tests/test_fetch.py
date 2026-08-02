@@ -697,6 +697,41 @@ def test_shared_cache_serves_an_archive_dataset_offline(http_server, tmp_path, m
         _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
 
 
+@pytest.mark.parametrize(
+    'stamp_body',
+    ['[1, 2, 3]', 'null', '42', '"a string"'],
+    ids=['a-json-list', 'json-null', 'a-json-number', 'a-json-string'],
+)
+def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
+    http_server, tmp_path, stamp_body, monkeypatch
+):
+    """A stamp holding valid JSON that is not an object is rewritten, not fatal.
+
+    Truncating or hand-editing the file is how it happens, and the result still
+    parses. Every reader has to treat it as a stamp that says nothing: the fetch
+    re-downloads and writes a good one, rather than failing the dataset with an
+    error about the shape of a provenance file.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    version_dir = tmp_path / VERSIONED
+    version_dir.mkdir(parents=True)
+    (version_dir / '.fwl-io.json').write_text(stamp_body)
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    healed = json.loads((version_dir / '.fwl-io.json').read_text())
+    assert healed['record_id'] == RECID, 'the unusable stamp is replaced by a real one'
+    assert healed['members'] == ['m0p1.txt', 'nested/m1p0.txt']
+
+    # Discrimination: offline, the same unusable stamp yields the honest
+    # "nothing here to serve" error rather than one about the stamp itself.
+    (version_dir / '.fwl-io.json').write_text(stamp_body)
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
+
+
 def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(
     http_server, tmp_path, monkeypatch
 ):
