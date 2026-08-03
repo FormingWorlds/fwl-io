@@ -256,7 +256,8 @@ def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
         # intact tree incomplete, and moving on that basis would be worse.
         return (
             f'{ds.extract} archive dataset: its registry pins the archive rather '
-            'than the extracted files, so a legacy tree cannot be verified against it'
+            'than the extracted files, so this tree cannot be verified against it; '
+            'move it by hand, or delete it and let the fetcher rebuild it'
         )
     return None
 

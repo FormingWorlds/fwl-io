@@ -52,9 +52,11 @@ Moves data left by the previous layout into the place it belongs now, for a tree
 
 A dataset moves only when every file its registry declares is present in the old location and matches its recorded digest. Anything else is reported and left exactly where it is: an incomplete tree, a file whose contents differ, or a dataset whose registry has not been generated. Verifying first is the point, since moving a stale copy would put it where the fetcher then trusts it. Once a dataset's files have moved, the emptied directories are removed, and the walk upward stops at the data root.
 
+Two kinds of dataset cannot be verified at all and are refused rather than moved, each named with its reason. An archive dataset's registry pins the packed archive, while an old tree holds the files extracted from it, so there is nothing to hash the tree against; move such a tree by hand, or delete it and let the fetcher rebuild it at the current location. A dataset whose registry is empty offers no files to compare, so every check over it would pass for want of anything to fail; run `fwl-io sync` for it. Both are reported only when an old directory is actually there, so a machine that never had the previous layout is unaffected.
+
 A dataset already at its current location is not a fault, and a copy still sitting at the old location beside it is named rather than deleted. Nothing here removes data: the only directories it removes are ones it has just emptied itself.
 
-Exit is 1 when a legacy tree was found and could not be moved, or when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
+Exit is 1 when a legacy tree was found and could not be moved, when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds, or when the shipped table of old locations could not be read, since without it no dataset has an old location to look at and a run that reported nothing would read like a tidy tree. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
 
 ## fwl-io mirror
 
