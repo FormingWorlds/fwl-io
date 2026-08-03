@@ -16,6 +16,10 @@ copy into a stale copy in the place the fetcher will now believe.
 Nothing is downloaded either. A dataset whose legacy tree is incomplete stays
 incomplete here; the fetcher is what fills it, and it will do so at the
 current location once the move has happened.
+
+A dataset packaged as an archive is reported rather than moved. Its registry
+pins the packed archive, and a legacy tree holds the extracted members, so
+there is nothing to hash the tree against.
 """
 
 from __future__ import annotations
@@ -163,8 +167,16 @@ def _legacy_locations() -> dict[str, str]:
     turned into a path that files get moved out of, so it earns the same
     suspicion as a name inside a provenance stamp.
     """
-    text = files('fwl_io.data').joinpath(_LAYOUT_RESOURCE).read_text()
-    table = dict(tomllib.loads(text).get('legacy', {}))
+    try:
+        text = files('fwl_io.data').joinpath(_LAYOUT_RESOURCE).read_text()
+        table = tomllib.loads(text).get('legacy', {})
+        if not isinstance(table, dict):
+            raise TypeError(f'[legacy] is {type(table).__name__}, not a table')
+    except (OSError, ValueError, TypeError) as exc:
+        # A relocation nobody can plan is still a report, not a traceback, the
+        # same as a manifest that will not load.
+        log.error('cannot read %s, so no legacy location is known: %s', _LAYOUT_RESOURCE, exc)
+        return {}
     safe = {}
     for key, location in table.items():
         if not isinstance(location, str):
@@ -201,6 +213,40 @@ def _escaping(
         for path in (legacy_dir / name, target_dir / name):
             if not _inside(path, root):
                 return path
+    return None
+
+
+def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
+    """Why this dataset cannot be relocated at all, or ``None`` if it can.
+
+    Both cases would otherwise reach :func:`_classify` and be answered from a
+    comparison that cannot mean what it says.
+
+    Parameters
+    ----------
+    ds : Dataset
+        The dataset as its manifest declares it.
+    registry : dict[str, str]
+        Registry filenames mapped to their expected digests.
+
+    Returns
+    -------
+    str | None
+        A sentence naming the obstacle, or ``None`` when there is none.
+    """
+    if not registry:
+        # Every check here is "does the tree hold what the registry lists", and
+        # over an empty registry that is vacuously true: an untouched legacy
+        # directory would be reported as already moved.
+        return 'empty registry: run "fwl-io sync" for this dataset first'
+    if ds.extract is not None:
+        # The registry pins the packed archive, which a legacy tree never held:
+        # it holds the extracted members. Comparing against it would call an
+        # intact tree incomplete, and moving on that basis would be worse.
+        return (
+            f'{ds.extract} archive dataset: its registry pins the archive rather '
+            'than the extracted files, so a legacy tree cannot be verified against it'
+        )
     return None
 
 
@@ -279,6 +325,18 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
             except Exception as exc:  # noqa: BLE001 -- reported, never raised
                 entries.append(
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
+                )
+                continue
+            unmovable = _unmovable(ds, registry)
+            if unmovable is not None:
+                entries.append(
+                    Relocation(
+                        ds.key,
+                        UNRESOLVABLE,
+                        legacy_dir=legacy_dir,
+                        target_dir=target_dir,
+                        detail=unmovable,
+                    )
                 )
                 continue
             outside = _escaping(legacy_dir, target_dir, tuple(registry), root)

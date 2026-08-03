@@ -609,3 +609,106 @@ def test_a_table_value_that_is_not_a_path_is_dropped_not_raised(monkeypatch):
     monkeypatch.setattr(module, 'files', lambda package: _Package())
 
     assert module._legacy_locations() == {'e.f': 'good/place'}
+
+
+def test_an_empty_registry_does_not_report_an_untouched_tree_as_moved(tmp_path, monkeypatch):
+    """A dataset whose registry lists nothing is refused, not declared complete.
+
+    Every comparison this module makes asks whether the tree holds what the
+    registry lists, and over an empty registry each one is vacuously true. The
+    legacy tree must survive the run for the report to have meant anything.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\n')
+    (tmp_path / f'{KEY}.registry.txt').write_text('# no files\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+
+    legacy_dir = tmp_path / LEGACY
+    _populate(legacy_dir)
+    # The precondition the assertions below rest on: real files are present, so
+    # a pass cannot come from an empty tree.
+    assert (legacy_dir / 'BHAC15_tracks.dat').is_file()
+
+    report = relocate_all(data_root=tmp_path)
+
+    (entry,) = [e for e in report.entries if e.key == KEY]
+    assert entry.state == UNRESOLVABLE, f'empty registry reported as {entry.state}'
+    assert entry.state not in (MOVED, ALREADY_CURRENT, READY)
+    assert 'empty registry' in entry.detail
+    assert not report.ok
+    for name, body in CONTENTS.items():
+        assert (legacy_dir / name).read_bytes() == body
+    assert not (tmp_path / TARGET).exists()
+
+
+def test_an_archive_dataset_is_refused_rather_than_called_incomplete(tmp_path, monkeypatch):
+    """An archive dataset's registry pins the archive, which a legacy tree never held.
+
+    Hashing the tree against it would report an intact tree as incomplete, so
+    the dataset is refused by name instead, and nothing is moved either way.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n')
+    archive_digest = f'sha256:{hashlib.sha256(b"packed").hexdigest()}'
+    (tmp_path / f'{KEY}.registry.txt').write_text(f'bundle.tar.gz {archive_digest}\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+
+    legacy_dir = tmp_path / LEGACY
+    _populate(legacy_dir)
+    # The tree holds the extracted members, exactly as a real legacy tree does,
+    # and never the archive the registry names.
+    assert (legacy_dir / 'BHAC15_tracks.dat').is_file()
+    assert not (legacy_dir / 'bundle.tar.gz').exists()
+
+    report = relocate_all(data_root=tmp_path)
+
+    (entry,) = [e for e in report.entries if e.key == KEY]
+    assert entry.state == UNRESOLVABLE, f'archive dataset reported as {entry.state}'
+    assert entry.state != INCOMPLETE
+    assert 'archive' in entry.detail
+    for name, body in CONTENTS.items():
+        assert (legacy_dir / name).read_bytes() == body
+    assert not (tmp_path / TARGET).exists()
+
+
+@pytest.mark.parametrize(
+    ('table', 'why'),
+    [
+        ('[legacy]\n"a.b" = \n', 'unparseable TOML'),
+        ('legacy = "not-a-table"\n', 'legacy is a string'),
+        ('legacy = [1, 2]\n', 'legacy is an array'),
+    ],
+)
+def test_an_unreadable_layout_table_reports_nothing_rather_than_raising(monkeypatch, table, why):
+    """A table that will not load leaves no legacy locations, and no traceback.
+
+    Every other unreadable input this command meets is carried in the report,
+    so this one does not get to be the exception that aborts the run.
+    """
+    import fwl_io.relocate as module
+
+    class _Resource:
+        def read_text(self):
+            return table
+
+    class _Package:
+        def joinpath(self, name):
+            return _Resource()
+
+    monkeypatch.setattr(module, 'files', lambda package: _Package())
+
+    assert module._legacy_locations() == {}, why
