@@ -99,6 +99,7 @@ class RelocationReport:
 
     entries: tuple[Relocation, ...] = ()
     manifest_errors: dict[str, str] = field(default_factory=dict)
+    layout_error: str | None = None
 
     def _in_state(self, *states: str) -> tuple[Relocation, ...]:
         return tuple(e for e in self.entries if e.state in states)
@@ -106,7 +107,7 @@ class RelocationReport:
     @property
     def ok(self) -> bool:
         """True when every legacy tree found was dealt with and none was skipped."""
-        return not self.faults and not self.manifest_errors
+        return not self.faults and not self.manifest_errors and self.layout_error is None
 
     @property
     def ready(self) -> tuple[Relocation, ...]:
@@ -138,6 +139,10 @@ class RelocationReport:
         lines = [e.summary() for e in sorted(self.entries, key=lambda e: e.key)]
         for provider, error in sorted(self.manifest_errors.items()):
             lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+        if self.layout_error is not None:
+            # Without this the run reports nothing to do, which is what a tidy
+            # tree also reports, and the two are not the same answer.
+            lines.append(f'LEGACY LAYOUT UNREADABLE, {self.layout_error}')
         if not lines:
             return 'no dataset declares a legacy location'
         done, waiting, bad = len(self.moved), len(self.ready), len(self.faults)
@@ -159,24 +164,30 @@ class RelocationReport:
         return '\n'.join(lines)
 
 
-def _legacy_locations() -> dict[str, str]:
+def _legacy_locations() -> tuple[dict[str, str], str | None]:
     """Read the shipped table of where each dataset used to live.
 
     An entry naming an absolute path or climbing out of the data root is
     dropped. The table ships with the package, but it is still a file being
     turned into a path that files get moved out of, so it earns the same
     suspicion as a name inside a provenance stamp.
+
+    Returns
+    -------
+    tuple[dict[str, str], str | None]
+        Dataset keys mapped to their legacy directory, and why the table could
+        not be read, which is ``None`` when it was read.
     """
     try:
         text = files('fwl_io.data').joinpath(_LAYOUT_RESOURCE).read_text()
         table = tomllib.loads(text).get('legacy', {})
         if not isinstance(table, dict):
             raise TypeError(f'[legacy] is {type(table).__name__}, not a table')
-    except (OSError, ValueError, TypeError) as exc:
-        # A relocation nobody can plan is still a report, not a traceback, the
-        # same as a manifest that will not load.
+    except (OSError, ValueError, TypeError, ImportError) as exc:
+        # Reported rather than raised, like a manifest that will not load, and
+        # carried back so the run cannot read as a tree with nothing to do.
         log.error('cannot read %s, so no legacy location is known: %s', _LAYOUT_RESOURCE, exc)
-        return {}
+        return {}, f'{_LAYOUT_RESOURCE}: {exc}'
     safe = {}
     for key, location in table.items():
         if not isinstance(location, str):
@@ -186,7 +197,7 @@ def _legacy_locations() -> dict[str, str]:
             log.warning('legacy location for %s is not inside the data root: %r', key, location)
             continue
         safe[key] = location
-    return safe
+    return safe, None
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -308,7 +319,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
     from fwl_io.manifest import _discover
 
     root = resolve_data_root(data_root)
-    locations = _legacy_locations()
+    locations, layout_error = _legacy_locations()
     entries: list[Relocation] = []
     seen: set[str] = set()
     providers, manifest_errors = _discover()
@@ -327,7 +338,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
                 )
                 continue
-            unmovable = _unmovable(ds, registry)
+            unmovable = _unmovable(ds, registry) if legacy_dir.is_dir() else None
             if unmovable is not None:
                 entries.append(
                     Relocation(
@@ -365,7 +376,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     legacy_present=legacy_dir.is_dir(),
                 )
             )
-    return RelocationReport(tuple(entries), dict(manifest_errors))
+    return RelocationReport(tuple(entries), dict(manifest_errors), layout_error)
 
 
 def _version_dir(ds: Dataset) -> str:
@@ -514,4 +525,4 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
             # state somebody has to look at.
             log.error('stopping after %s could not be relocated', moved.key)
             halted = True
-    return RelocationReport(tuple(done), dict(plan.manifest_errors))
+    return RelocationReport(tuple(done), dict(plan.manifest_errors), plan.layout_error)

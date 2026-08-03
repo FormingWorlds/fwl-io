@@ -16,6 +16,7 @@ import hashlib
 import pytest
 
 from fwl_io.relocate import (
+    _LAYOUT_RESOURCE,
     ABSENT,
     ALREADY_CURRENT,
     INCOMPLETE,
@@ -330,8 +331,9 @@ def test_the_shipped_table_is_filtered_at_the_point_it_is_read(monkeypatch):
 
     monkeypatch.setattr(module, 'files', lambda package: _Package())
 
-    kept = module._legacy_locations()
+    kept, error = module._legacy_locations()
 
+    assert error is None, 'a readable table reports no error'
     assert kept == {'e.f': 'good/place'}, 'only the contained entry survives'
 
 
@@ -369,7 +371,9 @@ def test_the_shipped_table_names_only_datasets_and_relative_locations():
 
     from fwl_io.relocate import _legacy_locations
 
-    table = _legacy_locations()
+    table, error = _legacy_locations()
+
+    assert error is None, 'the shipped table has to be readable'
 
     assert table, 'the table has to declare the datasets that have already moved'
     for key, location in table.items():
@@ -497,7 +501,9 @@ def test_two_datasets_sharing_one_legacy_directory_come_apart(tmp_path, monkeypa
 
     shared = 'stellar_evolution_tracks'
     first, second = 'star.tracks.baraffe_2015', 'star.tracks.spada_2013'
-    monkeypatch.setattr(module, '_legacy_locations', lambda: {first: shared, second: shared})
+    monkeypatch.setattr(
+        module, '_legacy_locations', lambda: ({first: shared, second: shared}, None)
+    )
 
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(
@@ -608,7 +614,7 @@ def test_a_table_value_that_is_not_a_path_is_dropped_not_raised(monkeypatch):
 
     monkeypatch.setattr(module, 'files', lambda package: _Package())
 
-    assert module._legacy_locations() == {'e.f': 'good/place'}
+    assert module._legacy_locations() == ({'e.f': 'good/place'}, None)
 
 
 def test_an_empty_registry_does_not_report_an_untouched_tree_as_moved(tmp_path, monkeypatch):
@@ -711,4 +717,71 @@ def test_an_unreadable_layout_table_reports_nothing_rather_than_raising(monkeypa
 
     monkeypatch.setattr(module, 'files', lambda package: _Package())
 
-    assert module._legacy_locations() == {}, why
+    locations, error = module._legacy_locations()
+
+    assert locations == {}, why
+    assert error is not None, f'{why} was swallowed instead of being carried back'
+    assert _LAYOUT_RESOURCE in error
+
+
+def test_a_layout_table_that_did_not_load_is_not_reported_as_nothing_to_do(tmp_path, monkeypatch):
+    """An unreadable table is carried into the report, not just logged.
+
+    Returning no locations makes the run indistinguishable from a tidy tree
+    with nothing left to move, which is the overstatement every other unreadable
+    input here is refused for.
+    """
+    import fwl_io.relocate as module
+
+    class _Resource:
+        def read_text(self):
+            return 'legacy = "not-a-table"\n'
+
+    class _Package:
+        def joinpath(self, name):
+            return _Resource()
+
+    monkeypatch.setattr(module, 'files', lambda package: _Package())
+
+    report = module.plan_relocations(data_root=tmp_path)
+
+    assert report.entries == (), 'nothing could be planned without the table'
+    assert not report.ok, 'a run that read no table cannot report success'
+    assert report.layout_error is not None
+    summary = report.summary()
+    assert 'LEGACY LAYOUT UNREADABLE' in summary
+    assert summary != 'no dataset declares a legacy location', (
+        'the failure reads exactly like a tree with nothing to do'
+    )
+
+
+def test_an_archive_dataset_with_no_legacy_tree_is_absent_not_a_fault(tmp_path, monkeypatch):
+    """A refusal describes a tree that is there, never one that never existed.
+
+    The archive and empty-registry refusals answer "this tree cannot be
+    verified". With no legacy directory at all there is no tree to refuse, and
+    a machine that never had the old layout must not fail the command forever.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n')
+    archive_digest = f'sha256:{hashlib.sha256(b"packed").hexdigest()}'
+    (tmp_path / f'{KEY}.registry.txt').write_text(f'bundle.tar.gz {archive_digest}\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+
+    # The precondition: no legacy tree anywhere, which is every machine that
+    # installed after the layout changed.
+    assert not (tmp_path / LEGACY).exists()
+
+    report = relocate_all(data_root=tmp_path)
+
+    (entry,) = [e for e in report.entries if e.key == KEY]
+    assert entry.state == ABSENT, f'no legacy tree reported as {entry.state}'
+    assert entry.state != UNRESOLVABLE
+    assert report.ok, 'a machine that never had the old layout must not fail'
