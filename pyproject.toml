@@ -44,6 +44,7 @@ Issues = "https://github.com/FormingWorlds/fwl-io/issues"
 develop = [
     "pytest>=8.0",
     "pytest-cov",
+    "pytest-timeout",
     "ruff",
 ]
 docs = [
