@@ -9,6 +9,7 @@ directory tree with hash verification and atomic writes.
 
 from importlib.metadata import PackageNotFoundError, version
 
+from fwl_io.check import CheckReport, DatasetCheck, FileCheck, check_dataset, check_for
 from fwl_io.fetch import DownloadError, Fetcher, OfflineDataError, create_fetcher
 from fwl_io.manifest import (
     Dataset,
@@ -18,6 +19,7 @@ from fwl_io.manifest import (
     load_manifest,
 )
 from fwl_io.paths import MissingDataRootError, resolve_cache_root, resolve_data_root
+from fwl_io.relocate import Relocation, RelocationReport, plan_relocations, relocate_all
 
 try:
     __version__ = version('fwl-io')
@@ -25,17 +27,26 @@ except PackageNotFoundError:  # editable checkout without installed metadata
     __version__ = '0.0.0'
 
 __all__ = [
+    'CheckReport',
     'Dataset',
+    'DatasetCheck',
     'DownloadError',
+    'FileCheck',
     'Fetcher',
     'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
+    'Relocation',
+    'RelocationReport',
     '__version__',
+    'check_dataset',
+    'check_for',
     'create_fetcher',
     'discover_manifests',
     'fetch_for',
     'load_manifest',
+    'plan_relocations',
+    'relocate_all',
     'resolve_cache_root',
     'resolve_data_root',
 ]

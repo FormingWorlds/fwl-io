@@ -99,3 +99,171 @@ def test_fetch_missing_registry_is_aggregated_error(tmp_path, capsys, monkeypatc
     err = capsys.readouterr().err
     assert code == 1
     assert 'g.demo' in err and 'Traceback' not in err
+
+
+@pytest.mark.unit
+def test_check_unknown_module_exits_nonzero(capsys, monkeypatch):
+    """Asking about a model no manifest declares is an error, not a clean tree."""
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
+    code = main(['check', 'nomodule'])
+    assert code == 1
+    err = capsys.readouterr()
+    assert 'no datasets' in err.err
+    assert 'all data present' not in err.out, 'nothing was checked, so nothing may be declared ok'
+
+
+@pytest.mark.unit
+def test_check_reports_missing_data_and_exits_nonzero(tmp_path, capsys, monkeypatch):
+    """Absent data exits 1 and names the dataset, without downloading it."""
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    # The dataset location comes from the table key, so this one lands under
+    # "g/demo"; a manifest does not name its own subdirectory.
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1234567"\nrequired_by = ["demo"]\n')
+    registry = tmp_path / 'g.demo.registry.txt'
+    digest = hashlib.sha256(b'contents\n').hexdigest()
+    registry.write_text(f'alpha.dat sha256:{digest}\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    data_root = tmp_path / 'data'
+    code = main(['check', 'demo', '--data-root', str(data_root)])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert 'FAILED' in out
+    assert 'g.demo' in out
+    # The dataset has to be reported as data that is absent, not as a manifest
+    # this could not read. Both exit 1 and both name the dataset, so without
+    # this the test would pass just as well against a misplaced registry file
+    # and would be proving nothing about the check itself.
+    assert '1 missing' in out
+    assert 'MANIFEST UNREADABLE' not in out
+    # Resolving a path creates the data root, as it does for every entry point.
+    # What a check must not do is populate it: no dataset directory, no file.
+    assert list(data_root.iterdir()) == [], 'a check must not create the tree it inspects'
+
+
+@pytest.mark.unit
+def test_check_exits_zero_and_says_which_verdict_it_reached(tmp_path, capsys, monkeypatch):
+    """A sound tree exits 0, and the wording separates hashed from presence-only.
+
+    Both trees here are sound, so the exit code cannot tell them apart, which is
+    the intended contract: presence is all an archive dataset makes checkable and
+    it is not a fault. What must differ is the claim. Without the second half a
+    change tying the exit code to verification instead of soundness would go
+    unnoticed, and every archive dataset would start failing.
+    """
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        '[g.plain]\nzenodo = "10.5281/zenodo.1234567"\nrequired_by = ["demo"]\n\n'
+        '[g.arc]\nzenodo = "10.5281/zenodo.7654321"\nrequired_by = ["demo"]\n'
+        'extract = "tar"\n'
+    )
+    body = b'contents\n'
+    digest = hashlib.sha256(body).hexdigest()
+    (tmp_path / 'g.plain.registry.txt').write_text(f'alpha.dat sha256:{digest}\n')
+    (tmp_path / 'g.arc.registry.txt').write_text('bundle.tar sha256:' + 'a' * 64 + '\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    data_root = tmp_path / 'data'
+    plain_dir = data_root / 'g' / 'plain' / 'r1234567'
+    plain_dir.mkdir(parents=True)
+    (plain_dir / 'alpha.dat').write_bytes(body)
+    arc_dir = data_root / 'g' / 'arc' / 'r7654321'
+    arc_dir.mkdir(parents=True)
+    (arc_dir / 'inner.dat').write_bytes(b'x')
+    (arc_dir / '.fwl-io.json').write_text(
+        json.dumps(
+            {
+                'schema': 1,
+                'extract': 'tar',
+                'record_id': '7654321',
+                'zenodo': '10.5281/zenodo.7654321',
+                'members': ['inner.dat'],
+            }
+        )
+    )
+
+    code = main(['check', 'demo', '--data-root', str(data_root)])
+    out = capsys.readouterr().out
+
+    assert code == 0, 'a sound tree exits 0 even where only presence was checkable'
+    assert 'FAILED' not in out
+    assert 'g.plain: ok' in out and 'g.arc: ok' in out
+    assert 'presence only' in out, 'the archive dataset has to say what it could not check'
+    assert 'all data present, 1 dataset(s) by presence only' in out
+    assert 'and verified' not in out, 'one presence-only dataset forfeits the stronger claim'
+
+
+@pytest.mark.unit
+def test_relocate_exits_nonzero_when_a_manifest_could_not_be_read(tmp_path, capsys, monkeypatch):
+    """A run that could not read a manifest is not a clean run.
+
+    Nothing moved and nothing was found, which on its own is what a finished
+    tree looks like. The manifest that failed may be the one declaring the
+    dataset whose old directory is still sitting there, so automation reading
+    only the exit code must not be told this pass was complete.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('this is not valid toml [[[\n')
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    data_root = tmp_path / 'data'
+
+    code = main(['relocate', '--data-root', str(data_root)])
+    out = capsys.readouterr().out
+
+    assert code == 1, 'an unread manifest cannot exit as success'
+    assert 'MANIFEST UNREADABLE' in out
+    assert 'may be partial' in out
+
+
+@pytest.mark.unit
+def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, monkeypatch):
+    """A machine that never had the old layout is a success, not a fault.
+
+    The discriminating half of the case above: both runs move nothing and
+    report no faults, so only the manifest error separates them, and the exit
+    code has to follow that rather than the move count.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('[star.tracks.baraffe_2015]\nzenodo = "10.5281/zenodo.15729114"\n')
+    (tmp_path / 'star.tracks.baraffe_2015.registry.txt').write_text(
+        'a.dat sha256:' + 'a' * 64 + '\n'
+    )
+
+    class _EP:
+        name = 'demoprovider'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+
+    code = main(['relocate', '--data-root', str(tmp_path / 'data')])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert 'MANIFEST UNREADABLE' not in out
+    assert 'absent' in out

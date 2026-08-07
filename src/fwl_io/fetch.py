@@ -493,7 +493,119 @@ class Fetcher:
             target_dir.unlink()
         os.replace(src_dir, target_dir)
 
-    def _archive_tree_intact(self, stamp: Path) -> bool:
+    def file_matches(self, fname: str) -> bool:
+        """True when the local file for ``fname`` matches its registry digest.
+
+        Reads the file; it does not fetch, and it does not check that the file
+        exists first, so a caller wanting to tell an absent file from a corrupt
+        one tests for presence itself. An unreadable file raises ``OSError``
+        rather than reporting a mismatch, since a permission problem on the
+        tree is a different fault from wrong contents.
+
+        Raises
+        ------
+        KeyError
+            ``fname`` is not declared in this dataset's registry, so there is
+            no digest to compare it against.
+        OSError
+            The file could not be read, whether because it is absent or
+            because the tree denies access to it.
+        """
+        if fname not in self.registry:
+            raise KeyError(f'{fname!r} is not in the registry for {self.subdir!r}')
+        return _hash_matches(self.target_dir / fname, self.registry[fname])
+
+    def recorded_members(self) -> list[str] | None:
+        """Return the extracted members this dataset's stamp records.
+
+        ``None`` when there is no stamp describing this dataset's tree, which
+        says the tree is not there to be examined rather than that it is empty.
+        Callers must keep those apart: an empty list would read as a complete
+        tree of no files.
+
+        A stamp qualifies only when it describes this deposit and this archive
+        kind. One left by a different fetch of the same subdirectory, a plain
+        fetch or another version, does not describe this tree.
+
+        Members that would resolve outside the dataset directory are dropped.
+        A stamp is a file on disk like any other and can be edited or replaced,
+        so a name in it is treated with the same suspicion as a name inside an
+        archive rather than joined onto the tree unchecked.
+        """
+        return self._stamp_members(self.target_dir)
+
+    @staticmethod
+    def _read_stamp(directory: Path) -> dict | None:
+        """The stamp record in ``directory``, or ``None`` if there is no usable one.
+
+        Every reader of a stamp goes through here, so none of them has to
+        rediscover that the file may be absent, unreadable, not JSON, JSON that
+        is not an object, or an object written to a schema this version does
+        not know. The third is the one worth naming: a stamp is an ordinary
+        file that can be edited or truncated, and a reader that parsed ``[]``
+        and then asked it for a key would raise where it should have decided
+        the stamp says nothing.
+
+        The schema is what makes the rest of that safe over time. A stamp
+        written by a future version can be well-formed JSON in a shape whose
+        fields no longer mean what they did, and the fields this version reads
+        would then be trusted while meaning something else; an unrecognised
+        schema is treated as no stamp, so the tree is refetched and restamped
+        rather than misread.
+        """
+        try:
+            record = json.loads((directory / _STAMP_FILENAME).read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get('schema') != _STAMP_SCHEMA:
+            # Worth saying out loud, because the cost is visible and the cause
+            # is not: the dataset is refetched in full, and it will be again on
+            # every run that shares this tree with the version that wrote the
+            # stamp. Someone watching a cluster job redownload the same data
+            # nightly needs the reason named.
+            log.warning(
+                'stamp in %s is schema %r, not %r, so it cannot be read and the '
+                'dataset will be fetched again',
+                directory,
+                record.get('schema'),
+                _STAMP_SCHEMA,
+            )
+            return None
+        return record
+
+    def _stamp_members(self, directory: Path) -> list[str] | None:
+        """Members recorded by the stamp in ``directory``, or ``None``.
+
+        The single reader for both the dataset's own tree and a copy of it in
+        the shared cache. They are held to one standard on purpose: a cache
+        stamp is no more trustworthy than a local one, and two readers with
+        their own qualifying rules drift apart.
+        """
+        record = self._read_stamp(directory)
+        if record is None:
+            return None
+        if record.get('extract') != self.extract:
+            return None
+        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
+            return None
+        members = record.get('members')
+        if not isinstance(members, list) or not members:
+            return None
+        root = directory.resolve()
+        safe = []
+        for member in members:
+            if not isinstance(member, str):
+                continue
+            resolved = (directory / member).resolve()
+            if resolved == root or not resolved.is_relative_to(root):
+                log.warning('stamp for %s names a member outside it: %r', self.subdir, member)
+                continue
+            safe.append(member)
+        return safe or None
+
+    def _archive_tree_intact(self) -> bool:
         """True when every member the stamp recorded is still present on disk.
 
         This detects a member deleted after extraction, so the tree is
@@ -501,18 +613,8 @@ class Fetcher:
         the archive-only checksum policy records member names, not per-file
         digests, so a truncated member is not detected here.
         """
-        try:
-            record = json.loads(stamp.read_text())
-        except (OSError, ValueError):
-            return False
-        if record.get('extract') != self.extract:
-            # The stamp describes a different fetch of this deposit, a plain
-            # one or a different archive kind, so its tree is not this dataset.
-            return False
-        members = record.get('members')
-        if not isinstance(members, list) or not members:
-            # An absent or empty member list describes no tree at all, and must
-            # never read as a complete one.
+        members = self.recorded_members()
+        if members is None:
             return False
         return all((self.target_dir / m).is_file() for m in members)
 
@@ -525,10 +627,27 @@ class Fetcher:
         the per-file path it does not re-hash contents (the archive-only
         checksum policy records member names, not per-file digests). Extraction
         is staged and the tree is moved into place atomically.
+
+        Serialised per dataset like the per-file path, and for a sharper
+        reason: rebuilding replaces the whole version directory, so two
+        processes doing it at once would move a tree in from under each other
+        while a third reads it. Unrelated datasets still fetch in parallel.
         """
         archive_name, known_hash = next(iter(self.registry.items()))
-        stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp) and self._archive_tree_intact(stamp):
+        if self._stamp_is_current(self.target_dir) and self._archive_tree_intact():
+            self._sources.setdefault(archive_name, 'local')
+            return self._extracted_files()
+
+        with self._fetch_lock(archive_name, self.target_dir):
+            return self._rebuild_archive(archive_name, known_hash, offline)
+
+    def _rebuild_archive(
+        self, archive_name: str, known_hash: str, offline: bool | None
+    ) -> list[Path]:
+        """Populate the version directory, with the dataset's lock already held."""
+        # Re-check under the lock: another process may have finished the whole
+        # rebuild while this one waited for it.
+        if self._stamp_is_current(self.target_dir) and self._archive_tree_intact():
             self._sources.setdefault(archive_name, 'local')
             return self._extracted_files()
 
@@ -590,23 +709,14 @@ class Fetcher:
         archive, since the archive is dropped after extraction. The cached
         stamp has to describe this deposit and the same archive kind, and
         every member it names has to be present, which is the same standard
-        the local tree is held to.
+        the local tree is held to, read by the same method.
         """
         cache_root = resolve_cache_root()
         if cache_root is None:
             return False
         cached_dir = cache_root / self.rel_dir
-        cached_stamp = cached_dir / _STAMP_FILENAME
-        try:
-            record = json.loads(cached_stamp.read_text())
-        except (OSError, ValueError):
-            return False
-        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
-            return False
-        if record.get('extract') != self.extract:
-            return False
-        members = record.get('members')
-        if not isinstance(members, list) or not members:
+        members = self._stamp_members(cached_dir)
+        if members is None:
             return False
         if not all((cached_dir / m).is_file() for m in members):
             return False
@@ -622,15 +732,18 @@ class Fetcher:
         log.info('copied dataset from shared cache %s', cache_root)
         return True
 
-    def _stamp_is_current(self, stamp: Path) -> bool:
+    def _stamp_is_current(self, directory: Path) -> bool:
         """True when a valid stamp for this exact record id already exists.
 
-        A missing, unreadable, non-JSON, or mismatched stamp is not current,
-        so it is rewritten (healed) rather than trusted forever.
+        A missing, unreadable, malformed, or mismatched stamp is not current,
+        so it is rewritten (healed) rather than trusted forever. It asks less
+        than :meth:`_stamp_members`, which also has to agree about the archive
+        kind and the member list; both read the file through
+        :meth:`_read_stamp`, so neither can be broken by a stamp the other
+        would have refused.
         """
-        try:
-            existing = json.loads(stamp.read_text())
-        except (OSError, ValueError):
+        existing = self._read_stamp(directory)
+        if existing is None:
             return False
         return existing.get('record_id') == self.record_id and existing.get('zenodo') == self.zenodo
 
@@ -652,7 +765,7 @@ class Fetcher:
         if self.version_dir is None:
             return
         stamp = self.target_dir / _STAMP_FILENAME
-        if self._stamp_is_current(stamp):
+        if self._stamp_is_current(self.target_dir):
             return
         record = {
             'schema': _STAMP_SCHEMA,

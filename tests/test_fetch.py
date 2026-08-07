@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import socket
 import tarfile
 import zipfile
@@ -695,6 +696,210 @@ def test_shared_cache_serves_an_archive_dataset_offline(http_server, tmp_path, m
     monkeypatch.delenv('FWL_DATA_CACHE')
     with pytest.raises(OfflineDataError):
         _archive_fetcher(base_url, registry, tmp_path / 'other', 'tar').fetch_all(offline=True)
+
+
+@pytest.mark.parametrize(
+    'stamp_body',
+    ['[1, 2, 3]', 'null', '42', '"a string"'],
+    ids=['a-json-list', 'json-null', 'a-json-number', 'a-json-string'],
+)
+def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
+    http_server, tmp_path, stamp_body, monkeypatch
+):
+    """A stamp holding valid JSON that is not an object is rewritten, not fatal.
+
+    Truncating or hand-editing the file is how it happens, and the result still
+    parses. Every reader has to treat it as a stamp that says nothing: the fetch
+    re-downloads and writes a good one, rather than failing the dataset with an
+    error about the shape of a provenance file.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    version_dir = tmp_path / VERSIONED
+    version_dir.mkdir(parents=True)
+    (version_dir / '.fwl-io.json').write_text(stamp_body)
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    healed = json.loads((version_dir / '.fwl-io.json').read_text())
+    assert healed['record_id'] == RECID, 'the unusable stamp is replaced by a real one'
+    assert healed['members'] == ['m0p1.txt', 'nested/m1p0.txt']
+
+    # Discrimination: the members are all on disk now, so only the stamp can
+    # make the dataset unservable. Pointing this at an empty root instead would
+    # raise the same error whatever the stamp reader did.
+    (version_dir / '.fwl-io.json').write_text(stamp_body)
+    assert (version_dir / 'm0p1.txt').is_file(), 'the tree must be intact, or this proves nothing'
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all(offline=True)
+
+
+def test_an_archive_rebuild_takes_the_lock_and_an_intact_tree_does_not(
+    http_server, tmp_path, monkeypatch
+):
+    """Rebuilding is serialised per dataset; serving an intact tree is not.
+
+    A rebuild replaces the whole version directory, so two processes doing it
+    at once would move a tree out from under each other. The second half is
+    what keeps that from costing anything: the common case, where the data is
+    already there, must not queue behind a lock.
+    """
+    from filelock import FileLock
+
+    taken = []
+    acquire = FileLock.acquire
+
+    def spy(self, *args, **kwargs):
+        taken.append(self.lock_file)
+        return acquire(self, *args, **kwargs)
+
+    monkeypatch.setattr(FileLock, 'acquire', spy)
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    assert len(taken) == 1, 'the rebuild has to be serialised'
+
+    taken.clear()
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert taken == [], 'an intact tree is served without waiting for anything'
+
+
+def test_a_rebuild_rechecks_the_tree_under_the_lock(http_server, tmp_path, monkeypatch):
+    """Whoever waited for the lock serves what the winner built, not a second copy.
+
+    Without the re-check, every process queued behind a rebuild would redo it
+    in turn, which is the thundering herd the lock exists to stop rather than
+    merely stagger.
+    """
+    import shutil
+    from contextlib import contextmanager
+
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    built = tmp_path / VERSIONED
+
+    # A mirror that cannot answer, so anything but the re-check fails loudly.
+    fetcher = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'other', 'tar')
+
+    @contextmanager
+    def another_process_finishes_first(fname, target):
+        shutil.copytree(built, fetcher.target_dir)
+        yield
+
+    monkeypatch.setattr(fetcher, '_fetch_lock', another_process_finishes_first)
+    paths = fetcher.fetch_all(offline=True)
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert fetcher.provenance()[0]['source'] == 'local', 'it served the tree, it did not rebuild'
+
+
+def test_an_archive_fetch_proceeds_when_the_lock_manager_is_unavailable(
+    http_server, tmp_path, monkeypatch
+):
+    """A filesystem without a working lock manager still fetches an archive.
+
+    The lock never carries correctness, only politeness towards the mirrors,
+    so an ENOLCK mount degrades to an unguarded fetch exactly as the per-file
+    path does rather than failing the dataset.
+    """
+    from filelock import FileLock
+
+    def enolck(self, *args, **kwargs):
+        raise OSError(37, 'No locks available')
+
+    monkeypatch.setattr(FileLock, 'acquire', enolck)
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+
+    paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert (tmp_path / VERSIONED / '.fwl-io.json').is_file(), 'the stamp is still written'
+
+
+def test_a_stamp_at_an_unknown_schema_costs_a_refetch_and_says_so(http_server, tmp_path, caplog):
+    """An unreadable schema means the whole dataset comes down again, loudly.
+
+    This is the price of refusing to read a stamp written to rules this
+    version does not know, and it is the right price: the alternative is
+    reading fields whose meaning may have changed. It is worth naming in the
+    log because two versions sharing one data root will pay it on every run,
+    and a nightly job redownloading the same tree gives no other clue why.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+    version_dir = tmp_path / VERSIONED
+    stamp_path = version_dir / '.fwl-io.json'
+    record = json.loads(stamp_path.read_text())
+    assert record['schema'] == 1, 'the fixture must start from a stamp this version wrote'
+
+    # A later version stamps the same intact tree to rules this one lacks.
+    stamp_path.write_text(json.dumps(dict(record, schema=2, added_later='meaning-changed')))
+    with caplog.at_level(logging.WARNING, logger='fwl.fwl_io.fetch'):
+        paths = _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all()
+
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    healed = json.loads(stamp_path.read_text())
+    assert healed['schema'] == 1, 'the tree is restamped to the schema this version writes'
+    assert 'added_later' not in healed, 'the unreadable stamp is replaced, not edited'
+    assert any('schema 2' in r.getMessage() for r in caplog.records), (
+        'the refetch has to name the schema that caused it'
+    )
+
+    # Discrimination: with the stamp left alone the same call serves locally,
+    # so the refetch above is the schema and not the fetch path in general.
+    offline = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path, 'tar')
+    assert sorted(p.name for p in offline.fetch_all(offline=True)) == ['m0p1.txt', 'm1p0.txt']
+
+
+def test_a_cache_stamp_naming_members_outside_the_cache_is_refused(
+    http_server, tmp_path, monkeypatch
+):
+    """A shared-cache stamp gets the same suspicion as a local one.
+
+    The cache is group-writable by design, so its stamp is no more trustworthy
+    than the dataset's own. A stamp whose members resolve outside the cached
+    directory describes no tree there, and the copy has to be refused rather
+    than accepted because some file somewhere answered to the name.
+    """
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    cache_root = tmp_path / 'shared_cache'
+    _archive_fetcher(base_url, registry, cache_root, 'tar').fetch_all()
+    cached_stamp = cache_root / VERSIONED / '.fwl-io.json'
+    record = json.loads(cached_stamp.read_text())
+    outside = tmp_path / 'planted.txt'
+    outside.write_bytes(b'not part of the cached tree\n')
+
+    monkeypatch.setenv('FWL_DATA_CACHE', str(cache_root))
+    tampered = dict(record, members=['../../../../planted.txt'])
+    cached_stamp.write_text(json.dumps(tampered))
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'a', 'tar').fetch_all(
+            offline=True
+        )
+
+    # A cache stamp that is malformed rather than tampered is refused the same
+    # way, by the reader both trees share, rather than raising out of the copy.
+    cached_stamp.write_text('[1, 2, 3]')
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'c', 'tar').fetch_all(
+            offline=True
+        )
+
+    # Discrimination: the same cache with its real member list does serve, so
+    # the refusal above is the escaping name and not a broken fixture.
+    cached_stamp.write_text(json.dumps(record))
+    paths = _archive_fetcher('http://127.0.0.1:1/', registry, tmp_path / 'b', 'tar').fetch_all(
+        offline=True
+    )
+    assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
+    assert outside.is_file(), 'the refused name is read only, never touched'
 
 
 def test_archive_extracts_a_top_level_directory_member(http_server, tmp_path):

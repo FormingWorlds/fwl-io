@@ -38,6 +38,10 @@ The data root comes from an explicit path or the `FWL_DATA` environment variable
 
 *Why*: production runs happen on compute nodes without internet. Anything that only works online is not usable for the campaigns this ecosystem runs.
 
+Beside those two there is a third, read-only mode: `fwl-io check` reports whether a tree is complete and matches its registries without downloading anything or writing to it. Offline mode stops at the first thing it cannot serve and online mode repairs what it finds, so neither can answer what a diagnostic asks, which is the state of the whole tree at once.
+
+*Why the report says what it could not establish*: anything that stopped a file being looked at counts against the verdict, so a manifest that failed to load, a dataset whose registry has never been generated, a file that cannot be read, and a model no manifest declares are all faults rather than silence. A dataset whose members carry no digests to check against is reported as `presence only`; that is not a fault, because presence is all the archive-only checksum policy makes checkable, but it is said plainly rather than reported as verification.
+
 ## Atomic placement, distinct failure classes
 
 Every write is staged on the destination filesystem and moved into place with an atomic rename. Network or checksum failures raise a download error listing every mirror attempt; local problems (read-only tree, full disk) raise their own OSError.
