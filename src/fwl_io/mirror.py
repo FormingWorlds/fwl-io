@@ -151,20 +151,32 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
-            if not response.ok:
-                raise DataverseError(
-                    f'Dataverse {method} {path} failed ({response.status_code}): '
-                    f'{response.text[:500]}'
-                )
-            return response.json()
         except requests.RequestException as exc:
-            # A transport failure (connection error, timeout, DNS) or an
-            # unparseable response body (JSONDecodeError is a requests error) is
-            # a failed native-API request too; surface it as a DataverseError so
-            # every Dataverse-side failure is one error type for callers to catch.
-            # The not-ok DataverseError above is not a RequestException, so it
-            # passes through this handler unchanged.
+            # A transport failure (connection error, timeout, DNS) is a failed
+            # native-API request too; surface it as a DataverseError so every
+            # Dataverse-side failure is one error type for callers to catch.
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
+        if not response.ok:
+            raise DataverseError(
+                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}'
+            )
+        if not response.content:
+            # A 2xx with an empty body (routine for a DELETE) is a success
+            # with nothing to parse.
+            return {}
+        try:
+            body = response.json()
+        except ValueError:
+            raise DataverseError(
+                f'Dataverse {method} {path} returned {response.status_code} with a '
+                f'non-JSON body: {response.text[:500]}'
+            ) from None
+        if not isinstance(body, dict):
+            raise DataverseError(
+                f'Dataverse {method} {path} returned {response.status_code} with a '
+                f'non-object JSON body: {response.text[:500]}'
+            )
+        return body
 
     def _post(self, path: str, **kwargs) -> dict:
         return self._request('POST', path, **kwargs)
@@ -294,9 +306,10 @@ def mirror_to_dataverse(
     DataverseError
         If a Dataverse native-API request fails: the server rejects it (for
         example an unknown subject in the citation metadata), the HTTP transport
-        fails (connection error or timeout), or the response body is unparseable.
-        A failure during upload or publish can leave a draft that the rollback
-        then tries to delete.
+        fails (connection error or timeout), or a 2xx response body is not a
+        JSON object (a non-empty body that fails to parse, or that parses to
+        something other than a JSON object). A failure during upload or publish
+        can leave a draft that the rollback then tries to delete.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
