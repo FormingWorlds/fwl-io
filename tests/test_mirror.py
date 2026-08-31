@@ -419,6 +419,22 @@ def test_create_with_a_non_object_json_body_raises_with_the_status_and_body():
 
 
 @pytest.mark.unit
+def test_request_returns_the_decoded_body_on_a_valid_success_response():
+    """A 2xx response with a non-empty JSON-object body decodes and returns as-is."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    body_bytes = b'{"status": "OK", "data": {"id": 7}}'
+    requests.request = lambda *args, **kwargs: _fake_response(200, body_bytes)
+    try:
+        body = client._request('POST', '/api/datasets/:persistentId/add')
+        assert body == {'status': 'OK', 'data': {'id': 7}}
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
 def test_add_file_accepts_an_empty_success_body(tmp_path):
     """add_file does not raise when Dataverse returns 2xx with an empty body."""
     import requests

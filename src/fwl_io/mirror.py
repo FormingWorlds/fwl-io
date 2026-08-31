@@ -143,6 +143,32 @@ class DataverseClient:
         return {'X-Dataverse-key': self.token}
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
+        """Call one Dataverse native-API endpoint and return its decoded body.
+
+        Parameters
+        ----------
+        method : str
+            HTTP method, e.g. ``'POST'`` or ``'DELETE'``.
+        path : str
+            API path relative to ``self.base_url``, e.g.
+            ``'/api/datasets/:persistentId'``.
+        **kwargs
+            Passed through to :func:`requests.request` (``params``, ``json``,
+            ``files``, and so on).
+
+        Returns
+        -------
+        dict
+            The decoded JSON body, or ``{}`` for a 2xx response with an empty
+            body (routine for a DELETE call).
+
+        Raises
+        ------
+        DataverseError
+            If the HTTP transport fails, the response status is 400 or
+            higher, or a non-empty successful body fails to parse as JSON or
+            parses to something other than a JSON object.
+        """
         try:
             response = requests.request(
                 method,
