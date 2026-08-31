@@ -352,27 +352,162 @@ def test_transport_failure_becomes_a_dataverse_error():
         requests.request = orig
 
 
-@pytest.mark.unit
-def test_unparseable_success_body_becomes_a_dataverse_error():
-    """A 2xx response with a non-JSON body is wrapped as DataverseError too.
-
-    JSONDecodeError is a requests error, so decoding a garbled success body would
-    otherwise leak a bare requests exception from a Dataverse call; every
-    Dataverse-side failure must surface as the one DataverseError type.
-    """
+def _fake_response(status_code: int, content: bytes):
     import requests
 
     response = requests.Response()
-    response.status_code = 200  # ok, so it reaches the body decode
-    response._content = b'this is not json'
+    response.status_code = status_code
+    response._content = content
+    return response
+
+
+@pytest.mark.unit
+def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id():
+    """A 2xx create response with an empty body still fails, for the missing id."""
+    import requests
+
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
-    requests.request = lambda *args, **kwargs: response
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
     try:
-        with pytest.raises(DataverseError, match='failed') as exc_info:
+        with pytest.raises(DataverseError, match='no persistentId'):
             client.create_dataset('coll', {'datasetVersion': {}})
-        # The decode error is a requests error, chained as the cause.
-        assert isinstance(exc_info.value.__cause__, requests.RequestException)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_create_with_a_non_json_success_body_raises_with_the_status_and_body():
+    """A 2xx create response with a non-JSON body raises, naming the status and body.
+
+    This is the exact shape a live Dataverse.nl call returned: a 2xx status with
+    a body that failed to parse as JSON. The status code and raw body must be in
+    the exception message, not just discoverable by decoding the JSON error text.
+    """
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    try:
+        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+            client.create_dataset('coll', {'datasetVersion': {}})
+        assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_create_with_a_non_object_json_body_raises_with_the_status_and_body():
+    """A 2xx create response whose body parses to a non-object (e.g. null) raises.
+
+    ``response.json()`` succeeds here, so this must be checked separately from
+    the decode failure above; a caller must never see a bare AttributeError
+    from treating a non-dict body as a dict.
+    """
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'null')
+    try:
+        with pytest.raises(DataverseError, match='non-object JSON body') as exc_info:
+            client.create_dataset('coll', {'datasetVersion': {}})
+        assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_add_file_accepts_an_empty_success_body(tmp_path):
+    """add_file does not raise when Dataverse returns 2xx with an empty body."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
+    target = tmp_path / 'f.dat'
+    target.write_bytes(b'data')
+    try:
+        client.add_file('doi:10.34894/DEMO01', target)  # must not raise
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_add_file_raises_with_the_status_and_body_on_a_non_json_success_body(tmp_path):
+    """add_file raises on a 2xx non-JSON body, naming the status and body."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    target = tmp_path / 'f.dat'
+    target.write_bytes(b'data')
+    try:
+        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+            client.add_file('doi:10.34894/DEMO01', target)
+        assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_publish_accepts_an_empty_success_body():
+    """publish does not raise when Dataverse returns 2xx with an empty body."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
+    try:
+        client.publish('doi:10.34894/DEMO01')  # must not raise
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_publish_raises_with_the_status_and_body_on_a_non_json_success_body():
+    """publish raises on a 2xx non-JSON body, naming the status and body."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    try:
+        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+            client.publish('doi:10.34894/DEMO01')
+        assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_delete_draft_accepts_an_empty_success_body():
+    """delete_draft (the rollback path) does not raise when Dataverse returns an empty 2xx."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
+    try:
+        client.delete_draft('doi:10.34894/DEMO01')  # must not raise
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_delete_draft_raises_with_the_status_and_body_on_a_non_json_success_body():
+    """delete_draft (the rollback path) raises on a 2xx non-JSON body, naming status and body."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    try:
+        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+            client.delete_draft('doi:10.34894/DEMO01')
+        assert '200' in str(exc_info.value)
     finally:
         requests.request = orig
 
