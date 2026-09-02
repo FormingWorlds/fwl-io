@@ -456,7 +456,13 @@ def publish_existing_dataverse_draft(
             f"{version_type!r} is not a valid Dataverse version type: use 'major' or 'minor'"
         )
     prefix, sep, suffix = persistent_id.removeprefix('doi:').partition('/')
-    if not persistent_id.startswith('doi:') or not sep or not prefix or not suffix:
+    if (
+        not persistent_id.startswith('doi:')
+        or not sep
+        or not prefix
+        or not suffix
+        or any(ch.isspace() for ch in persistent_id)
+    ):
         raise ValueError(
             f'{persistent_id!r} is not a Dataverse persistent id of the form '
             "'doi:<prefix>/<suffix>'"

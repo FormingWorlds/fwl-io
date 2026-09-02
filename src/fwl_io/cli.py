@@ -13,6 +13,8 @@ import sys
 
 from fwl_io import __version__
 
+DEFAULT_DATAVERSE_URL = 'https://dataverse.nl'
+
 
 def _cmd_sync(args: argparse.Namespace) -> int:
     from fwl_io.sync import ZENODO_API, sync_manifest
@@ -159,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')
     p_mirror.add_argument('--collection', required=True, help='target Dataverse collection alias')
     p_mirror.add_argument(
-        '--dataverse-url', default='https://dataverse.nl', help='Dataverse base URL'
+        '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
     )
     p_mirror.add_argument('--contact-name', default='PROTEUS Framework', help='dataset contact')
     p_mirror.add_argument(
@@ -183,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_mirror_publish.add_argument('persistent_id', help='persistent id (DOI) of the draft')
     p_mirror_publish.add_argument(
-        '--dataverse-url', default='https://dataverse.nl', help='Dataverse base URL'
+        '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
     )
     p_mirror_publish.add_argument(
         '--version-type',

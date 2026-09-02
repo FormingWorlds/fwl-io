@@ -577,7 +577,17 @@ def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_su
 @pytest.mark.unit
 @pytest.mark.parametrize(
     'persistent_id',
-    ['', '10.34894/DEMO01', 'doi:', 'doi:noSlashHere', 'doi:10.34894/', 'doi:/DEMO01'],
+    [
+        '',
+        '10.34894/DEMO01',
+        'doi:',
+        'doi:noSlashHere',
+        'doi:10.34894/',
+        'doi:/DEMO01',
+        'doi: 10.34894/DEMO01',
+        'doi:10.34894/DEMO01 ',
+        'doi:10.34894/DE MO01',
+    ],
 )
 def test_publish_existing_draft_rejects_a_malformed_persistent_id(persistent_id):
     """A persistent id that isn't 'doi:<prefix>/<suffix>' is rejected locally.
@@ -603,6 +613,22 @@ def test_publish_existing_draft_rejects_an_invalid_version_type(version_type):
             dataverse_url='http://unused',
             token='tok',
             version_type=version_type,
+        )
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_checks_version_type_before_persistent_id():
+    """When both are invalid, the version_type error is raised first.
+
+    No request is made either way: both checks run before DataverseClient
+    is ever constructed.
+    """
+    with pytest.raises(ValueError, match='version type'):
+        publish_existing_dataverse_draft(
+            'not-a-doi',
+            dataverse_url='http://unused',
+            token='tok',
+            version_type='bogus',
         )
 
 
