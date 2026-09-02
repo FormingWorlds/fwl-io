@@ -576,7 +576,8 @@ def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_su
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    'persistent_id', ['', '10.34894/DEMO01', 'doi:', 'doi:noSlashHere', 'doi:10.34894/']
+    'persistent_id',
+    ['', '10.34894/DEMO01', 'doi:', 'doi:noSlashHere', 'doi:10.34894/', 'doi:/DEMO01'],
 )
 def test_publish_existing_draft_rejects_a_malformed_persistent_id(persistent_id):
     """A persistent id that isn't 'doi:<prefix>/<suffix>' is rejected locally.
@@ -586,6 +587,23 @@ def test_publish_existing_draft_rejects_a_malformed_persistent_id(persistent_id)
     """
     with pytest.raises(ValueError, match='Dataverse persistent id'):
         publish_existing_dataverse_draft(persistent_id, dataverse_url='http://unused', token='tok')
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('version_type', ['', 'Major', 'patch', 'MAJOR'])
+def test_publish_existing_draft_rejects_an_invalid_version_type(version_type):
+    """A version_type other than 'major' or 'minor' is rejected locally.
+
+    No request is made: DataverseClient.publish is never reached, so this
+    raises ValueError even with an unreachable dataverse_url.
+    """
+    with pytest.raises(ValueError, match='version type'):
+        publish_existing_dataverse_draft(
+            'doi:10.34894/DEMO01',
+            dataverse_url='http://unused',
+            token='tok',
+            version_type=version_type,
+        )
 
 
 @pytest.mark.unit

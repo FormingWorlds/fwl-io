@@ -72,7 +72,7 @@ Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and chec
 
 ```bash
 DATAVERSE_TOKEN=... fwl-io mirror-publish <persistent-id> \
-    [--dataverse-url URL] [--version-type {major,minor}]
+    [--dataverse-url URL] [--version-type VERSION_TYPE]
 ```
 
 Publishes an existing Dataverse draft by its persistent id: it never creates a dataset, so it is the second step of a create-draft-then-publish workflow, run once a draft created by `fwl-io mirror --no-publish` has been reviewed. `<persistent-id>` must be of the form `doi:<prefix>/<suffix>`, for example `doi:10.34894/EXAMPLE`. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. `--version-type` is `major` by default and accepts only `major` or `minor`. Fails clearly if the dataset is already published or the persistent id does not resolve to a draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).

@@ -188,8 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     p_mirror_publish.add_argument(
         '--version-type',
         default='major',
-        choices=['major', 'minor'],
-        help='Dataverse publish version bump',
+        help="Dataverse publish version bump: 'major' or 'minor'",
     )
     p_mirror_publish.set_defaults(func=_cmd_mirror_publish)
 

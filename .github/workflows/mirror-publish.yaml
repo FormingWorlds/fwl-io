@@ -10,6 +10,10 @@ on:
         description: "Dataverse publish version bump"
         required: true
         default: "major"
+        type: choice
+        options:
+          - major
+          - minor
 
 jobs:
   mirror-publish:

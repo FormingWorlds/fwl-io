@@ -445,11 +445,16 @@ def publish_existing_dataverse_draft(
     Raises
     ------
     ValueError
-        If ``persistent_id`` is not of the form ``'doi:<prefix>/<suffix>'``.
+        If ``persistent_id`` is not of the form ``'doi:<prefix>/<suffix>'``,
+        or ``version_type`` is not ``'major'`` or ``'minor'``.
     DataverseError
         If the publish request fails: for example the dataset is already
         published, does not exist, or the server returns a non-2xx status.
     """
+    if version_type not in ('major', 'minor'):
+        raise ValueError(
+            f"{version_type!r} is not a valid Dataverse version type: use 'major' or 'minor'"
+        )
     prefix, sep, suffix = persistent_id.removeprefix('doi:').partition('/')
     if not persistent_id.startswith('doi:') or not sep or not prefix or not suffix:
         raise ValueError(
