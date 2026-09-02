@@ -1,11 +1,14 @@
 """Mirror a pinned Zenodo deposit to a Dataverse.nl collection.
 
 Zenodo is the primary source of every dataset; Dataverse is a download
-mirror used as the second link in the fetch fallback chain. This module
+mirror used as the second link in the fetch fallback chain. :func:`mirror_to_dataverse`
 takes a Zenodo version DOI, downloads and checksum-verifies its files, then
 creates a matching Dataverse dataset, uploads the files byte-identically,
 and (optionally) publishes it, printing the Dataverse DOI to add to the
-consuming manifest.
+consuming manifest. Called with ``publish=False``, it leaves the created
+dataset as a private draft instead; :func:`publish_existing_dataverse_draft`
+is the second step of that workflow, publishing an existing draft by its
+persistent id without ever creating a dataset.
 
 The Dataverse writes go through the native API
 (https://guides.dataverse.org/en/latest/api/native-api.html):
@@ -410,3 +413,49 @@ def mirror_to_dataverse(
                 )
             raise
         return persistent_id
+
+
+def publish_existing_dataverse_draft(
+    persistent_id: str,
+    *,
+    dataverse_url: str,
+    token: str,
+    version_type: str = 'major',
+) -> None:
+    """Publish an existing Dataverse draft dataset by its persistent id.
+
+    This never calls :meth:`DataverseClient.create_dataset`, so it cannot
+    mint a duplicate dataset: it is the second step of a create-draft ->
+    review -> publish workflow, run once the draft created by
+    :func:`mirror_to_dataverse` (with ``publish=False``) has been reviewed.
+
+    Parameters
+    ----------
+    persistent_id : str
+        Persistent id (DOI) of the existing draft, for example
+        ``'doi:10.34894/EXAMPLE'``.
+    dataverse_url : str
+        Base URL of the Dataverse installation (for example
+        ``https://dataverse.nl``).
+    token : str
+        Dataverse API token.
+    version_type : str
+        Dataverse publish version bump: ``'major'`` or ``'minor'``.
+
+    Raises
+    ------
+    ValueError
+        If ``persistent_id`` is not of the form ``'doi:<prefix>/<suffix>'``.
+    DataverseError
+        If the publish request fails: for example the dataset is already
+        published, does not exist, or the server returns a non-2xx status.
+    """
+    prefix, sep, suffix = persistent_id.removeprefix('doi:').partition('/')
+    if not persistent_id.startswith('doi:') or not sep or not prefix or not suffix:
+        raise ValueError(
+            f'{persistent_id!r} is not a Dataverse persistent id of the form '
+            "'doi:<prefix>/<suffix>'"
+        )
+    client = DataverseClient(dataverse_url, token)
+    client.publish(persistent_id, version_type=version_type)
+    log.info('published %s', persistent_id)

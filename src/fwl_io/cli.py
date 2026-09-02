@@ -1,4 +1,5 @@
-"""Command-line interface: ``fwl-io sync | list | fetch | check | relocate | mirror``.
+"""Command-line interface for ``fwl-io``: sync, list, fetch, check, relocate, mirror,
+mirror-publish.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -99,6 +100,23 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mirror_publish(args: argparse.Namespace) -> int:
+    from fwl_io.mirror import publish_existing_dataverse_draft
+
+    token = os.environ.get('DATAVERSE_TOKEN', '')
+    if not token:
+        print('fwl-io: set DATAVERSE_TOKEN to publish', file=sys.stderr)
+        return 1
+    publish_existing_dataverse_draft(
+        args.persistent_id,
+        dataverse_url=args.dataverse_url,
+        token=token,
+        version_type=args.version_type,
+    )
+    print(f'published {args.persistent_id}')
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog='fwl-io',
@@ -159,6 +177,21 @@ def main(argv: list[str] | None = None) -> int:
         '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'
     )
     p_mirror.set_defaults(func=_cmd_mirror)
+
+    p_mirror_publish = sub.add_parser(
+        'mirror-publish', help='publish an existing Dataverse draft (never creates a dataset)'
+    )
+    p_mirror_publish.add_argument('persistent_id', help='persistent id (DOI) of the draft')
+    p_mirror_publish.add_argument(
+        '--dataverse-url', default='https://dataverse.nl', help='Dataverse base URL'
+    )
+    p_mirror_publish.add_argument(
+        '--version-type',
+        default='major',
+        choices=['major', 'minor'],
+        help='Dataverse publish version bump',
+    )
+    p_mirror_publish.set_defaults(func=_cmd_mirror_publish)
 
     args = parser.parse_args(argv)
     try:

@@ -1,0 +1,35 @@
+name: Publish an existing Dataverse draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      persistent_id:
+        description: "Persistent id (DOI) of the existing draft to publish, e.g. doi:10.34894/EXAMPLE"
+        required: true
+      version_type:
+        description: "Dataverse publish version bump"
+        required: true
+        default: "major"
+
+jobs:
+  mirror-publish:
+    runs-on: ubuntu-latest
+    environment: dataverse
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install fwl-io
+        run: pip install -e .
+      - name: Publish the draft
+        env:
+          DATAVERSE_TOKEN: ${{ secrets.DATAVERSE_TOKEN }}
+          # Bind the user inputs to environment variables rather than
+          # interpolating them into the shell script, so a crafted persistent id
+          # cannot inject commands into a job that holds the token.
+          PERSISTENT_ID: ${{ inputs.persistent_id }}
+          VERSION_TYPE: ${{ inputs.version_type }}
+        run: |
+          fwl-io mirror-publish "${PERSISTENT_ID}" \
+            --version-type "${VERSION_TYPE}"
