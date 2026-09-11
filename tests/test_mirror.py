@@ -21,6 +21,7 @@ from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
     mirror_to_dataverse,
+    publish_existing_dataverse_draft,
     zenodo_record_to_citation,
 )
 
@@ -494,6 +495,160 @@ def test_publish_raises_with_the_status_and_body_on_a_non_json_success_body():
         with pytest.raises(DataverseError, match='this is not json') as exc_info:
             client.publish('doi:10.34894/DEMO01')
         assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_never_creates_a_dataset(monkeypatch):
+    """The publish-only wrapper calls publish() and never create_dataset()."""
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError('publish_existing_dataverse_draft must never create a dataset')
+
+    monkeypatch.setattr(DataverseClient, 'create_dataset', _forbidden)
+    monkeypatch.setattr(DataverseClient, 'publish', lambda self, pid, **k: None)
+
+    publish_existing_dataverse_draft(
+        'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
+    )
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_forwards_the_persistent_id_and_version_type(monkeypatch):
+    """The wrapper forwards persistent_id and version_type to DataverseClient.publish."""
+    captured = {}
+    monkeypatch.setattr(
+        DataverseClient,
+        'publish',
+        lambda self, pid, **k: captured.update(persistent_id=pid, **k),
+    )
+
+    publish_existing_dataverse_draft(
+        'doi:10.34894/DEMO01',
+        dataverse_url='http://unused',
+        token='tok',
+        version_type='minor',
+    )
+    assert captured == {'persistent_id': 'doi:10.34894/DEMO01', 'version_type': 'minor'}
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_raises_clearly_on_an_already_published_dataset():
+    """Publishing an already-published (or nonexistent) persistentId errors clearly.
+
+    Dataverse answers a re-publish or an unknown persistentId with a non-2xx
+    status; the wrapper must let DataverseError propagate with that status and
+    body rather than silently no-op.
+    """
+    import requests
+
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(
+        403, b'{"status": "ERROR", "message": "Dataset already published"}'
+    )
+    try:
+        with pytest.raises(DataverseError, match='already published') as exc_info:
+            publish_existing_dataverse_draft(
+                'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
+            )
+        assert '403' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_success_body():
+    """A 2xx publish response with a non-JSON body raises, naming the status and body."""
+    import requests
+
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    try:
+        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+            publish_existing_dataverse_draft(
+                'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
+            )
+        assert '200' in str(exc_info.value)
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'persistent_id',
+    [
+        '',
+        '10.34894/DEMO01',
+        'doi:',
+        'doi:noSlashHere',
+        'doi:10.34894/',
+        'doi:/DEMO01',
+        'doi: 10.34894/DEMO01',
+        'doi:10.34894/DEMO01 ',
+        'doi:10.34894/DE MO01',
+    ],
+)
+def test_publish_existing_draft_rejects_a_malformed_persistent_id(persistent_id):
+    """A persistent id that isn't 'doi:<prefix>/<suffix>' is rejected locally.
+
+    No request is made: DataverseClient.publish is never reached, so this
+    raises ValueError even with an unreachable dataverse_url.
+    """
+    with pytest.raises(ValueError, match='Dataverse persistent id'):
+        publish_existing_dataverse_draft(persistent_id, dataverse_url='http://unused', token='tok')
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('version_type', ['', 'Major', 'patch', 'MAJOR'])
+def test_publish_existing_draft_rejects_an_invalid_version_type(version_type):
+    """A version_type other than 'major' or 'minor' is rejected locally.
+
+    No request is made: DataverseClient.publish is never reached, so this
+    raises ValueError even with an unreachable dataverse_url.
+    """
+    with pytest.raises(ValueError, match='version type'):
+        publish_existing_dataverse_draft(
+            'doi:10.34894/DEMO01',
+            dataverse_url='http://unused',
+            token='tok',
+            version_type=version_type,
+        )
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_checks_version_type_before_persistent_id():
+    """When both are invalid, the version_type error is raised first.
+
+    No request is made either way: both checks run before DataverseClient
+    is ever constructed.
+    """
+    with pytest.raises(ValueError, match='version type'):
+        publish_existing_dataverse_draft(
+            'not-a-doi',
+            dataverse_url='http://unused',
+            token='tok',
+            version_type='bogus',
+        )
+
+
+@pytest.mark.unit
+def test_publish_existing_draft_raises_clearly_on_a_nonexistent_persistent_id():
+    """Publishing a persistentId Dataverse doesn't recognize errors clearly."""
+    import requests
+
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(
+        404,
+        b'{"status": "ERROR", "message": "Dataset with Persistent ID doi:10.34894/'
+        b'NOPE could not be found."}',
+    )
+    try:
+        with pytest.raises(DataverseError, match='could not be found') as exc_info:
+            publish_existing_dataverse_draft(
+                'doi:10.34894/NOPE', dataverse_url='http://unused', token='tok'
+            )
+        assert '404' in str(exc_info.value)
     finally:
         requests.request = orig
 
@@ -996,3 +1151,90 @@ def test_cli_mirror_prints_manifest_ready_dataverse_doi(monkeypatch, capsys):
     # The manifest field takes a bare DOI, so the doi: prefix is stripped.
     assert 'dataverse = "10.34894/DEMO01"' in out
     assert 'doi:10.34894/DEMO01' not in out.split('add this to the manifest')[1]
+
+
+@pytest.mark.unit
+def test_cli_mirror_publish_requires_token(monkeypatch, capsys):
+    """mirror-publish refuses to run without a token, and never calls the wrapper."""
+    import fwl_io.mirror as mirror_mod
+    from fwl_io.cli import main
+
+    called = []
+    monkeypatch.setattr(
+        mirror_mod, 'publish_existing_dataverse_draft', lambda *a, **k: called.append(1)
+    )
+    monkeypatch.delenv('DATAVERSE_TOKEN', raising=False)
+
+    rc = main(['mirror-publish', 'doi:10.34894/DEMO01'])
+    assert rc == 1
+    assert 'DATAVERSE_TOKEN' in capsys.readouterr().err
+    assert called == []
+
+
+@pytest.mark.unit
+def test_cli_mirror_publish_forwards_the_persistent_id_url_and_version_type(monkeypatch):
+    """mirror-publish forwards the persistent id and its flags, unmodified."""
+    import fwl_io.mirror as mirror_mod
+    from fwl_io.cli import main
+
+    captured = {}
+    monkeypatch.setattr(
+        mirror_mod,
+        'publish_existing_dataverse_draft',
+        lambda pid, **k: captured.update(persistent_id=pid, **k),
+    )
+    monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
+
+    main(
+        [
+            'mirror-publish',
+            'doi:10.34894/DEMO01',
+            '--dataverse-url',
+            'https://demo.dataverse.org',
+            '--version-type',
+            'minor',
+        ]
+    )
+    assert captured['persistent_id'] == 'doi:10.34894/DEMO01'
+    assert captured['dataverse_url'] == 'https://demo.dataverse.org'
+    assert captured['version_type'] == 'minor'
+
+
+@pytest.mark.unit
+def test_cli_mirror_publish_prints_the_published_id_on_success(monkeypatch, capsys):
+    """On success mirror-publish reports the persistent id it published."""
+    import fwl_io.mirror as mirror_mod
+    from fwl_io.cli import main
+
+    monkeypatch.setattr(mirror_mod, 'publish_existing_dataverse_draft', lambda *a, **k: None)
+    monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
+
+    rc = main(['mirror-publish', 'doi:10.34894/DEMO01'])
+    assert rc == 0
+    assert 'published doi:10.34894/DEMO01' in capsys.readouterr().out
+
+
+@pytest.mark.unit
+def test_cli_mirror_publish_surfaces_a_dataverse_error(monkeypatch, capsys):
+    """A DataverseError from the wrapper (e.g. already published) reaches the CLI as text.
+
+    The CLI's top-level error boundary formats it as a one-line message rather
+    than a traceback, so an already-published or unknown persistentId is
+    reported clearly instead of crashing the Actions job with a stack trace.
+    """
+    import fwl_io.mirror as mirror_mod
+    from fwl_io.cli import main
+    from fwl_io.mirror import DataverseError
+
+    def _raise(*args, **kwargs):
+        raise DataverseError(
+            'Dataverse POST /api/datasets/:persistentId/actions/:publish failed '
+            '(403): Dataset already published'
+        )
+
+    monkeypatch.setattr(mirror_mod, 'publish_existing_dataverse_draft', _raise)
+    monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
+
+    rc = main(['mirror-publish', 'doi:10.34894/DEMO01'])
+    assert rc == 1
+    assert 'already published' in capsys.readouterr().err

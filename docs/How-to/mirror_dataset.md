@@ -22,6 +22,10 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
     Commit that change in a pull request, like any other data change.
 
+## Publishing a reviewed draft
+
+A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published.
+
 ## What the mirror does
 
 For the given Zenodo version DOI, the mirror downloads and checksum-verifies every file, creates a Dataverse dataset whose title, authors, and description come from the Zenodo record (with a note recording the source DOI), uploads the files byte-identically with tabular ingest disabled, and publishes the dataset unless asked not to. A concept DOI is rejected, so the mirror always tracks a specific pinned deposit.
