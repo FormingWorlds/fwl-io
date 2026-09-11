@@ -16,7 +16,7 @@ Queries the Zenodo record of every dataset in the manifest and rewrites the regi
 fwl-io list
 ```
 
-Lists every dataset from all installed manifests with its key and consumers. Datasets without a committed registry are flagged `[NO REGISTRY]`. Providers whose manifest fails to load are reported on stderr and the exit status is 1.
+Lists every dataset from all installed manifests with its key and consumers. When a manifest gives a dataset a human-readable `name` that differs from its key, that label is printed on the next line below the key. Datasets without a committed registry are flagged `[NO REGISTRY]`. Providers whose manifest fails to load are reported on stderr and the exit status is 1.
 
 ## fwl-io fetch
 
