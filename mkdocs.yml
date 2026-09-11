@@ -20,6 +20,7 @@ nav:
   - Explanations:
       - Design decisions: Explanations/design.md
       - Manifests and registries: Explanations/manifests.md
+      - Data governance: Explanations/governance.md
 
   - Reference:
       - CLI reference: Reference/cli.md
