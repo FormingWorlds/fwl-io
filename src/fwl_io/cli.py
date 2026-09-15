@@ -36,10 +36,11 @@ def _cmd_list(args: argparse.Namespace) -> int:
                 '' if ds.registry_path and ds.registry_path.is_file() else '  [NO REGISTRY]'
             )
             print(f'  {ds.key:50s} required_by: {consumers}{registry_note}')
-            if ds.name != ds.key:
-                # A name is a single-line label; drop control characters so a
-                # manifest cannot inject extra lines into the listing.
-                label = ''.join(c for c in ds.name if c.isprintable())
+            # A name is a single-line label; drop control characters so a manifest
+            # cannot inject extra lines, then skip the line when there is nothing
+            # left to show or it collapses to the key already printed above.
+            label = ''.join(c for c in ds.name if c.isprintable()).strip()
+            if label and label != ds.key:
                 print(f'    {label}')
     for provider, message in sorted(errors.items()):
         print(f'[{provider}] FAILED TO LOAD: {message}', file=sys.stderr)
