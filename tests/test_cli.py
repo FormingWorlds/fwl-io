@@ -167,9 +167,7 @@ def test_list_omits_the_label_line_for_an_all_non_printable_name(
 ):
     """A name that strips to nothing after filtering must not print a bare indented line."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(
-        f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n'
-    )
+    manifest.write_text(f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n')
 
     class _EP:
         def __init__(self, name, target):
@@ -204,9 +202,7 @@ def test_list_omits_the_label_line_when_it_collapses_to_the_key(
 ):
     """A name that differs from the key raw but not after filtering must not repeat it."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(
-        f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n'
-    )
+    manifest.write_text(f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n')
 
     class _EP:
         def __init__(self, name, target):
