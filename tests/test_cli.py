@@ -116,12 +116,17 @@ def test_list_shows_declared_name_but_not_the_key_fallback(tmp_path, capsys, mon
 
 
 @pytest.mark.unit
-def test_list_strips_control_characters_from_a_declared_name(tmp_path, capsys, monkeypatch):
-    """A name carrying a newline cannot inject an extra line into the listing."""
+@pytest.mark.parametrize(
+    'escape',
+    ['\\n', '\\t', '\\r', '\\u2028'],
+    ids=['newline', 'tab', 'cr', 'line-separator'],
+)
+def test_list_strips_control_characters_from_a_declared_name(escape, tmp_path, capsys, monkeypatch):
+    """A name carrying a control character cannot inject an extra line into the listing."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(
         '[evil]\n'
-        'name = "harmless\\n  forged.key    required_by: victim    [NO REGISTRY]"\n'
+        f'name = "harmless{escape}  forged.key    required_by: victim    [NO REGISTRY]"\n'
         'zenodo = "10.5281/zenodo.1"\n'
     )
 
@@ -149,6 +154,43 @@ def test_list_strips_control_characters_from_a_declared_name(tmp_path, capsys, m
     assert lines[1].startswith('  evil')
     assert lines[2].startswith('    harmless')
     assert not any(line.startswith('  forged') for line in lines)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'toml_escaped_name',
+    ['\\u200b\\u200b', '\\u0001   \\u0001'],
+    ids=['all-non-printable', 'non-printable-padding-around-spaces'],
+)
+def test_list_omits_the_label_line_for_an_all_non_printable_name(
+    toml_escaped_name, tmp_path, capsys, monkeypatch
+):
+    """A name that strips to nothing after filtering must not print a bare indented line."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n'
+    )
+
+    class _EP:
+        def __init__(self, name, target):
+            self.name = name
+            self._target = target
+
+        def load(self):
+            return self._target
+
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_EP('demo', lambda: manifest)],
+    )
+
+    code = main(['list'])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert code == 0
+    assert len(lines) == 2
+    assert lines[0] == '[demo]'
+    assert lines[1].startswith('  evil')
 
 
 @pytest.mark.unit
