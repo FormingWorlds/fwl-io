@@ -74,6 +74,84 @@ def test_list_reports_broken_provider_and_missing_registry(tmp_path, capsys, mon
 
 
 @pytest.mark.unit
+def test_list_shows_declared_name_but_not_the_key_fallback(tmp_path, capsys, monkeypatch):
+    """A declared human-readable name is printed; an undeclared one is not repeated."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        '[labelled]\n'
+        'name = "Wolf & Bower (2018) MgSiO3 equation of state"\n'
+        'zenodo = "10.5281/zenodo.1"\n'
+        '[unlabelled]\n'
+        'zenodo = "10.5281/zenodo.2"\n'
+    )
+
+    class _EP:
+        def __init__(self, name, target):
+            self.name = name
+            self._target = target
+
+        def load(self):
+            return self._target
+
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_EP('demo', lambda: manifest)],
+    )
+
+    code = main(['list'])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    name = 'Wolf & Bower (2018) MgSiO3 equation of state'
+    assert code == 0
+    # The declared name prints on the line immediately below its key, not merely
+    # somewhere in the output: a print-order swap has to fail this.
+    key_line = next(i for i, line in enumerate(lines) if line.strip().startswith('labelled'))
+    assert lines[key_line + 1].strip() == name
+    # The undeclared dataset falls back to its key, so its key line is not
+    # followed by a repeat of the key.
+    fallback_line = next(i for i, line in enumerate(lines) if line.strip().startswith('unlabelled'))
+    following = lines[fallback_line + 1] if fallback_line + 1 < len(lines) else ''
+    assert following.strip() != 'unlabelled'
+    assert out.count('unlabelled') == 1
+
+
+@pytest.mark.unit
+def test_list_strips_control_characters_from_a_declared_name(tmp_path, capsys, monkeypatch):
+    """A name carrying a newline cannot inject an extra line into the listing."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        '[evil]\n'
+        'name = "harmless\\n  forged.key    required_by: victim    [NO REGISTRY]"\n'
+        'zenodo = "10.5281/zenodo.1"\n'
+    )
+
+    class _EP:
+        def __init__(self, name, target):
+            self.name = name
+            self._target = target
+
+        def load(self):
+            return self._target
+
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_EP('demo', lambda: manifest)],
+    )
+
+    code = main(['list'])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert code == 0
+    # The embedded newline must not produce a fourth line that reads like a
+    # second dataset: provider header, key line, one name line, nothing else.
+    assert len(lines) == 3
+    assert lines[0] == '[demo]'
+    assert lines[1].startswith('  evil')
+    assert lines[2].startswith('    harmless')
+    assert not any(line.startswith('  forged') for line in lines)
+
+
+@pytest.mark.unit
 def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
     """Asking for a model no manifest declares is an error, not an empty success."""
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
