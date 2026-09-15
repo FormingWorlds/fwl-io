@@ -194,6 +194,43 @@ def test_list_omits_the_label_line_for_an_all_non_printable_name(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    'toml_escaped_name',
+    ['evil ', 'evil\\u200b'],
+    ids=['trailing-space', 'trailing-invisible-char'],
+)
+def test_list_omits_the_label_line_when_it_collapses_to_the_key(
+    toml_escaped_name, tmp_path, capsys, monkeypatch
+):
+    """A name that differs from the key raw but not after filtering must not repeat it."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[evil]\nname = "{toml_escaped_name}"\nzenodo = "10.5281/zenodo.1"\n'
+    )
+
+    class _EP:
+        def __init__(self, name, target):
+            self.name = name
+            self._target = target
+
+        def load(self):
+            return self._target
+
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [_EP('demo', lambda: manifest)],
+    )
+
+    code = main(['list'])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert code == 0
+    assert len(lines) == 2
+    assert lines[0] == '[demo]'
+    assert lines[1].startswith('  evil')
+
+
+@pytest.mark.unit
 def test_fetch_unknown_module_exits_nonzero(capsys, monkeypatch):
     """Asking for a model no manifest declares is an error, not an empty success."""
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
