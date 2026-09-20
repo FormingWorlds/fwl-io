@@ -509,6 +509,31 @@ def test_distinct_locations_across_providers_load_without_conflict(tmp_path, mon
     assert [ds.key for ds in found['proteus']] == ['interior.eos.demo']
 
 
+def test_duplicate_entry_point_name_is_rejected(tmp_path, monkeypatch):
+    """Two packages sharing one entry-point name fail discovery, not silently drop one."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    assert 'manifest' in message
+    assert 'Uninstall or pin' in message
+
+
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
     """An empty result while a manifest is unreadable names that manifest."""
     stale = _write(

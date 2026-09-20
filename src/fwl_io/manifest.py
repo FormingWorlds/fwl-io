@@ -465,7 +465,19 @@ def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
     """Load every installed manifest; return (datasets per provider, errors)."""
     found: dict[str, list[Dataset]] = {}
     errors: dict[str, str] = {}
+    seen: dict[str, str] = {}
     for ep in entry_points(group='fwl_io.manifests'):
+        dist = getattr(ep, 'dist', None)
+        label = getattr(dist, 'name', None) or ep.name
+        if ep.name in seen:
+            prior = seen[ep.name]
+            who = f' (from {prior} and {label})' if prior != ep.name or label != ep.name else ''
+            raise ManifestConflictError(
+                f'two installed packages register the {ep.name!r} manifest entry point'
+                f'{who}; fwl-io cannot tell their datasets apart. Uninstall or pin one '
+                f'so a single package registers {ep.name!r}.'
+            )
+        seen[ep.name] = label
         try:
             manifest_path = ep.load()()
             found[ep.name] = load_manifest(manifest_path)
