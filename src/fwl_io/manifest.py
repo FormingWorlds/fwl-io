@@ -467,7 +467,8 @@ def fetch_for(
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
     progress : bool
-        Show a per-file download progress bar (requires tqdm).
+        Show a per-file download progress bar. When tqdm is not installed the
+        bar is skipped and the fetch continues.
     """
     from fwl_io.fetch import create_fetcher
 
@@ -477,7 +478,7 @@ def fetch_for(
             import tqdm  # noqa: F401
         except ImportError:
             log.warning(
-                'progress bar needs tqdm (pip install fwl-io[progress]); fetching without it'
+                'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
             )
             progress = False
     model = model.lower()

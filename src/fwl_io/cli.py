@@ -52,8 +52,9 @@ def _resolve_progress(requested: bool | None) -> bool:
 
     ``requested`` is the parsed ``--progress`` / ``--no-progress`` flag; ``None``
     means auto, on when stderr is a terminal. When a bar is wanted but tqdm is
-    not installed, print a one-line note naming the fix and return ``False`` so
-    the download still runs without a bar.
+    not installed, return ``False`` so the download still runs without one. The
+    note naming the fix prints only when ``--progress`` was asked for explicitly,
+    so an auto-mode fetch on a terminal degrades without a message.
     """
     on = sys.stderr.isatty() if requested is None else requested
     if not on:
@@ -61,10 +62,11 @@ def _resolve_progress(requested: bool | None) -> bool:
     try:
         import tqdm  # noqa: F401
     except ImportError:
-        print(
-            'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it',
-            file=sys.stderr,
-        )
+        if requested:
+            print(
+                'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it',
+                file=sys.stderr,
+            )
         return False
     return True
 

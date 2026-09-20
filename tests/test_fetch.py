@@ -1099,6 +1099,40 @@ def test_downloader_carries_explicit_timeout(tmp_path):
     assert type(doi_dl).__name__ == 'DOIDownloader'
 
 
+def test_downloader_carries_progress_flag(tmp_path, monkeypatch):
+    """The ``progress`` setting reaches pooch's ``progressbar`` on both mirror kinds.
+
+    The DOI downloader defers its tqdm check, so ``progress=True`` sets its
+    ``progressbar`` without tqdm present. The HTTP downloader checks tqdm at
+    construction, so the test supplies a stand-in through pooch's module binding
+    to reach the same assertion where the optional dependency is not installed.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', object())
+    on = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert on._downloader('http://example.invalid/').progressbar is True
+    assert on._downloader(f'doi:{ZENODO}/').progressbar is True
+
+    off = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=False,
+    )
+    assert off._downloader('http://example.invalid/').progressbar is False
+    assert off._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
 def test_real_server_503_then_200_is_retried_and_served(tmp_path, monkeypatch):
     """A mirror answering 503 once, then 200, is retried through the real stack.
 

@@ -480,3 +480,16 @@ def test_fetch_progress_soft_degrades_without_tqdm(monkeypatch):
     assert main(['fetch', 'demo', '--progress']) == 0
     assert seen['progress'] is False
     assert 'pip install fwl-io[progress]' in fake_err.getvalue()
+
+
+@pytest.mark.unit
+def test_fetch_progress_auto_degrades_silently_without_tqdm(monkeypatch):
+    """Auto mode on a TTY drops the bar when tqdm is absent, printing no note."""
+    monkeypatch.setitem(sys.modules, 'tqdm', None)
+    fake_err = _FakeStderr(tty=True)
+    monkeypatch.setattr('sys.stderr', fake_err)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo']) == 0
+    assert seen['progress'] is False
+    assert 'pip install fwl-io[progress]' not in fake_err.getvalue()
