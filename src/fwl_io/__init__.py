@@ -19,6 +19,7 @@ from fwl_io.manifest import (
     load_manifest,
 )
 from fwl_io.paths import MissingDataRootError, resolve_cache_root, resolve_data_root
+from fwl_io.prune import PruneCandidate, PruneReport, plan_prune, prune_versions
 from fwl_io.relocate import Relocation, RelocationReport, plan_relocations, relocate_all
 
 try:
@@ -36,6 +37,8 @@ __all__ = [
     'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
+    'PruneCandidate',
+    'PruneReport',
     'Relocation',
     'RelocationReport',
     '__version__',
@@ -45,7 +48,9 @@ __all__ = [
     'discover_manifests',
     'fetch_for',
     'load_manifest',
+    'plan_prune',
     'plan_relocations',
+    'prune_versions',
     'relocate_all',
     'resolve_cache_root',
     'resolve_data_root',
