@@ -445,6 +445,9 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     return found
 
 
+_TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
+
+
 def fetch_for(
     model: str, data_root: str | Path | None = None, progress: bool = False
 ) -> dict[str, list[Path]]:
@@ -477,9 +480,7 @@ def fetch_for(
         try:
             import tqdm  # noqa: F401
         except ImportError:
-            log.warning(
-                'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
-            )
+            log.warning(_TQDM_HINT)
             progress = False
     model = model.lower()
     fetched: dict[str, list[Path]] = {}

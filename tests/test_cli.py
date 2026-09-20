@@ -493,3 +493,18 @@ def test_fetch_progress_auto_degrades_silently_without_tqdm(monkeypatch):
     assert main(['fetch', 'demo']) == 0
     assert seen['progress'] is False
     assert 'pip install fwl-io[progress]' not in fake_err.getvalue()
+
+
+@pytest.mark.unit
+def test_fetch_progress_auto_survives_stderr_without_isatty(monkeypatch):
+    """Auto mode resolves to no bar, not a crash, when stderr has no ``isatty``.
+
+    A redirected or replaced stream can be ``None`` or lack ``isatty``; auto mode
+    must read that as "not a terminal" and let the fetch run, rather than aborting
+    it at the CLI boundary.
+    """
+    monkeypatch.setattr('sys.stderr', None)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo']) == 0
+    assert seen['progress'] is False

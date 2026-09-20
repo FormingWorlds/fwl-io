@@ -54,19 +54,27 @@ def _resolve_progress(requested: bool | None) -> bool:
     means auto, on when stderr is a terminal. When a bar is wanted but tqdm is
     not installed, return ``False`` so the download still runs without one. The
     note naming the fix prints only when ``--progress`` was asked for explicitly,
-    so an auto-mode fetch on a terminal degrades without a message.
+    so an auto-mode fetch on a terminal degrades without a message. Auto mode
+    treats a missing, non-callable, or raising ``stderr.isatty`` as "not a
+    terminal" so resolving the default never aborts the fetch.
     """
-    on = sys.stderr.isatty() if requested is None else requested
+    if requested is None:
+        isatty = getattr(sys.stderr, 'isatty', None)
+        try:
+            on = bool(isatty()) if callable(isatty) else False
+        except (ValueError, OSError):
+            on = False
+    else:
+        on = requested
     if not on:
         return False
     try:
         import tqdm  # noqa: F401
     except ImportError:
         if requested:
-            print(
-                'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it',
-                file=sys.stderr,
-            )
+            from fwl_io.manifest import _TQDM_HINT
+
+            print(_TQDM_HINT, file=sys.stderr)
         return False
     return True
 

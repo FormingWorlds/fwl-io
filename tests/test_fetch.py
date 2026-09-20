@@ -1133,6 +1133,29 @@ def test_downloader_carries_progress_flag(tmp_path, monkeypatch):
     assert off._downloader(f'doi:{ZENODO}/').progressbar is False
 
 
+def test_downloader_drops_progress_when_tqdm_absent(tmp_path, monkeypatch):
+    """A fetch with ``progress=True`` builds a bar-less downloader when tqdm is gone.
+
+    pooch's HTTP downloader raises at construction when ``progressbar=True`` and
+    tqdm is not importable, which would abort a download over a cosmetic bar.
+    With tqdm removed through pooch's module binding, both mirror kinds must
+    still build, with ``progressbar`` forced off.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', None)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
 def test_real_server_503_then_200_is_retried_and_served(tmp_path, monkeypatch):
     """A mirror answering 503 once, then 200, is retried through the real stack.
 
