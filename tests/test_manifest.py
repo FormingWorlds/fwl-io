@@ -410,10 +410,16 @@ def test_shared_manifest_ships_and_parses_empty():
     assert datasets == []
 
 
+class _FakeDist:
+    def __init__(self, name):
+        self.name = name
+
+
 class _FakeEntryPoint:
-    def __init__(self, name, target):
+    def __init__(self, name, target, dist=None):
         self.name = name
         self._target = target
+        self.dist = _FakeDist(dist) if dist else None
 
     def load(self):
         return self._target
@@ -532,6 +538,105 @@ def test_duplicate_entry_point_name_is_rejected(tmp_path, monkeypatch):
     message = str(excinfo.value)
     assert 'manifest' in message
     assert 'Uninstall or pin' in message
+
+
+def test_duplicate_entry_point_name_names_both_packages(tmp_path, monkeypatch):
+    """When the distributions are known, the error names both colliding packages."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    # A reader must learn which two packages to reconcile, not only that a name
+    # repeats, so both distribution names appear in the message.
+    assert 'mors-data' in message, 'the error must name the first package'
+    assert 'proteus-data' in message, 'the error must name the second package'
+
+
+def test_duplicate_name_message_omits_the_entry_point_name(tmp_path, monkeypatch):
+    """When one distribution is unknown, its fallback label is the entry-point
+    name, and that name must not leak into the package list as a fake package."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+        ),  # dist unknown, so its label falls back to 'manifest'
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    assert 'proteus-data' in message
+    # The known package is named once; the fallback label is not repeated as
+    # though 'manifest' were a second package.
+    assert 'from manifest' not in message
+    assert message.count('proteus-data') == 1
+
+
+def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch):
+    """A broken provider that shares a name must not hide a working one's data."""
+    good = _provider_manifest(
+        tmp_path, 'good', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+    )
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    eps = [
+        _FakeEntryPoint('manifest', broken),
+        _FakeEntryPoint('manifest', lambda: good),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    # The broken namesake is skipped, not raised on, so the working one survives.
+    found = discover_manifests()
+    assert set(found) == {'manifest'}
+    assert [ds.key for ds in found['manifest']] == ['star.tracks.baraffe']
+
+
+def test_three_providers_claiming_one_location_are_all_named(tmp_path, monkeypatch):
+    """A three-way location collision names every colliding provider, not just two."""
+    shared = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', shared)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', shared)),
+        _FakeEntryPoint('package-c', lambda: _provider_manifest(tmp_path, 'c', shared)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    assert 'package-a' in message
+    assert 'package-b' in message
+    assert 'package-c' in message
+    assert 'interior_lookup_tables/demo_eos' in message
 
 
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):

@@ -108,14 +108,17 @@ class ManifestSchemaError(ValueError):
 
 
 class ManifestConflictError(ValueError):
-    """Two installed manifests declare datasets that resolve to one directory.
+    """Two installed manifests cannot be told apart at discovery.
 
-    Raised at discovery when providers from different packages declare keys
-    that map to the same location below the data root. A single unreadable
-    manifest is skipped so the others still serve their data, but a conflict
-    has no safe resolution: fetching either provider's dataset would overwrite
-    the other's, so discovery fails and names every provider and key involved.
-    Subclasses ValueError.
+    Raised in two cases. The first is a location conflict: providers from
+    different packages declare keys that map to the same directory below the
+    data root, so fetching either provider's dataset would overwrite the
+    other's. The second is a duplicate entry point: two installed packages
+    register the same ``fwl_io.manifests`` entry-point name, so their datasets
+    cannot be attributed to a package. Neither case has a safe resolution, so
+    discovery fails and names every provider, key, or package involved. A
+    single unreadable manifest is skipped instead, so the others still serve
+    their data. Subclasses ValueError.
     """
 
 
@@ -469,21 +472,26 @@ def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
     for ep in entry_points(group='fwl_io.manifests'):
         dist = getattr(ep, 'dist', None)
         label = getattr(dist, 'name', None) or ep.name
+        try:
+            manifest_path = ep.load()()
+            datasets = load_manifest(manifest_path)
+        except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
+            errors[ep.name] = str(exc)
+            log.warning('skipping manifest provider %r: %s', ep.name, exc)
+            continue
         if ep.name in seen:
-            prior = seen[ep.name]
-            who = f' (from {prior} and {label})' if prior != ep.name or label != ep.name else ''
+            # Only a second successful load would overwrite the first in `found`,
+            # so the duplicate-name check belongs here, not before load: a broken
+            # provider that shares a name must not block a working one.
+            names = sorted({seen[ep.name], label} - {ep.name})
+            who = f' (from {" and ".join(names)})' if names else ''
             raise ManifestConflictError(
                 f'two installed packages register the {ep.name!r} manifest entry point'
                 f'{who}; fwl-io cannot tell their datasets apart. Uninstall or pin one '
                 f'so a single package registers {ep.name!r}.'
             )
         seen[ep.name] = label
-        try:
-            manifest_path = ep.load()()
-            found[ep.name] = load_manifest(manifest_path)
-        except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
-            errors[ep.name] = str(exc)
-            log.warning('skipping manifest provider %r: %s', ep.name, exc)
+        found[ep.name] = datasets
     _reject_conflicting_datasets(found)
     return found, errors
 
