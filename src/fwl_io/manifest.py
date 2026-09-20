@@ -445,7 +445,9 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     return found
 
 
-def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list[Path]]:
+def fetch_for(
+    model: str, data_root: str | Path | None = None, progress: bool = False
+) -> dict[str, list[Path]]:
     """Fetch every dataset a given model requires; return paths per dataset.
 
     All matching datasets are attempted; failures are collected and raised
@@ -464,9 +466,20 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
         Model name matched (case-insensitively) against ``required_by``.
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
+    progress : bool
+        Show a per-file download progress bar (requires tqdm).
     """
     from fwl_io.fetch import create_fetcher
 
+    if progress:
+        # Never fail a fetch over a cosmetic bar: drop it when tqdm is absent.
+        try:
+            import tqdm  # noqa: F401
+        except ImportError:
+            log.warning(
+                'progress bar needs tqdm (pip install fwl-io[progress]); fetching without it'
+            )
+            progress = False
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
@@ -482,6 +495,7 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
                     dataverse=ds.dataverse,
                     registry=ds.registry(),
                     data_root=data_root,
+                    progress=progress,
                     extract=ds.extract,
                 )
                 fetched[ds.key] = fetcher.fetch_all()

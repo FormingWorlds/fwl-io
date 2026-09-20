@@ -1,7 +1,9 @@
 import io
 import json
 import pathlib
+import sys
 import tarfile
+import types
 
 import pooch
 import pytest
@@ -895,3 +897,51 @@ def test_older_schema_refusal_names_both_numbers(tmp_path, monkeypatch):
     # Discrimination: at the reader's own schema the same file loads, so the
     # refusal is the number's doing.
     assert load_manifest(_write(tmp_path, f'manifest_schema = 3\n{DEMO}'))[0].key == 'demo'
+
+
+def _fetch_for_progress_probe(tmp_path, monkeypatch):
+    """Wire fetch_for onto a fake create_fetcher and return the seen-progress dict."""
+    _, ds = _seed_versioned_dataset(
+        tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
+    )
+    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [ds]}, {}))
+
+    seen = {}
+
+    def fake_create_fetcher(**kwargs):
+        seen['progress'] = kwargs.get('progress')
+
+        class _Fetcher:
+            def fetch_all(self):
+                return [tmp_path / 'a.dat']
+
+        return _Fetcher()
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', fake_create_fetcher)
+    return seen
+
+
+def test_fetch_for_forwards_progress_to_create_fetcher(tmp_path, monkeypatch):
+    """The progress flag reaches create_fetcher, the single point that wires the bar."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    # tqdm is an opt-in extra absent from the default CI install, so force it
+    # present here: this test is about forwarding, not the degrade path below.
+    monkeypatch.setitem(sys.modules, 'tqdm', types.ModuleType('tqdm'))
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+    assert seen['progress'] is True
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=False)
+    assert seen['progress'] is False
+
+
+def test_fetch_for_soft_degrades_without_tqdm(tmp_path, monkeypatch, caplog):
+    """A library caller asking for a bar without tqdm still fetches, bar off."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setitem(sys.modules, 'tqdm', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text

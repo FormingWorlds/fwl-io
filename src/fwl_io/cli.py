@@ -47,10 +47,33 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def _resolve_progress(requested: bool | None) -> bool:
+    """Resolve the fetch progress-bar setting, degrading if tqdm is absent.
+
+    ``requested`` is the parsed ``--progress`` / ``--no-progress`` flag; ``None``
+    means auto, on when stderr is a terminal. When a bar is wanted but tqdm is
+    not installed, print a one-line note naming the fix and return ``False`` so
+    the download still runs without a bar.
+    """
+    on = sys.stderr.isatty() if requested is None else requested
+    if not on:
+        return False
+    try:
+        import tqdm  # noqa: F401
+    except ImportError:
+        print(
+            'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it',
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetch_for
 
-    fetched = fetch_for(args.model, data_root=args.data_root)
+    progress = _resolve_progress(args.progress)
+    fetched = fetch_for(args.model, data_root=args.data_root, progress=progress)
     if not fetched:
         print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
         return 1
@@ -144,6 +167,12 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch = sub.add_parser('fetch', help='fetch every dataset a model requires')
     p_fetch.add_argument('model', help='model name matched against required_by')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_fetch.add_argument(
+        '--progress',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='show a download progress bar (default: on when stderr is a terminal); needs tqdm',
+    )
     p_fetch.set_defaults(func=_cmd_fetch)
 
     p_check = sub.add_parser(

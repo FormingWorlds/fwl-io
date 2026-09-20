@@ -1,10 +1,37 @@
+import io
 import json
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
 from fwl_io.cli import main
 
 pytestmark = pytest.mark.integration
+
+
+class _FakeStderr(io.StringIO):
+    """A stderr stand-in with a settable ``isatty`` for progress auto-detect."""
+
+    def __init__(self, tty):
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+
+def _capture_fetch_progress(monkeypatch):
+    """Replace ``fetch_for`` with a stub that records the ``progress`` it got."""
+    seen = {}
+
+    def fake_fetch_for(model, data_root=None, progress=False):
+        seen['progress'] = progress
+        return {'g.demo': [Path('a')]}
+
+    monkeypatch.setattr('fwl_io.manifest.fetch_for', fake_fetch_for)
+    return seen
 
 
 def _serve_record(root, recid, payload):
@@ -420,3 +447,36 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
     assert code == 0
     assert 'MANIFEST UNREADABLE' not in out
     assert 'absent' in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'flags, tty, expected',
+    [
+        (['--no-progress'], True, False),
+        (['--progress'], False, True),
+        ([], True, True),
+        ([], False, False),
+    ],
+)
+def test_fetch_progress_resolution(flags, tty, expected, monkeypatch):
+    """An explicit flag wins; absent it, the bar follows whether stderr is a TTY."""
+    monkeypatch.setitem(sys.modules, 'tqdm', types.ModuleType('tqdm'))
+    monkeypatch.setattr('sys.stderr', _FakeStderr(tty))
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo', *flags]) == 0
+    assert seen['progress'] is expected
+
+
+@pytest.mark.unit
+def test_fetch_progress_soft_degrades_without_tqdm(monkeypatch):
+    """With tqdm absent, the bar is dropped with a note and the fetch still runs."""
+    monkeypatch.setitem(sys.modules, 'tqdm', None)
+    fake_err = _FakeStderr(tty=True)
+    monkeypatch.setattr('sys.stderr', fake_err)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo', '--progress']) == 0
+    assert seen['progress'] is False
+    assert 'pip install fwl-io[progress]' in fake_err.getvalue()
