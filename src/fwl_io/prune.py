@@ -240,32 +240,47 @@ def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str
     return referenced, known_subdirs, dict(manifest_errors), resolve_error
 
 
-def _scan(root: Path) -> tuple[list[Path], str | None]:
+def _scan(root: Path, known_subdirs: set[str]) -> tuple[list[Path], str | None]:
     """Find every ``r<record-id>`` directory under ``root``, symlinks excluded.
 
     A reserved fwl-io directory and its contents are never entered, a symlinked
     directory is never followed or reported, and a version directory's own
     contents are not descended into: a name inside a dataset is not a version
     directory of the tree.
+
+    A directory whose name matches the version shape but whose path is itself a
+    declared dataset subdir is a subdir segment, not a version directory: a
+    dataset key may end in a segment like ``r1000``. Such a directory is
+    descended into so the real version directory below it is found, rather than
+    matched and skipped, which would hide the referenced version underneath.
+
+    A directory the walk cannot read (a permission error on a shared tree) is
+    recorded as a scan error so the caller refuses to delete, rather than
+    reporting a partial tree as clean.
     """
     found: list[Path] = []
-    try:
-        for dirpath, dirnames, _ in os.walk(root, followlinks=False):
-            keep: list[str] = []
-            for name in dirnames:
-                child = Path(dirpath) / name
-                if child.is_symlink():
-                    continue
-                if name in _RESERVED_DIRNAMES:
-                    continue
-                if _VERSION_DIR_PATTERN.fullmatch(name):
-                    found.append(child)
-                    continue
-                keep.append(name)
-            dirnames[:] = keep
-    except OSError as exc:
-        return found, str(exc)
-    return found, None
+    scan_error: str | None = None
+
+    def _capture(exc: OSError) -> None:
+        nonlocal scan_error
+        if scan_error is None:
+            scan_error = str(exc)
+
+    for dirpath, dirnames, _ in os.walk(root, followlinks=False, onerror=_capture):
+        keep: list[str] = []
+        for name in dirnames:
+            child = Path(dirpath) / name
+            if child.is_symlink():
+                continue
+            if name in _RESERVED_DIRNAMES:
+                continue
+            is_declared_subdir = child.relative_to(root).as_posix() in known_subdirs
+            if _VERSION_DIR_PATTERN.fullmatch(name) and not is_declared_subdir:
+                found.append(child)
+                continue
+            keep.append(name)
+        dirnames[:] = keep
+    return found, scan_error
 
 
 def _classify(
@@ -293,7 +308,7 @@ def _build(
     """
     referenced, known_subdirs, manifest_errors, resolve_error = _reference_set(root)
     blocked = bool(manifest_errors) or resolve_error is not None
-    version_dirs, scan_error = _scan(root)
+    version_dirs, scan_error = _scan(root, known_subdirs)
     candidates: list[PruneCandidate] = []
     for path in version_dirs:
         rel = path.relative_to(root)
@@ -332,7 +347,9 @@ def _remove_one(candidate: PruneCandidate, root: Path, referenced: set[Path]) ->
     The containment, symlink, and not-referenced checks are repeated here rather
     than trusted from the plan, so the guarantee that this only ever removes an
     unreferenced directory inside the data root belongs to the code that does
-    the removing.
+    the removing. The not-referenced check covers both the candidate itself and
+    any referenced directory nested below it, so a removal never takes live data
+    with it.
     """
     path = candidate.path
     if path.is_symlink():
@@ -341,6 +358,10 @@ def _remove_one(candidate: PruneCandidate, root: Path, referenced: set[Path]) ->
         return replace(candidate, state=REFUSED, detail=f'resolves outside {root}; not removed')
     if path.resolve() in referenced:
         return replace(candidate, state=REFUSED, detail='is a referenced version; not removed')
+    if any(_inside(ref, path) for ref in referenced):
+        return replace(
+            candidate, state=REFUSED, detail='contains a referenced version; not removed'
+        )
     try:
         shutil.rmtree(path)
     except OSError as exc:
@@ -405,4 +426,53 @@ def prune_versions(
         return PruneReport(tuple(candidates), manifest_errors, resolve_error, scan_error)
     targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
     results = [_remove_one(c, root, referenced) if c.state in targets else c for c in candidates]
+    return PruneReport(tuple(results), manifest_errors, resolve_error, scan_error)
+
+
+def apply_prune(
+    report: PruneReport,
+    data_root: str | Path | None = None,
+    *,
+    include_orphans: bool = False,
+) -> PruneReport:
+    """Delete exactly the version directories a prior plan reported.
+
+    The plan the caller showed and confirmed is the delete set. This removes the
+    superseded directories in ``report``, and the orphaned ones when
+    ``include_orphans`` is set, rather than rescanning and acting on a set the
+    caller never saw. Every removal still re-checks its guards against a freshly
+    computed reference set, so a directory a manifest started to use between plan
+    and apply is kept.
+
+    Deletion is refused outright when the current reference set is incomplete or
+    the tree cannot be fully read, which matches the failure-closed posture of
+    the plan.
+
+    Parameters
+    ----------
+    report : PruneReport
+        The plan to act on, as returned by :func:`plan_prune`.
+    data_root : str | Path | None
+        Override for the data root; defaults to the resolved FWL_DATA tree. Must
+        be the same root the plan was built against.
+    include_orphans : bool
+        Also remove the orphaned version directories in the plan.
+
+    Returns
+    -------
+    PruneReport
+        The plan, with each removed directory's entry rewritten to say so, and
+        the reference-set error signals recomputed at apply time.
+    """
+    root = resolve_data_root(data_root)
+    referenced, known_subdirs, manifest_errors, resolve_error = _reference_set(root)
+    _version_dirs, scan_error = _scan(root, known_subdirs)
+    blocked = bool(manifest_errors) or resolve_error is not None
+    if blocked or scan_error is not None:
+        # The tree changed under us into a state the plan could not delete from.
+        return PruneReport(report.candidates, manifest_errors, resolve_error, scan_error)
+    targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
+    results = [
+        _remove_one(c, root, referenced) if c.state in targets else c for c in report.candidates
+    ]
     return PruneReport(tuple(results), manifest_errors, resolve_error, scan_error)

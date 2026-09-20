@@ -14,6 +14,8 @@ manifest loader runs against it.
 from __future__ import annotations
 
 import builtins
+import os
+import stat
 
 import pytest
 
@@ -26,6 +28,7 @@ from fwl_io.prune import (
     SUPERSEDED,
     PruneCandidate,
     _remove_one,
+    apply_prune,
     plan_prune,
     prune_versions,
 )
@@ -384,3 +387,177 @@ def test_the_cli_yes_flag_deletes_the_superseded_pin_without_a_prompt(
     assert not dirs['superseded'].exists(), 'the superseded pin is removed'
     assert dirs['referenced'].is_dir(), 'the current pin is kept'
     assert dirs['orphaned'].is_dir(), 'an orphan is not removed without the opt-in'
+
+
+# A dataset whose key's last segment matches the version shape (a spectral
+# resolving power like r1000), so the subdir contains a directory that looks
+# like a version dir but is a subdir segment, with the real version dir below.
+_MASK_KEY = 'opacity.petitradtrans.r1000'
+_MASK_SUBDIR = 'opacity/petitradtrans/r1000'
+_MASK_RECID = '12345678'
+
+
+def _write_masking_manifest(tmp_path):
+    """Write a manifest whose subdir ends in a version-shaped segment."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[{_MASK_KEY}]\nzenodo = "10.5281/zenodo.{_MASK_RECID}"\nrequired_by = ["mors"]\n'
+    )
+    return manifest
+
+
+def test_a_subdir_named_like_a_version_dir_does_not_mask_the_referenced_version(
+    tmp_path, monkeypatch
+):
+    """A dataset subdir ending in r<digits> is descended into, not matched as a version.
+
+    A manifest key may end in a segment like ``r1000``. The referenced version
+    dir sits below that subdir, so the subdir itself must be classified as part
+    of the dataset and descended into, not matched as a version directory whose
+    deletion would take the live pin nested inside it.
+    """
+    _install_manifest(monkeypatch, _write_masking_manifest(tmp_path))
+    root = tmp_path / 'data'
+    version = root / _MASK_SUBDIR / f'r{_MASK_RECID}'
+    version.mkdir(parents=True)
+    (version / 'opacities.h5').write_bytes(b'live referenced data\n')
+
+    report = plan_prune(data_root=root)
+    states = _states(report)
+
+    assert states.get(f'{_MASK_SUBDIR}/r{_MASK_RECID}') == REFERENCED
+    assert _MASK_SUBDIR not in states, 'the subdir segment is not itself a version dir'
+
+
+def test_delete_with_orphans_never_removes_the_masked_referenced_version(tmp_path, monkeypatch):
+    """A --include-orphans prune leaves a referenced version under an r-named subdir intact.
+
+    This is the deletion side of the masking case: even under the loudest
+    opt-in, the live pin nested below a version-shaped subdir survives.
+    """
+    _install_manifest(monkeypatch, _write_masking_manifest(tmp_path))
+    root = tmp_path / 'data'
+    version = root / _MASK_SUBDIR / f'r{_MASK_RECID}'
+    version.mkdir(parents=True)
+    live = version / 'opacities.h5'
+    live.write_bytes(b'live referenced data\n')
+
+    report = prune_versions(data_root=root, delete=True, include_orphans=True)
+
+    assert live.is_file(), 'the referenced version under an r-named subdir must survive'
+    assert report.removed == (), 'nothing is removed when the only version is referenced'
+
+
+def test_remove_one_refuses_a_candidate_that_contains_a_referenced_version(tmp_path):
+    """The delete step refuses a directory with a referenced version nested inside it.
+
+    Defence in depth against a misclassified candidate: the not-referenced check
+    covers nested referenced paths, so removing a parent can never take live data.
+    """
+    root = tmp_path / 'data'
+    parent = root / 'opacity' / 'petitradtrans' / 'r1000'
+    referenced = parent / f'r{_MASK_RECID}'
+    referenced.mkdir(parents=True)
+    (referenced / 'opacities.h5').write_bytes(b'live\n')
+    candidate = PruneCandidate(path=parent, rel='opacity/petitradtrans/r1000', state=ORPHANED)
+
+    result = _remove_one(candidate, root, referenced={referenced.resolve()})
+
+    assert result.state == REFUSED
+    assert 'contains a referenced version' in result.detail
+    assert referenced.is_dir(), 'the nested referenced version is untouched'
+
+
+def _skip_if_root():
+    """Skip a test that relies on an unreadable directory when running as root."""
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        pytest.skip('an unreadable directory does not stop root')
+
+
+def test_an_unreadable_subtree_is_reported_as_a_scan_error_not_a_clean_run(tmp_path, monkeypatch):
+    """A directory the scan cannot read makes the plan report a scan error, not ok.
+
+    A permission error on a shared tree must not read as a clean tree with
+    nothing to remove, so the scan records it and the report is not ok.
+    """
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    unreadable = root / 'atmos' / 'locked'
+    (unreadable / 'r99999999').mkdir(parents=True)
+    os.chmod(unreadable, 0)
+    try:
+        report = plan_prune(data_root=root)
+        assert report.scan_error is not None, 'an unreadable subtree is a scan error'
+        assert not report.ok, 'a partial scan is not a clean run'
+        assert 'DATA ROOT UNREADABLE' in report.summary()
+    finally:
+        os.chmod(unreadable, stat.S_IRWXU)
+
+
+def test_the_cli_refuses_to_delete_when_the_tree_cannot_be_fully_read(
+    tmp_path, monkeypatch, capsys
+):
+    """A scan error stops the delete path, so a partial view never drives a prune.
+
+    If part of the tree is unreadable the reference-to-directory match is
+    unreliable, so the command must refuse rather than delete off a partial scan.
+    """
+    _skip_if_root()
+    from fwl_io.cli import main
+
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    unreadable = root / 'atmos' / 'locked'
+    (unreadable / 'r99999999').mkdir(parents=True)
+    os.chmod(unreadable, 0)
+    try:
+        exit_code = main(['prune', '--data-root', str(root), '--delete', '--yes'])
+        err = capsys.readouterr().err
+        assert exit_code == 1, 'a scan error is a non-zero, non-deleting exit'
+        assert 'cannot be fully read' in err
+        assert dirs['superseded'].is_dir(), 'nothing is deleted off a partial scan'
+    finally:
+        os.chmod(unreadable, stat.S_IRWXU)
+
+
+def test_apply_prune_removes_exactly_the_planned_superseded_set(tmp_path, monkeypatch):
+    """apply_prune deletes the plan it was given: the shown superseded pin, no more.
+
+    The apply step acts on the confirmed plan rather than a fresh scan, so the
+    set deleted is the set the user saw.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    plan = plan_prune(data_root=root)
+    result = apply_prune(plan, data_root=root)
+
+    assert not dirs['superseded'].exists(), 'the planned superseded pin is removed'
+    assert dirs['referenced'].is_dir(), 'the current pin is kept'
+    assert dirs['orphaned'].is_dir(), 'an orphan is not a default target'
+    assert {c.rel for c in result.removed} == {f'{SUBDIR}/r{OLD_RECID}'}
+
+
+def test_apply_prune_ignores_a_version_dir_that_appeared_after_the_plan(tmp_path, monkeypatch):
+    """A version dir created after the plan is not deleted, because it was never shown.
+
+    apply_prune acts on the plan's candidate set, so a directory the user never
+    saw and never confirmed cannot be removed by the apply step.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    plan = plan_prune(data_root=root)
+    late = root / SUBDIR / 'r14000000'
+    late.mkdir(parents=True)
+    (late / 'data.dat').write_bytes(b'appeared after the plan\n')
+
+    apply_prune(plan, data_root=root)
+
+    assert not dirs['superseded'].exists(), 'the planned superseded pin is still removed'
+    assert late.is_dir(), 'a version dir not in the plan is never deleted by apply'

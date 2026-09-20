@@ -87,8 +87,8 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         SHARED_TREE_WARNING,
         SUPERSEDED,
         _human_bytes,
+        apply_prune,
         plan_prune,
-        prune_versions,
     )
 
     plan = plan_prune(data_root=args.data_root)
@@ -99,6 +99,12 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     if plan.blocked:
         print(
             'fwl-io: not deleting anything while the reference set is incomplete', file=sys.stderr
+        )
+        return 1
+    if plan.scan_error is not None:
+        print(
+            'fwl-io: not deleting anything while the data root cannot be fully read',
+            file=sys.stderr,
         )
         return 1
     targets = list(plan.superseded) + (list(plan.orphaned) if args.include_orphans else [])
@@ -119,9 +125,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         if reply.strip() != 'yes':
             print('aborted; nothing was deleted')
             return 1
-    result = prune_versions(
-        data_root=args.data_root, delete=True, include_orphans=args.include_orphans
-    )
+    result = apply_prune(plan, data_root=args.data_root, include_orphans=args.include_orphans)
     print(result.summary())
     return 0 if result.ok else 1
 
