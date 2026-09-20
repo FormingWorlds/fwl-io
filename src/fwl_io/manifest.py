@@ -66,6 +66,7 @@ log = logging.getLogger('fwl.' + __name__)
 # Re-exported so existing importers keep working; the parser lives in doi.
 __all__ = [
     'Dataset',
+    'ManifestConflictError',
     'ManifestSchemaError',
     'ZENODO_DOI_PATTERN',
     'discover_manifests',
@@ -103,6 +104,18 @@ class ManifestSchemaError(ValueError):
     something it no longer understands, or a field it reads only inside a
     dataset table. Subclasses ValueError, so callers that already handle a
     malformed manifest keep working.
+    """
+
+
+class ManifestConflictError(ValueError):
+    """Two installed manifests declare datasets that resolve to one directory.
+
+    Raised at discovery when providers from different packages declare keys
+    that map to the same location below the data root. A single unreadable
+    manifest is skipped so the others still serve their data, but a conflict
+    has no safe resolution: fetching either provider's dataset would overwrite
+    the other's, so discovery fails and names every provider and key involved.
+    Subclasses ValueError.
     """
 
 
@@ -419,6 +432,35 @@ def shared_manifest_path() -> Path:
     return Path(__file__).parent / 'data' / 'shared_manifest.toml'
 
 
+def _reject_conflicting_datasets(found: dict[str, list[Dataset]]) -> None:
+    """Fail when two providers declare datasets that resolve to one directory.
+
+    Locations are compared case-folded, the rule a single manifest already
+    applies, so ``Star.Tracks`` from one package conflicts with ``star.tracks``
+    from another. A collision within one manifest is caught earlier by
+    ``load_manifest``; this is the cross-package half, visible only once every
+    installed manifest is loaded.
+    """
+    claims: dict[str, list[tuple[str, str]]] = {}
+    for provider, datasets in found.items():
+        for ds in datasets:
+            claims.setdefault(ds.subdir.lower(), []).append((provider, ds.key))
+    conflicts = {loc: owners for loc, owners in claims.items() if len(owners) > 1}
+    if not conflicts:
+        return
+    lines = ['manifests from different packages claim the same dataset location:']
+    for loc in sorted(conflicts):
+        owners = ', '.join(
+            f'{provider!r} declares {key!r}' for provider, key in sorted(conflicts[loc])
+        )
+        lines.append(f'  {loc}: {owners}')
+    lines.append(
+        'Each location must have one provider. Uninstall or pin all but one of the '
+        'packages named above so a single manifest declares each location.'
+    )
+    raise ManifestConflictError('\n'.join(lines))
+
+
 def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
     """Load every installed manifest; return (datasets per provider, errors)."""
     found: dict[str, list[Dataset]] = {}
@@ -430,6 +472,7 @@ def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
         except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
             errors[ep.name] = str(exc)
             log.warning('skipping manifest provider %r: %s', ep.name, exc)
+    _reject_conflicting_datasets(found)
     return found, errors
 
 

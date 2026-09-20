@@ -10,6 +10,7 @@ from fwl_io import manifest
 from fwl_io.fetch import create_fetcher
 from fwl_io.manifest import (
     Dataset,
+    ManifestConflictError,
     ManifestSchemaError,
     discover_manifests,
     fetch_for,
@@ -434,6 +435,78 @@ def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
     found = discover_manifests()
     assert set(found) == {'good-model'}
     assert len(found['good-model']) == 2
+
+
+def _provider_manifest(tmp_path, name, text):
+    """Write one provider's manifest under its own directory below tmp_path."""
+    path = tmp_path / name / 'manifest.toml'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_two_providers_claiming_one_location_are_rejected(tmp_path, monkeypatch):
+    """Two packages that declare the same dataset key fail discovery, named."""
+    shared = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', shared)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', shared)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    # Every colliding provider and the contested location must be named, so a
+    # reader knows which packages to reconcile without further digging.
+    assert 'package-a' in message, 'the error must name the first colliding provider'
+    assert 'package-b' in message, 'the error must name the second colliding provider'
+    assert 'interior_lookup_tables/demo_eos' in message, 'the error must name the location'
+    # And it must say what to do, not only that a conflict exists.
+    assert 'Uninstall or pin' in message, 'the error must give actionable remediation'
+
+
+def test_case_only_difference_across_providers_conflicts(tmp_path, monkeypatch):
+    """Keys differing only in case resolve to one directory and still conflict."""
+    lower = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+    upper = '[Interior_Lookup_Tables.Demo_EOS]\nzenodo = "10.5281/zenodo.7654321"\n'
+    eps = [
+        _FakeEntryPoint('lower-pkg', lambda: _provider_manifest(tmp_path, 'a', lower)),
+        _FakeEntryPoint('upper-pkg', lambda: _provider_manifest(tmp_path, 'b', upper)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(ManifestConflictError) as excinfo:
+        discover_manifests()
+    message = str(excinfo.value)
+    # Without the case fold these two locations would look distinct and pass;
+    # naming both providers proves the fold is what caught them.
+    assert 'lower-pkg' in message
+    assert 'upper-pkg' in message
+
+
+def test_distinct_locations_across_providers_load_without_conflict(tmp_path, monkeypatch):
+    """Two providers with different locations both survive discovery (no false positive)."""
+    eps = [
+        _FakeEntryPoint(
+            'mors',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+        ),
+        _FakeEntryPoint(
+            'proteus',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found = discover_manifests()
+    assert set(found) == {'mors', 'proteus'}
+    assert [ds.key for ds in found['mors']] == ['star.tracks.baraffe']
+    assert [ds.key for ds in found['proteus']] == ['interior.eos.demo']
 
 
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
