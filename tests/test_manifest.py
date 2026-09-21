@@ -490,6 +490,20 @@ def test_shared_manifest_datasets_sharing_a_record_load_apart():
     assert by_key['interior.eos.chabrier_2021_hhe'].extract == 'tar'
 
 
+def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
+    """Every legacy-layout key names a shared dataset or one a model manifest declares."""
+    from fwl_io.relocate import _legacy_locations
+
+    locations, error = _legacy_locations()
+    assert error is None
+    declared = {ds.key for ds in load_manifest(shared_manifest_path())}
+    assert set(locations) - declared == {
+        'observe.exoplanet_reference',
+        'observe.mass_radius.zeng_2019',
+        'star.tracks.baraffe_2015',
+    }
+
+
 class _FakeEntryPoint:
     def __init__(self, name, target):
         self.name = name

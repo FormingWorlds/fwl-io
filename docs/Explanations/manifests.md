@@ -101,7 +101,7 @@ FWL_DATA/
 
 The tree holds **immutable fetched reference data only**: anything generated at runtime (derived tables, interpolation caches, solver caches) belongs in run output or cache directories, never below `FWL_DATA`. This keeps a shared read-only cache trustworthy as a whole.
 
-Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. It acts on the datasets listed in the package's `legacy_layout.toml`, which lists the legacy directory of each dataset whose consumers have migrated. A tree holding a family not yet declared is left alone until its dataset is declared. The mapping from the legacy locations:
+Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. It acts on the datasets listed in the package's `legacy_layout.toml`; a tree holding a family that is not listed there is left alone. The mapping from the legacy locations:
 
 | Legacy location (live today) | Target location |
 |---|---|
@@ -115,3 +115,5 @@ Models adopt this layout when they migrate to fwl-io; legacy directories from th
 | `stellar_spectra/{solar,PHOENIX,MUSCLES,Named}` | `star/spectra/{solar,phoenix,muscles,named}/r<recid>` |
 | `mass_radius/Zeng2019` | `observe/mass_radius/zeng_2019/r<recid>` |
 | `planet_reference/Exoplanets` | `observe/exoplanet_reference/r<recid>` |
+
+The Chabrier archive unpacks with its own top-level directory, so its files sit one level below the version directory, in `interior/eos/chabrier_2021_hhe/r<recid>/EOS_Chabrier2021_HHe/`. The archive also holds macOS `._*` metadata files and a `.DS_Store`, which are extracted with it. `fwl-io relocate` reports the Chabrier dataset as unresolvable, since it is an archive dataset.
