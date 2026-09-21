@@ -11,6 +11,7 @@ zenodo = "10.5281/zenodo.1234567"                        # required, version DOI
 dataverse = "10.34894/ABCDEF"                            # optional mirror DOI
 required_by = ["aragog", "zalmoxis", "spider"]           # models that need it
 extract = "tar"                                          # optional, unpack a single archive
+files = ["eos.h5", "grid/table.dat"]                     # optional, only these files of the record
 ```
 
 The dotted table key is the dataset location below `FWL_DATA`: the table above resolves into `interior/eos/wolf_bower_2018`, and its files land in the version directory `interior/eos/wolf_bower_2018/r1234567`. The key is the only source of that location, so the declared name and the directory on disk cannot drift apart.
@@ -23,6 +24,7 @@ Validation at load time:
 - `dataverse`, when present, must be a DOI.
 - `required_by`, when present, must be a list of model names.
 - `extract`, when present, must be `"tar"` or `"zip"`.
+- `files`, when present, must be a non-empty list of unique file names, each following the file-name rules of [Registries](#registries). It cannot be combined with `extract`. See [Partial datasets](#partial-datasets).
 - A dataset table must not contain sub-tables, and arrays of tables are rejected; ambiguous structures fail loudly instead of being silently dropped.
 - A dataset table declares only the fields above, and a grouping level declares none: anything else raises `ManifestSchemaError`, naming the field and the manifest schema this fwl-io implements. A model ships its manifest with its own code, so a manifest can be newer than the installed fwl-io; ignoring an unknown field silently would leave the manifest asking for something it never gets, and a `required_by` written one level above its dataset would leave the dataset claiming no model needs it. The message names the action that fits the case: move a dataset field that sits too high, delete a field this fwl-io no longer takes, and for a name it does not know at all, check the spelling or upgrade. Two things are outside the check. A scalar at the manifest root is reserved for a manifest's own settings and is ignored, unless it names a dataset field or `subdir`. And a table is recognised as a dataset by its `zenodo` key, so a misspelt `zenodo` is reported as a table with no pin rather than as an unknown field.
 - A manifest may declare the schema it was written against with a root `manifest_schema = <n>`. It is optional, and a manifest that declares one is held to it: only the schema the installed fwl-io implements is accepted. A higher number means the reader is too old, so the error says to upgrade. A lower one means the manifest was written for a schema that stopped loading when the number rose, so the error names both numbers and points here. Accepting only the implemented number is what sharpens the rest: an unknown field in a manifest that declares its schema is reported as a misspelling alone, with no second reading to weigh. The value must be a whole number of at least 1; `true` is rejected rather than read as 1. A table *named* `manifest_schema` is an ordinary directory level, as with `subdir`, and the key written inside a table is reported as misplaced rather than misspelt.
@@ -43,6 +45,10 @@ A manifest that declares `manifest_schema` is checked against it directly, and o
 ## Archive datasets
 
 A deposit packaged as a single archive sets `extract = "tar"` or `"zip"`. Its registry lists the one archive file and its checksum; the fetcher downloads and verifies the archive, then extracts the members into the dataset directory and discards the archive, so consumers see the extracted tree rather than a tarball. Extraction is staged and the tree is moved into place atomically, so an interrupted fetch never leaves a half-populated dataset, and any member that escapes the directory (an absolute path or a `..` component) or is not a plain file or directory (a symlink, hardlink, or device node) is rejected before anything is written.
+
+## Partial datasets
+
+A deposit that holds more than one dataset needs only part of its record. Setting `files = [...]` restricts the dataset to the listed files: `fwl-io sync` writes a registry with only those entries, so a fetch, a check and a mirror handle those files and nothing else. Without `files`, the dataset is the whole record. `fwl-io sync` fails when a listed name is not in the record, and the registry must list exactly the names in `files`, so an edit to one without the other is reported when the manifest is used.
 
 ## Registries
 

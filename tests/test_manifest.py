@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import pathlib
@@ -378,6 +379,69 @@ def test_unknown_extract_kind_rejected(tmp_path):
     # Discrimination: a supported kind loads and is carried onto the dataset.
     good = '[g.d]\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\n'
     assert load_manifest(_write(tmp_path, good))[0].extract == 'tar'
+
+
+def test_files_filter_loads_onto_the_dataset(tmp_path):
+    """A declared ``files`` list is carried onto the dataset; absent means the whole record."""
+    with_files = '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat", "b.dat"]\n'
+    assert load_manifest(_write(tmp_path, with_files))[0].files == ('a.dat', 'b.dat')
+    without = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, without))[0].files is None
+
+
+@pytest.mark.parametrize(
+    ('files', 'match'),
+    [
+        ('"a.dat"', 'non-empty list'),
+        ('[]', 'non-empty list'),
+        ('[1]', 'non-empty list'),
+        ('["a.dat", "a.dat"]', 'more than once'),
+        ('["../a.dat"]', '"files" entry'),
+        ('["/abs.dat"]', '"files" entry'),
+    ],
+)
+def test_malformed_files_list_rejected(tmp_path, files, match):
+    """A ``files`` value that is not a clean list of plain names fails at load time."""
+    text = f'[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = {files}\n'
+    with pytest.raises(ValueError, match=match):
+        load_manifest(_write(tmp_path, text))
+
+
+def test_files_and_extract_cannot_be_combined(tmp_path):
+    """An archive dataset is one file, so a ``files`` list beside ``extract`` is refused."""
+    text = '[g.d]\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\nfiles = ["a.tar"]\n'
+    with pytest.raises(ValueError, match='cannot be combined'):
+        load_manifest(_write(tmp_path, text))
+
+
+def test_registry_must_match_the_files_list(tmp_path):
+    """A registry naming other files than ``files`` is refused, in either direction."""
+    ds = load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat"]\n'))[
+        0
+    ]
+    ds.registry_path.write_text('a.dat sha256:aa\n')
+    assert ds.registry() == {'a.dat': 'sha256:aa'}
+    ds.registry_path.write_text('a.dat sha256:aa\nb.dat sha256:bb\n')
+    with pytest.raises(ValueError, match=r"in the registry only: \['b.dat'\]"):
+        ds.registry()
+    ds.registry_path.write_text('b.dat sha256:bb\n')
+    with pytest.raises(ValueError, match=r'in "files" only: \[\'a.dat\'\]'):
+        ds.registry()
+
+
+def test_fetch_for_fetches_only_the_listed_files(tmp_path, monkeypatch):
+    """fetch_for on a filtered dataset returns its listed files and not a stray file beside them."""
+    data_root = tmp_path / 'data'
+    version_dir, ds = _seed_versioned_dataset(
+        data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n', 'b.dat': b'BB\n'}, ('mymodel',)
+    )
+    (version_dir / 'extra.dat').write_bytes(b'not in the dataset\n')
+    ds = dataclasses.replace(ds, files=('a.dat', 'b.dat'))
+    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [ds]}, {}))
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+
+    fetched = fetch_for('mymodel', data_root=data_root)
+    assert sorted(p.name for p in fetched[ds.key]) == ['a.dat', 'b.dat']
 
 
 def test_missing_registry_gives_actionable_error(tmp_path):
