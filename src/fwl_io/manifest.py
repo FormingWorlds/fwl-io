@@ -468,6 +468,7 @@ def _drop_duplicate_names(
         if len(claimants) == 1:
             found[name] = claimants[0][2]
             continue
+        claimants = sorted(claimants, key=lambda c: (c[0], c[1]))
         who = '; '.join(f'{label} (target {target})' for label, target, _ in claimants)
         message = (
             f'the {name!r} manifest entry point is registered {len(claimants)} times, '

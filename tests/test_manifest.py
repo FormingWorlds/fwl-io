@@ -709,6 +709,28 @@ def test_one_package_registering_a_name_twice_is_not_called_two_packages(tmp_pat
         assert 'mors_data.a:path' in message and 'mors_data.b:path' in message
 
 
+def test_duplicate_name_message_does_not_depend_on_entry_point_order(tmp_path, monkeypatch):
+    """The claimants are listed in a fixed order, whatever order the environment yields."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda x=x: _provider_manifest(
+                tmp_path, x, f'[interior.eos.demo_{x}]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist=f'pkg-{x}',
+            value=f'pkg_{x}:path',
+        )
+        for x in ('a', 'b', 'c')
+    ]
+    messages = []
+    for ordered in (eps, eps[::-1]):
+        monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group, e=ordered: e)
+        _, errors = manifest._discover()
+        messages.append(sorted(set(errors.values())))
+    assert messages[0] == messages[1]
+    assert len(messages[0]) == 1
+
+
 def test_fetch_for_a_model_that_needs_a_duplicate_name_dataset_fails(tmp_path, monkeypatch):
     """A duplicate entry-point name is a conflict for fetch_for, by the models it served."""
     eps = [

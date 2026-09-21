@@ -449,8 +449,8 @@ def test_list_prints_conflicting_providers_as_failed_without_a_traceback(
     code = main(['list'])
     captured = capsys.readouterr()
     assert code == 1
-    assert '[package-a] FAILED TO LOAD' in captured.err
-    assert '[package-b] FAILED TO LOAD' in captured.err
+    assert '[package-a] NOT USED' in captured.err
+    assert '[package-b] NOT USED' in captured.err
     assert 'interior_lookup_tables/demo_eos' in captured.err
     assert 'Traceback' not in captured.err
     assert captured.out == '', 'neither conflicting provider is listed as loaded'
