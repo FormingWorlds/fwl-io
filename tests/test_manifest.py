@@ -543,16 +543,65 @@ def test_provider_with_one_contested_location_is_dropped_whole(tmp_path, monkeyp
     assert set(errors) == {'package-a', 'package-b'}
 
 
-def test_check_for_an_uninvolved_model_reports_the_conflict(tmp_path, monkeypatch):
-    """A conflict between packages a model never reads must not abort its check."""
+def _stub_check_layer(tmp_path, monkeypatch):
+    """Stub the fetcher and registry so check_for reaches no network or disk state."""
+    from fwl_io.check import DatasetCheck
+
+    monkeypatch.setattr('fwl_io.check.create_fetcher', lambda **kw: object())
+    monkeypatch.setattr(
+        'fwl_io.check.check_dataset',
+        lambda fetcher, key: DatasetCheck(key, key, tmp_path, (), verifiable=True),
+    )
+    monkeypatch.setattr('fwl_io.manifest.Dataset.registry', lambda self: {'a.dat': 'md5:00'})
+
+
+def test_check_for_an_uninvolved_model_ignores_the_conflict(tmp_path, monkeypatch):
+    """A conflict between packages a model never reads does not fail its check."""
     from fwl_io.check import check_for
 
     _colliding_providers(tmp_path, monkeypatch)
+    _stub_check_layer(tmp_path, monkeypatch)
 
-    report = check_for('unrelated_model', data_root=tmp_path / 'data')
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert report.manifest_errors == {}
+    assert set(report.datasets) == {'star.tracks.baraffe'}
+    assert report.ok
+
+
+def test_check_for_a_model_that_needs_a_dropped_dataset_reports_the_conflict(tmp_path, monkeypatch):
+    """A conflict that drops a dataset the model reads fails its check."""
+    from fwl_io.check import check_for
+
+    _colliding_providers(tmp_path, monkeypatch)
+    _stub_check_layer(tmp_path, monkeypatch)
+
+    report = check_for('othermodel', data_root=tmp_path / 'data')
     assert set(report.manifest_errors) == {'package-a', 'package-b'}
     assert 'interior_lookup_tables/demo_eos' in report.manifest_errors['package-a']
-    assert report.datasets == {}, 'no dataset of a dropped provider is reported'
+    assert report.datasets == {}
+    assert not report.ok
+
+
+def test_check_for_reports_a_load_error_unrelated_to_the_model(tmp_path, monkeypatch):
+    """A provider that failed to load may have served the model, so it is always reported."""
+    from fwl_io.check import check_for
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    good = _provider_manifest(
+        tmp_path,
+        'good',
+        '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.9"\nrequired_by = ["mors"]\n',
+    )
+    eps = [_FakeEntryPoint('good', lambda: good), _FakeEntryPoint('broken', broken)]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+    _stub_check_layer(tmp_path, monkeypatch)
+
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert set(report.manifest_errors) == {'broken'}
+    assert set(report.datasets) == {'star.tracks.baraffe'}
+    assert not report.ok
 
 
 def test_plan_relocations_survives_a_provider_conflict(tmp_path, monkeypatch):

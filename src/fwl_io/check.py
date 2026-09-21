@@ -299,19 +299,29 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
 
+    A conflict between providers is reported only when it drops a dataset this
+    model reads, which is the condition under which ``fetch_for`` fails for it.
+    A provider whose manifest failed to load is always reported, since its
+    datasets are unknown and the model may have needed them.
+
     Returns
     -------
     CheckReport
         Keyed by dataset, alongside the manifests that were left out and
         the datasets that could not be resolved.
     """
-    from fwl_io.manifest import _discover
+    from fwl_io.manifest import _discover_all
 
     model = model.lower()
     datasets: dict[str, DatasetCheck] = {}
     dataset_errors: dict[str, str] = {}
-    providers, manifest_errors = _discover()
-    for provider_datasets in providers.values():
+    discovery = _discover_all()
+    manifest_errors = {
+        name: msg
+        for name, msg in discovery.errors.items()
+        if name not in discovery.conflict_models or model in discovery.conflict_models[name]
+    }
+    for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             if model not in tuple(r.lower() for r in ds.required_by):
                 continue
@@ -330,6 +340,6 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
                 log.warning('cannot check dataset %r: %s', ds.key, exc)
     return CheckReport(
         datasets=datasets,
-        manifest_errors=dict(manifest_errors),
+        manifest_errors=manifest_errors,
         dataset_errors=dataset_errors,
     )
