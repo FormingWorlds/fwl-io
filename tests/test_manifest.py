@@ -543,6 +543,23 @@ def test_provider_with_one_contested_location_is_dropped_whole(tmp_path, monkeyp
     assert set(errors) == {'package-a', 'package-b'}
 
 
+def test_providers_linked_only_through_a_middle_provider_are_all_dropped(tmp_path, monkeypatch):
+    """A shares a location with B and B with C: A and C share none, yet all three go."""
+    a = '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+    b = a + '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+    c = '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', a)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', b)),
+        _FakeEntryPoint('package-c', lambda: _provider_manifest(tmp_path, 'c', c)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert set(errors) == {'package-a', 'package-b', 'package-c'}
+
+
 def _stub_check_layer(tmp_path, monkeypatch):
     """Stub the fetcher and registry so check_for reaches no network or disk state."""
     from fwl_io.check import DatasetCheck
@@ -698,6 +715,28 @@ def test_duplicate_entry_point_name_drops_every_provider_with_it(tmp_path, monke
     for message in errors.values():
         assert 'mors-data' in message and 'proteus-data' in message
         assert 'uninstall or pin' in message
+
+
+def test_three_entries_with_one_name_are_all_dropped_and_named(tmp_path, monkeypatch):
+    """A three-way entry-point name collision drops every entry and names each package."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda x=x, i=i: _provider_manifest(
+                tmp_path, x, f'[star.tracks.{x}]\nzenodo = "10.5281/zenodo.{i}"\n'
+            ),
+            dist=f'data-{x}',
+        )
+        for i, x in enumerate('abc', start=1)
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert len(errors) == 3, 'one error per dropped entry'
+    for message in errors.values():
+        assert 'registered 3 times' in message
+        assert all(f'data-{x}' in message for x in 'abc')
 
 
 def test_duplicate_name_without_metadata_still_says_which_entries_collided(tmp_path, monkeypatch):

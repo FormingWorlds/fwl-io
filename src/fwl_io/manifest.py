@@ -433,6 +433,19 @@ class _Discovery:
     errors: dict[str, str]
     conflict_models: dict[str, frozenset[str]]
 
+    def errors_for(self, model: str) -> dict[str, str]:
+        """Return the ``errors`` that can affect ``model``, a lower-cased name.
+
+        A provider that failed to load is always included, since its datasets
+        are unknown and the model may have needed them. A provider left out for
+        a conflict is included only when its datasets serve the model.
+        """
+        return {
+            name: msg
+            for name, msg in self.errors.items()
+            if name not in self.conflict_models or model in self.conflict_models[name]
+        }
+
 
 def _models_served(datasets: list[Dataset]) -> frozenset[str]:
     """Return the lower-cased model names the datasets are required by."""
@@ -594,13 +607,7 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
     failures: dict[str, str] = {}
     discovery = _discover_all()
     providers = discovery.found
-    # An unreadable manifest may declare this model; a conflict is known to
-    # remove datasets only for the models it names.
-    provider_errors = {
-        name: msg
-        for name, msg in discovery.errors.items()
-        if name not in discovery.conflict_models or model in discovery.conflict_models[name]
-    }
+    provider_errors = discovery.errors_for(model)
     for datasets in providers.values():
         for ds in datasets:
             if model not in tuple(r.lower() for r in ds.required_by):

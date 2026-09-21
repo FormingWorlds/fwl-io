@@ -93,7 +93,8 @@ class RelocationReport:
     """Every dataset considered, whether or not anything happened to it.
 
     ``manifest_errors`` is carried beside them because a manifest that failed
-    to load declares datasets nobody here got to look at. Without it a report
+    to load, or was dropped for a conflict, declares datasets nobody here got to
+    look at. Without it a report
     covering nothing would read exactly like a tree with nothing left to move.
     """
 
@@ -156,10 +157,9 @@ class RelocationReport:
                 'which was left alone'
             )
         if self.manifest_errors:
-            # A manifest that did not load may be the one declaring the dataset
-            # this tree still holds, so the counts above are a floor and saying
-            # otherwise would be the overstatement the report exists to avoid.
-            closing += f'; {len(self.manifest_errors)} manifest(s) not read, so this may be partial'
+            # An unloaded or conflict-dropped manifest may declare a dataset this
+            # tree still holds, so the counts above are a floor.
+            closing += f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
         lines.append(closing)
         return '\n'.join(lines)
 
