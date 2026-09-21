@@ -473,15 +473,12 @@ def fetch_for(
         Show a per-file download progress bar. When tqdm is not installed the
         bar is skipped and the fetch continues.
     """
-    from fwl_io.fetch import create_fetcher
+    from fwl_io.fetch import _progressbar_supported, create_fetcher
 
-    if progress:
+    if progress and not _progressbar_supported():
         # Never fail a fetch over a cosmetic bar: drop it when tqdm is absent.
-        try:
-            import tqdm  # noqa: F401
-        except ImportError:
-            log.warning(_TQDM_HINT)
-            progress = False
+        log.warning(_TQDM_HINT)
+        progress = False
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}

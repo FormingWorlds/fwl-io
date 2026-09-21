@@ -62,15 +62,15 @@ def _resolve_progress(requested: bool | None) -> bool:
         isatty = getattr(sys.stderr, 'isatty', None)
         try:
             on = bool(isatty()) if callable(isatty) else False
-        except (ValueError, OSError):
+        except Exception:
             on = False
     else:
         on = requested
     if not on:
         return False
-    try:
-        import tqdm  # noqa: F401
-    except ImportError:
+    from fwl_io.fetch import _progressbar_supported
+
+    if not _progressbar_supported():
         if requested:
             from fwl_io.manifest import _TQDM_HINT
 

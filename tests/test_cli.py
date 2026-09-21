@@ -461,7 +461,7 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
 )
 def test_fetch_progress_resolution(flags, tty, expected, monkeypatch):
     """An explicit flag wins; absent it, the bar follows whether stderr is a TTY."""
-    monkeypatch.setitem(sys.modules, 'tqdm', types.ModuleType('tqdm'))
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
     monkeypatch.setattr('sys.stderr', _FakeStderr(tty))
     seen = _capture_fetch_progress(monkeypatch)
 
@@ -472,7 +472,7 @@ def test_fetch_progress_resolution(flags, tty, expected, monkeypatch):
 @pytest.mark.unit
 def test_fetch_progress_soft_degrades_without_tqdm(monkeypatch):
     """With tqdm absent, the bar is dropped with a note and the fetch still runs."""
-    monkeypatch.setitem(sys.modules, 'tqdm', None)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
     fake_err = _FakeStderr(tty=True)
     monkeypatch.setattr('sys.stderr', fake_err)
     seen = _capture_fetch_progress(monkeypatch)
@@ -485,7 +485,7 @@ def test_fetch_progress_soft_degrades_without_tqdm(monkeypatch):
 @pytest.mark.unit
 def test_fetch_progress_auto_degrades_silently_without_tqdm(monkeypatch):
     """Auto mode on a TTY drops the bar when tqdm is absent, printing no note."""
-    monkeypatch.setitem(sys.modules, 'tqdm', None)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
     fake_err = _FakeStderr(tty=True)
     monkeypatch.setattr('sys.stderr', fake_err)
     seen = _capture_fetch_progress(monkeypatch)
@@ -493,6 +493,45 @@ def test_fetch_progress_auto_degrades_silently_without_tqdm(monkeypatch):
     assert main(['fetch', 'demo']) == 0
     assert seen['progress'] is False
     assert 'pip install fwl-io[progress]' not in fake_err.getvalue()
+
+
+@pytest.mark.unit
+def test_fetch_progress_hint_follows_pooch_binding_not_import(monkeypatch):
+    """The hint and the bar follow pooch's tqdm binding, not whether tqdm imports.
+
+    pooch binds tqdm once at its own import. A tqdm that is importable now but
+    was absent then leaves the binding ``None``, so the bar cannot be drawn:
+    an explicit ``--progress`` must print the hint and the fetch must still run.
+    """
+    monkeypatch.setitem(sys.modules, 'tqdm', types.ModuleType('tqdm'))
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+    fake_err = _FakeStderr(tty=True)
+    monkeypatch.setattr('sys.stderr', fake_err)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo', '--progress']) == 0
+    assert seen['progress'] is False
+    assert 'pip install fwl-io[progress]' in fake_err.getvalue()
+
+
+@pytest.mark.unit
+def test_fetch_progress_auto_survives_stderr_with_raising_isatty(monkeypatch):
+    """Auto mode resolves to no bar when ``stderr.isatty`` raises any exception.
+
+    The value only picks a cosmetic default, so a stream whose ``isatty`` raises
+    something other than ``ValueError`` or ``OSError`` must not abort the fetch.
+    """
+
+    class _RaisingStderr(io.StringIO):
+        def isatty(self):
+            raise RuntimeError('broken stream')
+
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+    monkeypatch.setattr('sys.stderr', _RaisingStderr())
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo']) == 0
+    assert seen['progress'] is False
 
 
 @pytest.mark.unit

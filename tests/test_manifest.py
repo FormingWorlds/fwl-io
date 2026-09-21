@@ -1,9 +1,7 @@
 import io
 import json
 import pathlib
-import sys
 import tarfile
-import types
 
 import pooch
 import pytest
@@ -926,7 +924,7 @@ def test_fetch_for_forwards_progress_to_create_fetcher(tmp_path, monkeypatch):
     seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
     # tqdm is an opt-in extra absent from the default CI install, so force it
     # present here: this test is about forwarding, not the degrade path below.
-    monkeypatch.setitem(sys.modules, 'tqdm', types.ModuleType('tqdm'))
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
 
     fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
     assert seen['progress'] is True
@@ -938,7 +936,7 @@ def test_fetch_for_forwards_progress_to_create_fetcher(tmp_path, monkeypatch):
 def test_fetch_for_soft_degrades_without_tqdm(tmp_path, monkeypatch, caplog):
     """A library caller asking for a bar without tqdm still fetches, bar off."""
     seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
-    monkeypatch.setitem(sys.modules, 'tqdm', None)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
 
     with caplog.at_level('WARNING'):
         fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
