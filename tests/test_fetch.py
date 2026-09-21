@@ -1156,6 +1156,21 @@ def test_downloader_drops_progress_when_tqdm_absent(tmp_path, monkeypatch):
     assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
 
 
+def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path):
+    """A download with ``progress=True`` completes through the installed tqdm.
+
+    The other progress tests substitute pooch's tqdm binding; this one draws the
+    real bar against the local server, so it skips where the ``progress`` extra
+    is absent.
+    """
+    pytest.importorskip('tqdm')
+    base_url, registry = sample_files
+    fetcher = _fetcher(base_url, registry, tmp_path, progress=True)
+    assert fetcher._downloader(base_url).progressbar is True
+    path = fetcher.fetch('alpha.dat')
+    assert path.read_bytes() == b'0.1 0.2 0.3\n'
+
+
 def test_real_server_503_then_200_is_retried_and_served(tmp_path, monkeypatch):
     """A mirror answering 503 once, then 200, is retried through the real stack.
 
