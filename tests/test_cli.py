@@ -420,3 +420,37 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
     assert code == 0
     assert 'MANIFEST UNREADABLE' not in out
     assert 'absent' in out
+
+
+@pytest.mark.unit
+def test_list_prints_conflicting_providers_as_failed_without_a_traceback(
+    tmp_path, capsys, monkeypatch
+):
+    """Two providers claiming one location are listed as failed, exit 1, no traceback."""
+    text = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+
+    class _EP:
+        def __init__(self, name, sub):
+            self.name = name
+            self.sub = sub
+
+        def load(self):
+            def path():
+                target = tmp_path / self.sub / 'manifest.toml'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+                return target
+
+            return path
+
+    eps = [_EP('package-a', 'a'), _EP('package-b', 'b')]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    code = main(['list'])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert '[package-a] FAILED TO LOAD' in captured.err
+    assert '[package-b] FAILED TO LOAD' in captured.err
+    assert 'interior_lookup_tables/demo_eos' in captured.err
+    assert 'Traceback' not in captured.err
+    assert captured.out == '', 'neither conflicting provider is listed as loaded'
