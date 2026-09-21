@@ -456,21 +456,38 @@ def test_missing_registry_gives_actionable_error(tmp_path):
 
 
 @pytest.mark.smoke
-def test_shared_manifest_ships_and_parses_empty():
-    """The shared manifest ships with the package and parses cleanly.
+def test_shared_manifest_ships_and_loads_every_registry():
+    """The shared manifest ships with the package and every dataset has a registry.
 
-    It declares no datasets: nothing is consumed by several models, and the
-    Baraffe tracks ship with the MORS package. A comment-only manifest is a
-    valid one, and parsing it must yield an empty dataset list rather than
-    raising.
+    Loading resolves each dataset's registry file, so a dataset added without
+    running ``fwl-io sync`` fails here instead of at a user's first fetch.
     """
     path = shared_manifest_path()
     assert path.is_file()
-    # The file still carries content (the machinery header), so an empty parse
-    # is a deliberate no-datasets result, not a truncated or missing file.
-    assert path.read_text().strip()
     datasets = load_manifest(path)
-    assert datasets == []
+    assert datasets
+    keys = [ds.key for ds in datasets]
+    assert len(keys) == len(set(keys))
+    for ds in datasets:
+        assert ds.registry(), ds.key
+
+
+def test_shared_manifest_datasets_sharing_a_record_load_apart():
+    """Datasets that filter one Zenodo record to different files stay separate."""
+    by_key = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
+    unified = [
+        by_key[k]
+        for k in (
+            'interior.eos.paleos_iron',
+            'interior.eos.paleos_mgsio3_unified',
+            'interior.eos.paleos_h2o',
+        )
+    ]
+    assert len({ds.zenodo for ds in unified}) == 1
+    assert len({tuple(ds.registry()) for ds in unified}) == 3
+    for ds in unified:
+        assert tuple(ds.registry()) == ds.files
+    assert by_key['interior.eos.chabrier_2021_hhe'].extract == 'tar'
 
 
 class _FakeEntryPoint:

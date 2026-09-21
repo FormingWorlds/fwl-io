@@ -101,15 +101,16 @@ FWL_DATA/
 
 The tree holds **immutable fetched reference data only**: anything generated at runtime (derived tables, interpolation caches, solver caches) belongs in run output or cache directories, never below `FWL_DATA`. This keeps a shared read-only cache trustworthy as a whole.
 
-Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. It acts on the datasets listed in the package's `legacy_layout.toml`, which grows as each model migrates and today names three of the families below; the rest are the historical mapping, and a tree holding one of them is left alone until its dataset is declared. The mapping from the legacy locations:
+Models adopt this layout when they migrate to fwl-io; legacy directories from the previous layout remain readable by unmigrated code and age out when their last consumer migrates. `fwl-io relocate` cleans a local tree up straight away instead, moving each dataset whose files check out against its registry. It acts on the datasets listed in the package's `legacy_layout.toml`, which lists the legacy directory of each dataset whose consumers have migrated. A tree holding a family not yet declared is left alone until its dataset is declared. The mapping from the legacy locations:
 
 | Legacy location (live today) | Target location |
 |---|---|
 | `spectral_files/<Set>/<bands>` | `atmos_clim/spectral_files/<set>/<bands>/r<recid>` |
 | `surface_albedos/Hammond24` | `atmos_clim/surface_albedos/hammond_2024/r<recid>` |
-| `interior_lookup_tables/1TPa-dK09-elec-free` | `interior/eos/dk09_1tpa_elec_free/r<recid>` |
+| `interior_lookup_tables/1TPa-dK09-elec-free/<set>` | `interior/eos/dk09_1tpa_elec_free/<set>/r<recid>` |
 | `interior_lookup_tables/Melting_curves` | `interior/melting_curves/<dataset>/r<recid>` |
 | `zalmoxis_eos/EOS_PALEOS_*` | `interior/eos/paleos_*/r<recid>` |
+| `zalmoxis_eos/EOS_{WolfBower2018_1TPa,RTPress_melt_100TPa,Chabrier2021_HHe}` | `interior/eos/{wolf_bower_2018_1tpa,rtpress_melt_100tpa,chabrier_2021_hhe}/r<recid>` |
 | `stellar_evolution_tracks/{Spada,Baraffe}` | `star/tracks/{spada_2013,baraffe_2015}/r<recid>` |
 | `stellar_spectra/{solar,PHOENIX,MUSCLES,Named}` | `star/spectra/{solar,phoenix,muscles,named}/r<recid>` |
 | `mass_radius/Zeng2019` | `observe/mass_radius/zeng_2019/r<recid>` |
