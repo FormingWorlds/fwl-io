@@ -297,7 +297,7 @@ def test_check_reports_missing_data_and_exits_nonzero(tmp_path, capsys, monkeypa
     # this the test would pass just as well against a misplaced registry file
     # and would be proving nothing about the check itself.
     assert '1 missing' in out
-    assert 'MANIFEST UNREADABLE' not in out
+    assert 'MANIFEST NOT USED' not in out
     # Resolving a path creates the data root, as it does for every entry point.
     # What a check must not do is populate it: no dataset directory, no file.
     assert list(data_root.iterdir()) == [], 'a check must not create the tree it inspects'
@@ -388,7 +388,7 @@ def test_relocate_exits_nonzero_when_a_manifest_could_not_be_read(tmp_path, caps
     out = capsys.readouterr().out
 
     assert code == 1, 'an unread manifest cannot exit as success'
-    assert 'MANIFEST UNREADABLE' in out
+    assert 'MANIFEST NOT USED' in out
     assert 'may be partial' in out
 
 
@@ -418,7 +418,7 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
     out = capsys.readouterr().out
 
     assert code == 0
-    assert 'MANIFEST UNREADABLE' not in out
+    assert 'MANIFEST NOT USED' not in out
     assert 'absent' in out
 
 

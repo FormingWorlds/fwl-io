@@ -337,7 +337,7 @@ def test_an_unreadable_manifest_fails_the_report(tmp_path):
 
     assert clean.ok
     assert not broken.ok
-    assert 'MANIFEST UNREADABLE' in broken.summary()
+    assert 'MANIFEST NOT USED' in broken.summary()
     assert broken.faults == (), 'the datasets are sound; the fault is the unread manifest'
 
 
@@ -461,7 +461,7 @@ def test_check_for_carries_a_manifest_failure_into_the_report(tmp_path, monkeypa
     assert not report.ok
     assert list(report.manifest_errors) == ['demoprovider']
     assert report.dataset_errors == {}
-    assert 'MANIFEST UNREADABLE' in report.summary()
+    assert 'MANIFEST NOT USED' in report.summary()
 
 
 def test_check_for_separates_a_missing_registry_from_a_bad_manifest(tmp_path, monkeypatch):
@@ -479,7 +479,7 @@ def test_check_for_separates_a_missing_registry_from_a_bad_manifest(tmp_path, mo
     assert list(report.dataset_errors) == ['g.demo']
     assert report.manifest_errors == {}
     assert 'NOT CHECKED' in summary
-    assert 'MANIFEST UNREADABLE' not in summary
+    assert 'MANIFEST NOT USED' not in summary
     assert 'fwl-io sync' in summary, 'the message has to name the remedy'
 
 

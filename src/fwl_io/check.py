@@ -130,8 +130,9 @@ class CheckReport:
     """Every dataset checked, and everything that stopped one being checked.
 
     The two error maps are kept apart because they call for different repairs.
-    A manifest error means an installed package's manifest could not be read at
-    all, so nothing it declares was inspected. A dataset error means the
+    A manifest error means an installed package's manifest was left out, because
+    it could not be read or conflicts with another installed manifest, so nothing
+    it declares was inspected. A dataset error means the
     manifest was fine but that one dataset could not be resolved, most often
     because its registry has never been generated.
     """
@@ -188,7 +189,7 @@ class CheckReport:
         """A short human-readable report, one line per dataset plus a verdict."""
         lines = [d.summary() for d in sorted(self.datasets.values(), key=lambda d: d.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+            lines.append(f'{provider}: MANIFEST NOT USED, {error}')
         for key, error in sorted(self.dataset_errors.items()):
             lines.append(f'{key}: NOT CHECKED, {error}')
         if not lines:
@@ -301,7 +302,7 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
     Returns
     -------
     CheckReport
-        Keyed by dataset, alongside the manifests that could not be read and
+        Keyed by dataset, alongside the manifests that were left out and
         the datasets that could not be resolved.
     """
     from fwl_io.manifest import _discover

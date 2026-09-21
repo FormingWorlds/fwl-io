@@ -138,7 +138,7 @@ class RelocationReport:
         """A short report, one line per dataset plus a closing count."""
         lines = [e.summary() for e in sorted(self.entries, key=lambda e: e.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+            lines.append(f'{provider}: MANIFEST NOT USED, {error}')
         if self.layout_error is not None:
             # Without this the run reports nothing to do, which is what a tidy
             # tree also reports, and the two are not the same answer.

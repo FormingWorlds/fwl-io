@@ -757,6 +757,58 @@ def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch
     assert [ds.key for ds in found['manifest']] == ['star.tracks.baraffe']
 
 
+def test_two_broken_providers_with_one_name_are_both_reported(tmp_path, monkeypatch):
+    """Load failures under one entry-point name keep one error each."""
+
+    def broken(text):
+        def load():
+            raise ImportError(text)
+
+        return load
+
+    eps = [
+        _FakeEntryPoint('manifest', broken('first is broken')),
+        _FakeEntryPoint('manifest', broken('second is broken')),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    # A shared key would keep only the later message and hide the first failure.
+    assert sorted(errors.values()) == ['first is broken', 'second is broken']
+
+
+def test_fetch_for_prints_a_shared_conflict_message_once(tmp_path, monkeypatch):
+    """Entries dropped for one duplicate name share one message, listed under all their labels."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path,
+                'a',
+                '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n',
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path,
+                'b',
+                '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\nrequired_by = ["mors"]\n',
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        fetch_for('mors', data_root=tmp_path / 'data')
+    message = str(excinfo.value)
+    assert message.count('registered 2 times') == 1
+    assert 'manifest (mors-data.manifest:manifest_path), manifest (proteus-data.' in message
+
+
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
     """An empty result while a manifest is unreadable names that manifest."""
     stale = _write(

@@ -66,7 +66,6 @@ log = logging.getLogger('fwl.' + __name__)
 # Re-exported so existing importers keep working; the parser lives in doi.
 __all__ = [
     'Dataset',
-    'ManifestConflictError',
     'ManifestSchemaError',
     'ZENODO_DOI_PATTERN',
     'discover_manifests',
@@ -104,20 +103,6 @@ class ManifestSchemaError(ValueError):
     something it no longer understands, or a field it reads only inside a
     dataset table. Subclasses ValueError, so callers that already handle a
     malformed manifest keep working.
-    """
-
-
-class ManifestConflictError(ValueError):
-    """Installed manifests conflict with one another.
-
-    Discovery does not raise this. It removes every conflicting provider and
-    reports the reason per provider, in ``check_for(...).manifest_errors``, in
-    ``fwl-io list`` and in the ``fetch_for`` failure of a model that needs one
-    of their datasets. The two cases are a location conflict (providers declare
-    keys that map to the same directory below the data root, so fetching one
-    would overwrite the other) and a duplicate entry point (one
-    ``fwl_io.manifests`` name registered more than once, so the datasets cannot
-    be attributed to a manifest). Subclasses ValueError.
     """
 
 
@@ -491,7 +476,7 @@ def _drop_duplicate_names(
             f'or remove the repeated entry.'
         )
         for _label, target, datasets in claimants:
-            key = _unique_key(f'{name} [{target}]', errors)
+            key = _unique_key(f'{name} ({target})', errors)
             errors[key] = message
             models[key] = _models_served(datasets)
     return found, models
@@ -528,8 +513,8 @@ def _drop_conflicting_datasets(
                 lines.append(f'  {loc}: {claimants}')
         lines.append(
             'Each location must have one provider, so fwl-io uses none of the providers '
-            'named above. Uninstall or pin all but one of them so a single manifest '
-            'declares each location.'
+            'named above. Uninstall or pin all but one of them, or remove the repeated '
+            'entry, so a single manifest declares each location.'
         )
         key = _unique_key(provider, errors)
         errors[key] = '\n'.join(lines)
@@ -555,7 +540,7 @@ def _discover_all() -> _Discovery:
             manifest_path = ep.load()()
             loaded.append((ep.name, label, target, load_manifest(manifest_path)))
         except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
-            errors[ep.name] = str(exc)
+            errors[_unique_key(ep.name, errors)] = str(exc)
             log.warning('skipping manifest provider %r: %s', ep.name, exc)
     found, conflict_models = _drop_duplicate_names(loaded, errors)
     conflict_models.update(_drop_conflicting_datasets(found, errors))
@@ -637,7 +622,10 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
             report.append(f'{len(failures)} dataset(s) failed:')
             report += [f'  {key}: {msg}' for key, msg in sorted(failures.items())]
         if provider_errors:
-            report.append(f'{len(provider_errors)} manifest(s) could not be read:')
-            report += [f'  {name}: {msg}' for name, msg in sorted(provider_errors.items())]
+            report.append(f'{len(provider_errors)} manifest(s) not used:')
+            by_message: dict[str, list[str]] = {}
+            for name, msg in sorted(provider_errors.items()):
+                by_message.setdefault(msg, []).append(name)
+            report += [f'  {", ".join(names)}: {msg}' for msg, names in by_message.items()]
         raise RuntimeError('\n'.join(report))
     return fetched
