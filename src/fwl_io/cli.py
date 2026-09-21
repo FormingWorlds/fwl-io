@@ -54,7 +54,8 @@ def _resolve_progress(requested: bool | None) -> bool:
     means auto, on when stderr is a terminal. When a bar is wanted but tqdm is
     not installed, return ``False`` so the download still runs without one. The
     note naming the fix prints only when ``--progress`` was asked for explicitly,
-    so an auto-mode fetch on a terminal degrades without a message. Auto mode
+    so an auto-mode fetch on a terminal degrades without a message, and never when
+    there is no stderr, since ``print`` would then fall back to stdout. Auto mode
     treats a missing, non-callable, or raising ``stderr.isatty`` as "not a
     terminal" so resolving the default never aborts the fetch.
     """
@@ -71,7 +72,7 @@ def _resolve_progress(requested: bool | None) -> bool:
     from fwl_io.fetch import _progressbar_supported
 
     if not _progressbar_supported():
-        if requested:
+        if requested and sys.stderr is not None:
             from fwl_io.manifest import _TQDM_HINT
 
             print(_TQDM_HINT, file=sys.stderr)
