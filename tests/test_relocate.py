@@ -255,9 +255,48 @@ def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(tmp
     assert report.entries == (), 'no dataset was declared, so none could be considered'
     assert list(report.manifest_errors) == ['demoprovider']
     assert not report.ok, 'a report that looked at nothing must not read as a tidy tree'
-    assert 'MANIFEST NOT USED' in report.summary()
+    assert 'MANIFEST FAILED TO LOAD' in report.summary()
     assert 'may be partial' in report.summary()
     assert (root / LEGACY / 'notes.txt').is_file(), 'the tree it could not judge is untouched'
+
+
+def test_a_dataset_location_conflict_reads_not_used_not_failed_to_load(tmp_path, monkeypatch):
+    """A cross-provider conflict is a different fault than an unread manifest, and reads as one.
+
+    Both manifests here read fine; the fault is that two providers claim the
+    same dataset location, which relocate must tell apart from a load failure
+    in its summary, the same split check.py and the ``list`` command already make.
+    """
+    text = f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\n'
+    manifest_a = tmp_path / 'a' / 'manifest.toml'
+    manifest_a.parent.mkdir(parents=True)
+    manifest_a.write_text(text)
+    manifest_b = tmp_path / 'b' / 'manifest.toml'
+    manifest_b.parent.mkdir(parents=True)
+    manifest_b.write_text(text)
+
+    class _EPA:
+        name = 'package-a'
+
+        def load(self):
+            return lambda: manifest_a
+
+    class _EPB:
+        name = 'package-b'
+
+        def load(self):
+            return lambda: manifest_b
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EPA(), _EPB()])
+    root = tmp_path / 'data'
+
+    report = relocate_all(data_root=root)
+
+    assert report.entries == (), 'both providers were dropped, so no dataset was declared'
+    assert set(report.manifest_errors) == {'package-a', 'package-b'}
+    assert not report.ok
+    assert 'MANIFEST NOT USED' in report.summary()
+    assert 'MANIFEST FAILED TO LOAD' not in report.summary()
 
 
 def test_a_nested_member_leaves_no_husk_behind(tmp_path, monkeypatch):

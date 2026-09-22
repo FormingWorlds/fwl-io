@@ -493,6 +493,7 @@ def _drop_duplicate_names(
             key = _unique_key(f'{name} ({target})', errors)
             errors[key] = message
             models[key] = _models_served(datasets)
+            log.warning('skipping manifest provider %r: %s', key, message)
     return found, models
 
 
@@ -531,8 +532,10 @@ def _drop_conflicting_datasets(
             'entry, so a single manifest declares each location.'
         )
         key = _unique_key(provider, errors)
-        errors[key] = '\n'.join(lines)
+        message = '\n'.join(lines)
+        errors[key] = message
         models[key] = _models_served(found[provider])
+        log.warning('skipping manifest provider %r: %s', key, message)
     for provider in dropped:
         del found[provider]
     return models

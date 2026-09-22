@@ -134,12 +134,15 @@ class CheckReport:
     it could not be read or conflicts with another installed manifest, so nothing
     it declares was inspected. A dataset error means the
     manifest was fine but that one dataset could not be resolved, most often
-    because its registry has never been generated.
+    because its registry has never been generated. ``conflict_providers`` names
+    which of ``manifest_errors`` was a conflict rather than a load failure, so
+    the summary can tell a caller which repair applies.
     """
 
     datasets: dict[str, DatasetCheck] = field(default_factory=dict)
     manifest_errors: dict[str, str] = field(default_factory=dict)
     dataset_errors: dict[str, str] = field(default_factory=dict)
+    conflict_providers: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def ok(self) -> bool:
@@ -189,7 +192,10 @@ class CheckReport:
         """A short human-readable report, one line per dataset plus a verdict."""
         lines = [d.summary() for d in sorted(self.datasets.values(), key=lambda d: d.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST NOT USED, {error}')
+            if provider in self.conflict_providers:
+                lines.append(f'{provider}: MANIFEST NOT USED, {error}')
+            else:
+                lines.append(f'{provider}: MANIFEST FAILED TO LOAD, {error}')
         for key, error in sorted(self.dataset_errors.items()):
             lines.append(f'{key}: NOT CHECKED, {error}')
         if not lines:
@@ -317,6 +323,7 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
     dataset_errors: dict[str, str] = {}
     discovery = _discover_all()
     manifest_errors = discovery.errors_for(model)
+    conflict_providers = frozenset(discovery.conflict_models) & manifest_errors.keys()
     for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             if model not in tuple(r.lower() for r in ds.required_by):
@@ -338,4 +345,5 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
         datasets=datasets,
         manifest_errors=manifest_errors,
         dataset_errors=dataset_errors,
+        conflict_providers=conflict_providers,
     )

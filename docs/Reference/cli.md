@@ -56,7 +56,9 @@ Two kinds of dataset cannot be verified at all and are refused rather than moved
 
 A dataset already at its current location is not a fault, and a copy still sitting at the old location beside it is named rather than deleted. Nothing here removes data: the only directories it removes are ones it has just emptied itself.
 
-Exit is 1 when a legacy tree was found and could not be moved, when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds, or when the shipped table of old locations could not be read, since without it no dataset has an old location to look at and a run that reported nothing would read like a tidy tree. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
+A manifest that could not be included is reported apart from the datasets, as either `MANIFEST FAILED TO LOAD` or `MANIFEST NOT USED`, the same split `fwl-io check` and `fwl-io list` report. The first means the manifest could not be read at all; the second means it read fine but was dropped for conflicting with another installed manifest. Either way, any dataset that manifest would have declared is left out of the plan and cannot be relocated.
+
+Exit is 1 when a legacy tree was found and could not be moved, when an installed manifest failed to load or was dropped as a conflict, since that manifest may be the one declaring the dataset a tree still holds, or when the shipped table of old locations could not be read, since without it no dataset has an old location to look at and a run that reported nothing would read like a tidy tree. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
 
 ## fwl-io mirror
 

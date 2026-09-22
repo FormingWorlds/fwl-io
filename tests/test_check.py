@@ -337,7 +337,7 @@ def test_an_unreadable_manifest_fails_the_report(tmp_path):
 
     assert clean.ok
     assert not broken.ok
-    assert 'MANIFEST NOT USED' in broken.summary()
+    assert 'MANIFEST FAILED TO LOAD' in broken.summary()
     assert broken.faults == (), 'the datasets are sound; the fault is the unread manifest'
 
 
@@ -461,7 +461,46 @@ def test_check_for_carries_a_manifest_failure_into_the_report(tmp_path, monkeypa
     assert not report.ok
     assert list(report.manifest_errors) == ['demoprovider']
     assert report.dataset_errors == {}
+    assert 'MANIFEST FAILED TO LOAD' in report.summary()
+
+
+def test_check_for_a_dataset_location_conflict_reads_not_used_not_failed_to_load(
+    tmp_path, monkeypatch
+):
+    """A cross-provider conflict is a different fault than an unread manifest, and reads as one.
+
+    Both manifests here read fine; the fault is that two providers claim the
+    same dataset location, which check must tell apart from a load failure in
+    its summary, the same split relocate and the ``list`` command already make.
+    """
+    dir_a = tmp_path / 'a'
+    dir_b = tmp_path / 'b'
+    dir_a.mkdir()
+    dir_b.mkdir()
+    manifest_a = _demo_manifest(dir_a)
+    manifest_b = _demo_manifest(dir_b)
+
+    class _EPA:
+        name = 'package-a'
+
+        def load(self):
+            return lambda: manifest_a
+
+    class _EPB:
+        name = 'package-b'
+
+        def load(self):
+            return lambda: manifest_b
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EPA(), _EPB()])
+
+    report = check_for('demo', data_root=tmp_path / 'data')
+
+    assert not report.ok
+    assert set(report.manifest_errors) == {'package-a', 'package-b'}
+    assert report.datasets == {}
     assert 'MANIFEST NOT USED' in report.summary()
+    assert 'MANIFEST FAILED TO LOAD' not in report.summary()
 
 
 def test_check_for_separates_a_missing_registry_from_a_bad_manifest(tmp_path, monkeypatch):

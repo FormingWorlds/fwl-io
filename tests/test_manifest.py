@@ -491,6 +491,45 @@ def test_two_providers_claiming_one_location_are_dropped_and_reported(tmp_path, 
     assert 'package-c' not in ''.join(errors.values())
 
 
+def test_a_load_error_and_a_conflict_error_are_classified_apart(tmp_path, monkeypatch):
+    """``conflict_models`` names only the conflict, never the plain load failure.
+
+    A caller such as ``cli.py`` picks the verdict label by testing membership
+    in ``conflict_models``; a load failure and a conflict must land on opposite
+    sides of that test even though both end up as ``errors`` entries.
+    """
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    eps = [
+        _FakeEntryPoint('broken', broken),
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', _OTHER_EOS)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', _OTHER_EOS)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    discovery = manifest._discover_all()
+
+    assert set(discovery.errors) == {'broken', 'package-a', 'package-b'}
+    assert 'broken' not in discovery.conflict_models, 'a load failure is not a conflict'
+    assert {'package-a', 'package-b'} <= set(discovery.conflict_models)
+
+
+def test_a_dataset_location_conflict_logs_a_warning_per_dropped_provider(
+    tmp_path, monkeypatch, caplog
+):
+    """A caller of discover_manifests(), not just list/check, learns of a dropped provider."""
+    _colliding_providers(tmp_path, monkeypatch)
+
+    with caplog.at_level('WARNING', logger='fwl.fwl_io.manifest'):
+        discover_manifests()
+
+    warnings = [r.message for r in caplog.records if r.levelname == 'WARNING']
+    assert any('package-a' in m for m in warnings)
+    assert any('package-b' in m for m in warnings)
+
+
 def test_conflict_does_not_raise_from_discover_manifests(tmp_path, monkeypatch):
     """The public discovery call returns the surviving providers on a conflict."""
     _colliding_providers(tmp_path, monkeypatch)
@@ -717,6 +756,36 @@ def test_duplicate_entry_point_name_drops_every_provider_with_it(tmp_path, monke
         assert 'uninstall or pin' in message
 
 
+def test_a_duplicate_entry_point_name_logs_a_warning_per_dropped_provider(
+    tmp_path, monkeypatch, caplog
+):
+    """A caller of discover_manifests() also learns of a name collision through the log."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with caplog.at_level('WARNING', logger='fwl.fwl_io.manifest'):
+        manifest._discover()
+
+    warnings = [r.message for r in caplog.records if r.levelname == 'WARNING']
+    assert any('mors-data' in m for m in warnings)
+    assert any('proteus-data' in m for m in warnings)
+
+
 def test_three_entries_with_one_name_are_all_dropped_and_named(tmp_path, monkeypatch):
     """A three-way entry-point name collision drops every entry and names each package."""
     eps = [
@@ -847,9 +916,19 @@ def test_fetch_for_a_model_that_needs_a_duplicate_name_dataset_fails(tmp_path, m
 
 
 def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch):
-    """A broken provider that shares a name must not hide a working one's data."""
+    """A broken provider that shares a name does not hide a working namesake's data.
+
+    ``discover_manifests`` and ``check_for`` both still surface the working
+    provider's dataset. ``fetch_for`` still refuses for the model the broken
+    provider might have served: that is its documented conservative policy for
+    an unreadable manifest, not the working namesake's data going missing.
+    """
+    from fwl_io.check import check_for
+
     good = _provider_manifest(
-        tmp_path, 'good', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+        tmp_path,
+        'good',
+        '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n',
     )
 
     def broken():
@@ -865,6 +944,16 @@ def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch
     found = discover_manifests()
     assert set(found) == {'manifest'}
     assert [ds.key for ds in found['manifest']] == ['star.tracks.baraffe']
+
+    _stub_check_layer(tmp_path, monkeypatch)
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert set(report.datasets) == {'star.tracks.baraffe'}, 'the working namesake is still checked'
+    assert set(report.manifest_errors) == {'manifest'}, 'the broken namesake is still reported'
+    assert not report.ok, 'a load failure that may have served the model fails the check'
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', lambda **kw: object())
+    with pytest.raises(RuntimeError, match=r'manifest\(s\) not used'):
+        fetch_for('mors', data_root=tmp_path / 'data')
 
 
 def test_two_broken_providers_with_one_name_are_both_reported(tmp_path, monkeypatch):
