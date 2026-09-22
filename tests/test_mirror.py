@@ -238,6 +238,14 @@ def test_files_argument_naming_an_absent_file_is_refused_before_any_call(
     assert calls == []
 
 
+def test_files_argument_empty_list_is_refused_before_any_call(http_server, dataverse_server):
+    """An empty ``files`` list would create a dataset with nothing in it, so it is refused."""
+    dv_url, calls = dataverse_server
+    with pytest.raises(ValueError, match='selects no files'):
+        _mirror(http_server, dataverse_server, files=[])
+    assert calls == []
+
+
 def test_no_publish_creates_draft_without_publishing(http_server, dataverse_server):
     """With publish disabled the dataset is created and filled but not published."""
     result, calls = _mirror(http_server, dataverse_server, publish=False)

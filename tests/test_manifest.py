@@ -1,4 +1,3 @@
-import dataclasses
 import io
 import json
 import pathlib
@@ -17,6 +16,8 @@ from fwl_io.manifest import (
     load_manifest,
     shared_manifest_path,
 )
+from fwl_io.registry import load_registry
+from fwl_io.sync import sync_manifest
 
 pytestmark = pytest.mark.unit
 
@@ -398,6 +399,7 @@ def test_files_filter_loads_onto_the_dataset(tmp_path):
         ('["a.dat", "a.dat"]', 'more than once'),
         ('["../a.dat"]', '"files" entry'),
         ('["/abs.dat"]', '"files" entry'),
+        ('["a b.dat"]', 'whitespace'),
     ],
 )
 def test_malformed_files_list_rejected(tmp_path, files, match):
@@ -429,14 +431,51 @@ def test_registry_must_match_the_files_list(tmp_path):
         ds.registry()
 
 
-def test_fetch_for_fetches_only_the_listed_files(tmp_path, monkeypatch):
-    """fetch_for on a filtered dataset returns its listed files and not a stray file beside them."""
-    data_root = tmp_path / 'data'
-    version_dir, ds = _seed_versioned_dataset(
-        data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n', 'b.dat': b'BB\n'}, ('mymodel',)
+def _serve_record(root, recid, payload):
+    api_dir = root / 'api' / 'records'
+    api_dir.mkdir(parents=True, exist_ok=True)
+    (api_dir / str(recid)).write_text(json.dumps(payload))
+
+
+def test_fetch_for_fetches_only_the_listed_files(http_server, tmp_path, monkeypatch):
+    """A "files" filter drives sync (registry) and fetch (disk), not just an exact-match seed.
+
+    The record carries three files; the manifest declares two. sync_manifest must
+    write a registry of only those two (the direct proof the sync-time filter
+    works), and fetch_for must then return only those two paths offline, with the
+    third file's absence from the registry being what stops it from ever being
+    fetched, whether or not it happens to exist on disk.
+    """
+    base_url, root = http_server
+    contents = {'a.dat': b'A\n', 'b.dat': b'BB\n', 'c.dat': b'C\n'}
+    checksums = {}
+    for name, payload in contents.items():
+        source = tmp_path / name
+        source.write_bytes(payload)
+        checksums[name] = 'sha256:' + pooch.file_hash(str(source), alg='sha256')
+    record = {
+        'id': 1234567,
+        'conceptrecid': '1234566',
+        'files': [{'key': name, 'checksum': checksums[name]} for name in contents],
+    }
+    _serve_record(root, 1234567, record)
+
+    manifest_path = _write(
+        tmp_path,
+        '[star.tracks.demo]\nzenodo = "10.5281/zenodo.1234567"\n'
+        'required_by = ["mymodel"]\nfiles = ["a.dat", "b.dat"]\n',
     )
-    (version_dir / 'extra.dat').write_bytes(b'not in the dataset\n')
-    ds = dataclasses.replace(ds, files=('a.dat', 'b.dat'))
+    written = sync_manifest(manifest_path, api_base=f'{base_url}api/records')
+    assert load_registry(written[0]) == {'a.dat': checksums['a.dat'], 'b.dat': checksums['b.dat']}
+
+    ds = load_manifest(manifest_path)[0]
+    data_root = tmp_path / 'data'
+    version_dir = data_root / ds.subdir / 'r1234567'
+    version_dir.mkdir(parents=True)
+    (version_dir / 'a.dat').write_bytes(contents['a.dat'])
+    (version_dir / 'b.dat').write_bytes(contents['b.dat'])
+    (version_dir / 'c.dat').write_bytes(contents['c.dat'])
+
     monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [ds]}, {}))
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')
 
