@@ -10,7 +10,7 @@ Mirror a dataset once its Zenodo version DOI is pinned in a manifest and you wan
 
 Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a protected environment secret that lives only in CI, so no one needs personal upload rights to the collection; who may run the workflow is the access control.
 
-1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias.
+1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
 2. Leave **publish** checked to publish the dataset (its files become downloadable), or uncheck it to create a private draft you inspect first. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
 3. The run prints the Dataverse DOI. Add it to the dataset's manifest entry:
 
@@ -29,6 +29,14 @@ A draft created with **publish** unchecked stays private until it is published. 
 ## What the mirror does
 
 For the given Zenodo version DOI, the mirror downloads and checksum-verifies every file, creates a Dataverse dataset whose title, authors, and description come from the Zenodo record (with a note recording the source DOI), uploads the files byte-identically with tabular ingest disabled, and publishes the dataset unless asked not to. A concept DOI is rejected, so the mirror always tracks a specific pinned deposit.
+
+## Mirroring part of a deposit
+
+When the manifest entry sets `files`, mirror the same files so the mirror matches what the dataset fetches. In the workflow, fill **files**; file names in it must not contain spaces. From the command line, pass each name with `--file`:
+
+```bash
+fwl-io mirror 10.5281/zenodo.22776069 --collection Proteus_Fr --file name1 --file name2
+```
 
 ## Local dry run
 

@@ -101,6 +101,7 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
         subject=args.subject,
         publish=not args.no_publish,
         dry_run=args.dry_run,
+        files=args.file or None,
     )
     if persistent_id is None:
         print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
@@ -181,6 +182,12 @@ def main(argv: list[str] | None = None) -> int:
         '--subject',
         default='Astronomy and Astrophysics',
         help='Dataverse citation subject (the server rejects a value outside its vocabulary)',
+    )
+    p_mirror.add_argument(
+        '--file',
+        action='append',
+        metavar='NAME',
+        help='mirror only this file of the record (repeatable); match the dataset "files" list',
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
     p_mirror.add_argument(

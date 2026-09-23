@@ -15,6 +15,10 @@ on:
         description: "Dataverse collection alias"
         required: true
         default: "Proteus_Fr"
+      files:
+        description: "Only these files of the deposit, separated by spaces (empty: the whole deposit)"
+        required: false
+        default: ""
       dry_run:
         description: "Download and map metadata only; make no Dataverse changes"
         type: boolean
@@ -47,9 +51,14 @@ jobs:
           # collection name cannot inject commands into a job that holds the token.
           ZENODO_DOI: ${{ inputs.zenodo_doi }}
           COLLECTION: ${{ inputs.collection }}
+          FILES: ${{ inputs.files }}
         run: |
+          set -f
+          file_args=()
+          for name in ${FILES}; do file_args+=(--file "${name}"); done
           fwl-io mirror "${ZENODO_DOI}" \
             --collection "${COLLECTION}" \
             --contact-email "${DATAVERSE_CONTACT_EMAIL}" \
+            "${file_args[@]}" \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
             ${{ inputs.publish && '' || '--no-publish' }}

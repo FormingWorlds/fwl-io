@@ -286,6 +286,7 @@ def mirror_to_dataverse(
     dry_run: bool = False,
     api_base: str = ZENODO_API,
     base_urls: list[str] | None = None,
+    files: list[str] | tuple[str, ...] | None = None,
 ) -> str | None:
     """Mirror a pinned Zenodo deposit to Dataverse; return the Dataverse DOI.
 
@@ -319,6 +320,9 @@ def mirror_to_dataverse(
     base_urls : list[str] | None
         Direct download URLs for the Zenodo files, tried before the DOI
         resolver (used in tests).
+    files : list[str] | tuple[str, ...] | None
+        File names of the record to mirror, matching the ``files`` list of the
+        consuming manifest dataset. ``None`` mirrors the whole record.
 
     Returns
     -------
@@ -330,8 +334,10 @@ def mirror_to_dataverse(
     ValueError
         If ``zenodo_doi`` is malformed or is a concept DOI (a version DOI is
         required), if a real create is requested without a contact email, if the
-        Zenodo record lists no files, or if a file name nests below the dataset
-        directory (Dataverse flattens on the basename, so it would collide).
+        Zenodo record lists no files, if ``files`` names a file the record does
+        not contain or selects none of them, or if a file name nests below the
+        dataset directory (Dataverse flattens on the basename, so it would
+        collide).
     DataverseError
         If a Dataverse native-API request fails: the server rejects it (for
         example an unknown subject in the citation metadata), the HTTP transport
@@ -368,6 +374,14 @@ def mirror_to_dataverse(
     registry = _extract_files(record)
     if not registry:
         raise ValueError(f'Zenodo record {recid} lists no files; nothing to mirror')
+    if files is not None:
+        from fwl_io.sync import select_files
+
+        registry = select_files(registry, files, source=f'Zenodo record {recid}')
+        if not registry:
+            raise ValueError(
+                f'the "files" list for Zenodo record {recid} selects no files; nothing to mirror'
+            )
     # A registry name may nest below the dataset directory. Dataverse's file API
     # keys on the basename, so a nested name would flatten and could collide;
     # refuse it loudly rather than mirror a different layout than Zenodo.

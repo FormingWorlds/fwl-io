@@ -9,17 +9,18 @@ failing fetch.
 import pytest
 
 from fwl_io.manifest import load_manifest, shared_manifest_path
-from fwl_io.sync import fetch_zenodo_registry
+from fwl_io.sync import fetch_zenodo_registry, select_files
 
 pytestmark = pytest.mark.slow
 
 
 def test_committed_registries_match_live_zenodo_records():
     datasets = load_manifest(shared_manifest_path())
-    if not datasets:
-        pytest.skip('shared manifest ships no datasets yet; nothing to verify')
+    assert datasets, 'the shared manifest declares no datasets'
     for ds in datasets:
         live = fetch_zenodo_registry(ds.zenodo)
+        if ds.files is not None:
+            live = select_files(live, ds.files, source=ds.key)
         assert live == ds.registry(), (
             f'{ds.key}: committed registry has drifted from Zenodo record {ds.zenodo}'
         )

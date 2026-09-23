@@ -106,3 +106,30 @@ def test_sync_manifest_partial_failure_writes_the_rest(http_server, tmp_path):
         sync_manifest(manifest, api_base=f'{base_url}api/records')
     assert (tmp_path / 'g.good.registry.txt').is_file(), 'good dataset still synced'
     assert not (tmp_path / 'g.bad.registry.txt').exists()
+
+
+def test_sync_manifest_writes_only_the_listed_files(http_server, tmp_path):
+    """A dataset with ``files`` gets a registry of those files, not the whole record."""
+    base_url, root = http_server
+    _serve_record(root, 1234567, VERSION_RECORD)
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('[g.demo]\nzenodo = "10.5281/zenodo.1234567"\nfiles = ["beta.dat"]\n')
+    written = sync_manifest(manifest, api_base=f'{base_url}api/records')
+    assert load_registry(written[0]) == {'beta.dat': 'md5:bbb222'}
+    assert load_manifest(manifest)[0].registry() == {'beta.dat': 'md5:bbb222'}
+
+
+def test_sync_manifest_rejects_a_listed_file_the_record_lacks(http_server, tmp_path):
+    """A misspelt or removed file fails the sync instead of leaving the dataset short."""
+    base_url, root = http_server
+    _serve_record(root, 1234567, VERSION_RECORD)
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        '[g.demo]\nzenodo = "10.5281/zenodo.1234567"\nfiles = ["alpha.dat", "gamma.dat"]\n'
+    )
+    with pytest.raises(RuntimeError, match='does not contain'):
+        # KeyError from a bare lookup would name gamma.dat too; the wording pins the check
+        sync_manifest(manifest, api_base=f'{base_url}api/records')
+    with pytest.raises(RuntimeError, match='gamma.dat'):
+        sync_manifest(manifest, api_base=f'{base_url}api/records')
+    assert not (tmp_path / 'g.demo.registry.txt').exists()
