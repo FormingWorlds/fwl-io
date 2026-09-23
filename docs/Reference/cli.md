@@ -61,16 +61,23 @@ Exit is 1 when a legacy tree was found and could not be moved, when an installed
 ## fwl-io prune
 
 ```bash
-fwl-io prune [--data-root PATH] [--delete] [--include-orphans] [--yes]
+fwl-io prune [--data-root PATH] [--delete] [--include-orphans] [--yes] \
+    [--allow-empty-reference-set]
 ```
 
 Removes versioned dataset directories no installed manifest references. A dataset pinned to a Zenodo version lives at `<data-root>/<subdir>/r<record-id>`; when a pin advances, the fetcher writes the new version beside the old one and the old one stays on disk. This finds those left-behind version directories and, only when asked, deletes them.
 
-Each version directory is classified against the manifests installed in this environment. One a current pin uses is *referenced* and always kept. One under a subdirectory a current dataset uses, but which no current pin names, is *superseded*: an older version of a known dataset, the default delete target. One under a subdirectory no installed manifest knows is *orphaned*; on a shared data tree it may be the pinned version for a manifest installed in another environment, which this process cannot see, so it is removed only under an explicit opt-in.
+Each version directory is classified against the manifests installed in this environment. One a current pin uses is *referenced* and always kept. One under a subdirectory a current dataset uses, but which no current pin names, is *superseded*: an older version of a known dataset, the default delete target. One under a subdirectory no installed manifest knows is *orphaned*; on a shared data tree it may be the pinned version for a manifest installed in another environment, which this process cannot see, so it is removed only under an explicit opt-in. One that matches the version-directory name shape but carries no stamp naming its own record id is *unrecognised*: the name alone is not proof of what the directory holds, so it is reported but never a delete target.
 
-Nothing is deleted unless the reference set is complete. If any installed manifest fails to load, or any dataset's version directory cannot be computed, the set of referenced directories is a subset of the truth, so no directory can be proven unreferenced: the run reports the failure and deletes nothing. A symlinked directory is never followed or removed, a candidate resolving outside the data root is refused, and each directory is re-checked against the reference set at the moment of deletion.
+Nothing is deleted unless the reference set is complete. If any installed manifest fails to load, or any dataset's version directory cannot be computed, the set of referenced directories is a subset of the truth, so no directory can be proven unreferenced: the run reports the failure and deletes nothing. A symlinked directory is never followed or removed, a candidate resolving outside the data root is refused, and each directory is re-checked against the reference set at the moment of deletion. Deletion also refuses outright while a fetch lock is held anywhere on the data root, since a fetch in progress can change what is referenced.
 
-The default is a dry run: the plan is printed, with reclaimable bytes per category, and nothing is touched. `--delete` removes the superseded directories; `--include-orphans` adds the orphaned ones. Deletion is confirmed interactively, after a warning that a superseded version may still be referenced by another environment on a shared tree, unless `--yes` skips the prompt for non-interactive use. Exit is 1 when the reference set is incomplete, when a removal fails, or when a confirmation is declined; a clean plan or a completed deletion exits 0. The equivalent Python entry points are `fwl_io.plan_prune` and `fwl_io.prune_versions`.
+The default is a dry run: the plan is printed, with reclaimable bytes per category, and nothing is touched. `--delete` removes the superseded directories; `--include-orphans` adds the orphaned ones. Deletion is confirmed interactively, after a warning that a superseded version may still be referenced by another environment on a shared tree, unless `--yes` skips the prompt for non-interactive use.
+
+An orphaned directory is refused by default whenever no installed manifest declares any dataset at all, since an empty reference set is as likely to mean "nothing to keep" as "the manifests failed to install". `--allow-empty-reference-set` overrides this and lets `--include-orphans` proceed anyway; it has no effect without `--include-orphans` and no effect when at least one manifest declares a dataset.
+
+The plan and the delete happen in two separate calls, so the tree can change between them: a fetch can start, or a candidate's classification can move between superseded and orphaned. Deletion re-derives each candidate's state and the lock and reference-set checks at the moment it runs, not from the plan shown earlier, and refuses the whole run rather than deleting against a stale view.
+
+Exit is 1 when the reference set is incomplete, when the data root cannot be fully read, when a fetch lock is held on the data root, when an empty reference set blocks orphan deletion without the override, when deletion is refused at apply time because the tree changed since the plan, when a removal fails, or when a confirmation is declined; a clean plan or a completed deletion exits 0. The equivalent Python entry points are `fwl_io.plan_prune` and `fwl_io.prune_versions`.
 
 ## fwl-io mirror
 

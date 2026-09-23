@@ -14,20 +14,26 @@ manifest loader runs against it.
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import stat
 
 import pytest
+from filelock import FileLock
 
-from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME
+from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME
 from fwl_io.prune import (
     ORPHANED,
     REFERENCED,
     REFUSED,
     SHARED_TREE_WARNING,
     SUPERSEDED,
+    UNRECOGNISED,
     PruneCandidate,
+    _fs_is_case_insensitive,
+    _prune_empty_parents,
     _remove_one,
+    _shadows_known_subdir,
     apply_prune,
     plan_prune,
     prune_versions,
@@ -76,8 +82,17 @@ def _write_manifest(tmp_path):
     return manifest
 
 
+def _write_stamp(directory, record_id):
+    """Write a minimal valid fetcher stamp naming ``record_id`` into ``directory``."""
+    (directory / _STAMP_FILENAME).write_text(json.dumps({'schema': 1, 'record_id': record_id}))
+
+
 def _make_tree(root):
     """Build a data root with one dir of each state, plus a reserved-dir version.
+
+    ``superseded`` and ``orphaned`` carry the fetcher's own stamp, matching what
+    a real fetch writes, so they classify past the stamp guard. ``reserved`` is
+    filtered out before classification ever reaches it and stays unstamped.
 
     Returns
     -------
@@ -97,6 +112,8 @@ def _make_tree(root):
     ):
         directory.mkdir(parents=True)
         (directory / 'data.dat').write_bytes(body)
+    _write_stamp(superseded, OLD_RECID)
+    _write_stamp(orphaned, '99999999')
     return {
         'referenced': referenced,
         'superseded': superseded,
@@ -142,9 +159,11 @@ def test_the_summary_reports_reclaimable_bytes_per_category(tmp_path, monkeypatc
     _make_tree(root)
 
     report = plan_prune(data_root=root)
+    superseded_stamp = len(json.dumps({'schema': 1, 'record_id': OLD_RECID}))
+    orphaned_stamp = len(json.dumps({'schema': 1, 'record_id': '99999999'}))
 
-    assert report.reclaimable(SUPERSEDED) == len(_SUPERSEDED_BYTES)
-    assert report.reclaimable(ORPHANED) == len(_ORPHAN_BYTES)
+    assert report.reclaimable(SUPERSEDED) == len(_SUPERSEDED_BYTES) + superseded_stamp
+    assert report.reclaimable(ORPHANED) == len(_ORPHAN_BYTES) + orphaned_stamp
     summary = report.summary()
     assert 'superseded (' in summary and 'orphaned (' in summary
 
@@ -561,3 +580,451 @@ def test_apply_prune_ignores_a_version_dir_that_appeared_after_the_plan(tmp_path
 
     assert not dirs['superseded'].exists(), 'the planned superseded pin is still removed'
     assert late.is_dir(), 'a version dir not in the plan is never deleted by apply'
+
+
+# A manifest key cased differently from the directory names actually written to
+# disk, so classification must match it through filesystem identity and a
+# case-insensitive subdir comparison rather than a literal string comparison.
+_CI_KEY = 'Star.Tracks.baraffe_2015'
+_CI_SUBDIR = 'Star/Tracks/baraffe_2015'
+
+
+def _write_case_mismatched_manifest(tmp_path):
+    """Write a manifest whose declared subdir differs in case from the on-disk one."""
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[{_CI_KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\n')
+    return manifest
+
+
+def test_a_case_mismatched_manifest_subdir_still_matches_the_on_disk_version(tmp_path, monkeypatch):
+    """A manifest key cased differently from the on-disk subdir is still matched.
+
+    APFS is case-insensitive but case-preserving, so a manifest may spell a
+    dataset's subdir with different casing than the directory actually carries
+    on disk. Both the referenced-version identity check and the known-subdir
+    match must still recognise the two as the same dataset.
+    """
+    root = tmp_path / 'data'
+    root.mkdir(parents=True)
+    if not _fs_is_case_insensitive(root):
+        pytest.skip('this filesystem is case-sensitive')
+    _install_manifest(monkeypatch, _write_case_mismatched_manifest(tmp_path))
+    lower_subdir = _CI_SUBDIR.lower()
+    referenced = root / lower_subdir / f'r{RECID}'
+    superseded = root / lower_subdir / f'r{OLD_RECID}'
+    referenced.mkdir(parents=True)
+    (referenced / 'data.dat').write_bytes(_REFERENCED_BYTES)
+    superseded.mkdir(parents=True)
+    (superseded / 'data.dat').write_bytes(_SUPERSEDED_BYTES)
+    _write_stamp(superseded, OLD_RECID)
+
+    report = plan_prune(data_root=root)
+    states = _states(report)
+
+    assert states[f'{lower_subdir}/r{RECID}'] == REFERENCED
+    assert states[f'{lower_subdir}/r{OLD_RECID}'] == SUPERSEDED
+
+
+def test_orphans_are_blocked_when_no_manifest_declares_any_dataset(tmp_path, monkeypatch):
+    """An empty reference set stops an orphan-including deletion without the override.
+
+    Nothing declared means nothing can be told apart from an environment this
+    one simply cannot see, so the loudest opt-in still needs the explicit
+    override before it will touch a directory.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('')
+    _install_manifest(monkeypatch, manifest)
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    report = prune_versions(data_root=root, delete=True, include_orphans=True)
+
+    assert report.empty_reference_set
+    refusal = report.deletion_refusal(include_orphans=True)
+    assert refusal is not None
+    assert 'no installed manifest declares any dataset' in refusal
+    for directory in dirs.values():
+        assert directory.exists(), 'an empty reference set blocks every deletion under orphans'
+
+
+def test_the_allow_empty_reference_set_override_permits_orphan_deletion(tmp_path, monkeypatch):
+    """The override lets an orphan-including run proceed with no manifest declared.
+
+    An unstamped directory still survives even under the override: the stamp
+    guard is independent of the reference-set checks.
+    """
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('')
+    _install_manifest(monkeypatch, manifest)
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    report = prune_versions(
+        data_root=root, delete=True, include_orphans=True, allow_empty_reference_set=True
+    )
+
+    assert report.empty_reference_set
+    assert not dirs['superseded'].exists(), 'a stamped directory is removed under the override'
+    assert not dirs['orphaned'].exists(), 'a stamped directory is removed under the override'
+    assert dirs['referenced'].is_dir(), 'an unstamped directory is never removed'
+
+
+def test_the_cli_refuses_to_delete_orphans_when_the_reference_set_is_empty(
+    tmp_path, monkeypatch, capsys
+):
+    """The CLI reports the empty-reference-set refusal and deletes nothing."""
+    from fwl_io.cli import main
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text('')
+    _install_manifest(monkeypatch, manifest)
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    exit_code = main(['prune', '--data-root', str(root), '--delete', '--yes', '--include-orphans'])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert 'no installed manifest declares any dataset' in err
+    for directory in dirs.values():
+        assert directory.exists(), 'nothing is deleted when the reference set is empty'
+
+
+def test_the_cli_refuses_to_delete_when_a_manifest_did_not_load(tmp_path, monkeypatch, capsys):
+    """The CLI reports the incomplete-reference-set refusal and deletes nothing.
+
+    This drives ``main()`` through the same ``deletion_refusal`` branch that
+    the library-level blocked test exercises, so the CLI's own wiring to it is
+    checked directly rather than assumed from the library test.
+    """
+    from fwl_io.cli import main
+
+    broken = tmp_path / 'broken.toml'
+    broken.write_text('this is not valid toml [[[\n')
+    _install_manifest(
+        monkeypatch,
+        _write_manifest(tmp_path),
+        extra_eps=[('brokenprovider', lambda: broken)],
+    )
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    exit_code = main(['prune', '--data-root', str(root), '--delete', '--yes'])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert 'the reference set is incomplete' in err
+    assert dirs['superseded'].is_dir(), 'nothing is deleted when a manifest failed to load'
+
+
+def test_an_unstamped_version_dir_is_unrecognised_and_never_deleted(tmp_path, monkeypatch):
+    """A version-shaped directory with no stamp is left alone, even under orphans."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    unstamped = root / SUBDIR / 'r16000000'
+    unstamped.mkdir(parents=True)
+    (unstamped / 'data.dat').write_bytes(b'no stamp here\n')
+
+    report = prune_versions(data_root=root, delete=True, include_orphans=True)
+
+    assert _states(report)[f'{SUBDIR}/r16000000'] == UNRECOGNISED
+    assert unstamped.is_dir(), 'an unstamped version directory is never removed'
+
+
+def test_a_stamp_naming_a_different_record_id_is_unrecognised(tmp_path, monkeypatch):
+    """A stamp that names another record id does not vouch for this directory."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    mismatched = root / SUBDIR / 'r17000000'
+    mismatched.mkdir(parents=True)
+    (mismatched / 'data.dat').write_bytes(b'mismatched stamp\n')
+    _write_stamp(mismatched, '99999999')
+
+    report = prune_versions(data_root=root, delete=True, include_orphans=True)
+
+    assert _states(report)[f'{SUBDIR}/r17000000'] == UNRECOGNISED
+    assert mismatched.is_dir(), 'a stamp naming another record id is never removed'
+
+
+def test_remove_one_refuses_a_candidate_with_no_matching_stamp(tmp_path):
+    """The delete step re-checks the stamp rather than trusting the plan's state."""
+    root = tmp_path / 'data'
+    version = root / SUBDIR / f'r{OLD_RECID}'
+    version.mkdir(parents=True)
+    (version / 'data.dat').write_bytes(b'no stamp\n')
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert result.state == REFUSED
+    assert 'no matching stamp' in result.detail
+    assert version.is_dir()
+
+
+def test_a_superseded_dir_containing_a_nested_version_dir_is_unrecognised(tmp_path, monkeypatch):
+    """A version directory is a leaf; one holding another version dir is not trusted.
+
+    A candidate that contains a further ``r<digits>`` directory is downgraded
+    to ``UNRECOGNISED`` at classification time, before deletion is even
+    considered.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    nested = dirs['superseded'] / 'r18000000'
+    nested.mkdir()
+    (nested / 'data.dat').write_bytes(b'nested version\n')
+
+    report = plan_prune(data_root=root)
+
+    assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == UNRECOGNISED
+    assert dirs['superseded'].is_dir()
+
+
+def test_remove_one_refuses_a_candidate_containing_a_nested_version_or_stamp(tmp_path):
+    """The delete step re-checks for nested content rather than trusting the plan's state."""
+    root = tmp_path / 'data'
+    version = root / SUBDIR / f'r{OLD_RECID}'
+    version.mkdir(parents=True)
+    (version / 'data.dat').write_bytes(_SUPERSEDED_BYTES)
+    _write_stamp(version, OLD_RECID)
+    nested = version / 'r19000000'
+    nested.mkdir()
+    (nested / 'data.dat').write_bytes(b'nested\n')
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert result.state == REFUSED
+    assert 'nested version or stamp' in result.detail
+    assert version.is_dir() and nested.is_dir()
+
+
+def test_remove_one_refuses_a_candidate_a_referenced_symlink_points_into(tmp_path):
+    """A file a current pin symlinks into is protected even outside its own directory.
+
+    ``referenced_symlink_targets`` is threaded in explicitly here rather than
+    built from a real referenced tree, isolating the guard from the discovery
+    step that normally computes it.
+    """
+    root = tmp_path / 'data'
+    version = root / SUBDIR / f'r{OLD_RECID}'
+    version.mkdir(parents=True)
+    target = version / 'data.dat'
+    target.write_bytes(_SUPERSEDED_BYTES)
+    _write_stamp(version, OLD_RECID)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(
+        candidate,
+        root,
+        referenced=set(),
+        referenced_symlink_targets=frozenset({target.resolve()}),
+    )
+
+    assert result.state == REFUSED
+    assert 'symlinks into this directory' in result.detail
+    assert version.is_dir()
+
+
+def test_a_referenced_symlink_into_a_superseded_dir_blocks_its_removal(tmp_path, monkeypatch):
+    """A superseded directory a live pin's own file symlinks into survives an end-to-end prune."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    link = dirs['referenced'] / 'shared.dat'
+    link.symlink_to(dirs['superseded'] / 'data.dat')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert dirs['superseded'].is_dir(), 'a directory a referenced symlink points into survives'
+    assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == REFUSED
+
+
+def test_remove_one_refuses_a_candidate_reached_via_a_differently_cased_symlink_target(tmp_path):
+    """A referenced symlink target still blocks removal when its path is spelled in another case.
+
+    The containment check compares by filesystem identity (device and inode),
+    not by path string, so a target reached through a case-flipped ancestor
+    segment still names the same directory as the candidate on a
+    case-insensitive filesystem. A plain string-prefix comparison would see
+    two paths that share no common casing and miss the containment, letting
+    the deletion through even though a live symlink points into it.
+    """
+    root = tmp_path / 'data'
+    version = root / SUBDIR / f'r{OLD_RECID}'
+    version.mkdir(parents=True)
+    target = version / 'data.dat'
+    target.write_bytes(_SUPERSEDED_BYTES)
+    _write_stamp(version, OLD_RECID)
+    if not _fs_is_case_insensitive(root):
+        pytest.skip('this filesystem is case-sensitive')
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+    mismatched_target = version.parent / f'R{OLD_RECID}' / 'data.dat'
+
+    result = _remove_one(
+        candidate,
+        root,
+        referenced=set(),
+        referenced_symlink_targets=frozenset({mismatched_target.resolve()}),
+    )
+
+    assert result.state == REFUSED
+    assert 'symlinks into this directory' in result.detail
+    assert version.is_dir()
+
+
+def test_apply_prune_refuses_when_a_fetch_lock_appears_after_the_plan(tmp_path, monkeypatch):
+    """apply_prune refuses and records why when a fetch lock appears after the plan.
+
+    A plan and its apply are two separate calls, and a fetch can start
+    between them. Both ``ok`` and ``apply_refusal`` must show the refusal, not
+    just one of them, since a caller may check either.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    lock_dir = root / _LOCK_DIRNAME
+    lock_dir.mkdir(parents=True)
+    held = FileLock(str(lock_dir / 'demo.lock'), timeout=0)
+    held.acquire()
+    try:
+        result = apply_prune(plan, data_root=root)
+
+        assert not result.ok, 'a lock taken after the plan must not read as a clean run'
+        assert result.apply_refusal is not None
+        assert 'a fetch lock is held on the data root' in result.apply_refusal
+        assert 'refused at apply time' in result.summary()
+        assert dirs['superseded'].is_dir(), 'nothing is deleted once the lock blocks apply'
+    finally:
+        held.release()
+
+
+def test_apply_prune_does_not_delete_a_candidate_demoted_to_orphaned_before_apply(
+    tmp_path, monkeypatch
+):
+    """A candidate the plan called superseded is not deleted once it turns orphaned.
+
+    Uninstalling the manifest between the plan and the apply call drops the
+    subdir from the current reference set, so the candidate's true state at
+    apply time is orphaned, not superseded. A default apply, without the
+    orphan opt-in, must read that fresh state rather than the plan's
+    snapshot, or it deletes data no longer provably safe to remove.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    assert _states(plan)[f'{SUBDIR}/r{OLD_RECID}'] == SUPERSEDED
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
+    result = apply_prune(plan, data_root=root)
+
+    assert dirs['superseded'].is_dir(), 'a candidate demoted to orphaned is not removed by default'
+    assert _states(result)[f'{SUBDIR}/r{OLD_RECID}'] == ORPHANED
+
+
+def test_prune_empty_parents_removes_an_empty_chain_up_to_the_root(tmp_path):
+    """An empty chain of parent directories is removed up to, not including, the root."""
+    root = tmp_path / 'data'
+    leaf_parent = root / 'a' / 'b' / 'c'
+    leaf_parent.mkdir(parents=True)
+
+    _prune_empty_parents(leaf_parent, root)
+
+    assert root.is_dir(), 'the root itself is never removed'
+    assert not (root / 'a').exists(), 'the whole empty chain above is pruned'
+
+
+def test_prune_empty_parents_stops_at_a_parent_still_holding_a_sibling(tmp_path):
+    """The walk up stops as soon as a parent still holds something else."""
+    root = tmp_path / 'data'
+    sibling = root / 'a' / 'b' / 'sibling'
+    empty_leaf_parent = root / 'a' / 'b' / 'c'
+    sibling.mkdir(parents=True)
+    empty_leaf_parent.mkdir(parents=True)
+
+    _prune_empty_parents(empty_leaf_parent, root)
+
+    assert not empty_leaf_parent.exists(), 'the now-empty leaf parent is removed'
+    assert (root / 'a' / 'b').is_dir(), 'a parent still holding a sibling directory is kept'
+    assert sibling.is_dir()
+
+
+def test_prune_empty_parents_leaves_a_symlinked_directory_alone(tmp_path):
+    """A symlink in the ascent chain is left alone, not removed or followed."""
+    root = tmp_path / 'data'
+    root.mkdir()
+    real_target = root / 'real_target'
+    real_target.mkdir()
+    link = root / 'a' / 'link'
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real_target, target_is_directory=True)
+
+    _prune_empty_parents(link, root)
+
+    assert link.is_symlink(), 'a symlinked directory is left alone, not removed'
+    assert real_target.is_dir(), 'the symlink target is untouched'
+
+
+def test_a_held_fetch_lock_blocks_every_deletion(tmp_path, monkeypatch):
+    """A lock file currently held by another process stops deletion outright.
+
+    The lock directory holds an opaque hash per guarded path, so the check
+    covers the whole tree: any lock held anywhere means a fetch may be under
+    way and nothing may be deleted until it releases.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    lock_dir = root / _LOCK_DIRNAME
+    lock_dir.mkdir(parents=True)
+    held = FileLock(str(lock_dir / 'demo.lock'), timeout=0)
+    held.acquire()
+    try:
+        report = prune_versions(data_root=root, delete=True)
+
+        assert report.lock_held
+        refusal = report.deletion_refusal(include_orphans=False)
+        assert refusal is not None
+        assert 'a fetch lock is held on the data root' in refusal
+        assert 'a fetch lock is held on the data root' in report.summary()
+        assert dirs['superseded'].is_dir(), 'nothing is deleted while a fetch lock is held'
+    finally:
+        held.release()
+
+
+def test_an_unreadable_lock_file_blocks_every_deletion_too(tmp_path, monkeypatch):
+    """A lock file this cannot even test is treated as held, not as absent.
+
+    Its state cannot be proven safe, so it must block deletion the same way
+    an actually-held lock does, rather than being skipped over.
+    """
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    lock_dir = root / _LOCK_DIRNAME
+    lock_dir.mkdir(parents=True)
+    unreadable = lock_dir / 'demo.lock'
+    unreadable.write_text('')
+    os.chmod(unreadable, 0)
+    try:
+        report = prune_versions(data_root=root, delete=True)
+
+        assert report.lock_held
+        assert dirs['superseded'].is_dir(), 'nothing is deleted while a lock cannot be checked'
+    finally:
+        os.chmod(unreadable, stat.S_IRWXU)
+
+
+def test_shadows_known_subdir_descends_through_two_levels():
+    """A version-shaped segment two levels above a declared subdir is still descended into."""
+    known = {'opacity/r1000/deep/nested'}
+
+    assert _shadows_known_subdir('opacity/r1000', known, case_insensitive=False)
+    assert not _shadows_known_subdir('opacity/r2000', known, case_insensitive=False)

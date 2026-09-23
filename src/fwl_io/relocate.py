@@ -200,12 +200,35 @@ def _legacy_locations() -> tuple[dict[str, str], str | None]:
     return safe, None
 
 
-def _inside(path: Path, root: Path) -> bool:
-    """True when ``path`` resolves within ``root``, symlinks followed."""
+def inside(path: Path, root: Path) -> bool:
+    """True when ``path`` resolves within ``root``, symlinks followed.
+
+    Walks up from the resolved path by filesystem identity (device and
+    inode), not by comparing path strings, so a case-insensitive filesystem's
+    alternate spelling of ``root`` or one of its ancestors still matches. A
+    component that does not exist yet (the target side of a move that has
+    not happened) is skipped up to the nearest ancestor that does exist.
+    """
     try:
-        return path.resolve().is_relative_to(root.resolve())
+        current = path.resolve()
+        root_stat = os.stat(root.resolve())
     except OSError:
         return False
+    while True:
+        try:
+            current_stat = os.stat(current)
+        except OSError:
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+            continue
+        if (current_stat.st_dev, current_stat.st_ino) == (root_stat.st_dev, root_stat.st_ino):
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 def _escaping(
@@ -218,11 +241,11 @@ def _escaping(
     while the directory holding it looks perfectly ordinary.
     """
     for path in (legacy_dir, target_dir):
-        if not _inside(path, root):
+        if not inside(path, root):
             return path
     for name in names:
         for path in (legacy_dir / name, target_dir / name):
-            if not _inside(path, root):
+            if not inside(path, root):
                 return path
     return None
 
@@ -333,7 +356,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
             legacy_dir = root / legacy
             try:
                 registry = ds.registry()
-                target_dir = root / _version_dir(ds)
+                target_dir = root / version_dir(ds)
             except Exception as exc:  # noqa: BLE001 -- reported, never raised
                 entries.append(
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
@@ -380,7 +403,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
     return RelocationReport(tuple(entries), dict(manifest_errors), layout_error)
 
 
-def _version_dir(ds: Dataset) -> str:
+def version_dir(ds: Dataset) -> str:
     """The dataset's location below the data root, version directory included."""
     from fwl_io.doi import zenodo_record_id
 

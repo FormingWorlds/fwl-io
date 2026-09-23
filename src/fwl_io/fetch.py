@@ -817,6 +817,17 @@ class Fetcher:
         ]
 
 
+def read_stamp(directory: Path) -> dict | None:
+    """The stamp record in ``directory``, or ``None`` if there is no usable one.
+
+    The public entry point onto the same check :meth:`Fetcher._stamp_members`
+    uses internally, for a caller such as prune that needs positive proof a
+    directory was written by an fwl-io fetch without building a full
+    ``Fetcher`` for it.
+    """
+    return Fetcher._read_stamp(directory)
+
+
 def create_fetcher(
     subdir: str,
     zenodo: str | None = None,

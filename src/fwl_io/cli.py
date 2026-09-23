@@ -85,7 +85,6 @@ def _cmd_relocate(args: argparse.Namespace) -> int:
 def _cmd_prune(args: argparse.Namespace) -> int:
     from fwl_io.prune import (
         SHARED_TREE_WARNING,
-        SUPERSEDED,
         _human_bytes,
         apply_prune,
         plan_prune,
@@ -96,16 +95,12 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     if not args.delete:
         print('dry run: nothing was deleted; pass --delete to remove the superseded versions')
         return 0 if plan.ok else 1
-    if plan.blocked:
-        print(
-            'fwl-io: not deleting anything while the reference set is incomplete', file=sys.stderr
-        )
-        return 1
-    if plan.scan_error is not None:
-        print(
-            'fwl-io: not deleting anything while the data root cannot be fully read',
-            file=sys.stderr,
-        )
+    refusal = plan.deletion_refusal(
+        include_orphans=args.include_orphans,
+        allow_empty_reference_set=args.allow_empty_reference_set,
+    )
+    if refusal is not None:
+        print(f'fwl-io: not deleting anything, {refusal}', file=sys.stderr)
         return 1
     targets = list(plan.superseded) + (list(plan.orphaned) if args.include_orphans else [])
     if not targets:
@@ -115,8 +110,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     print(f'\nabout to delete {len(targets)} version directory(ies), {_human_bytes(total)}:')
     for c in sorted(targets, key=lambda c: c.rel):
         print(f'  {c.rel}  ({c.state}, {_human_bytes(c.size)})')
-    if any(c.state == SUPERSEDED for c in targets):
-        print(f'\n{SHARED_TREE_WARNING}\n')
+    print(f'\n{SHARED_TREE_WARNING}\n')
     if not args.yes:
         try:
             reply = input('type "yes" to delete these directories: ')
@@ -125,7 +119,12 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         if reply.strip() != 'yes':
             print('aborted; nothing was deleted')
             return 1
-    result = apply_prune(plan, data_root=args.data_root, include_orphans=args.include_orphans)
+    result = apply_prune(
+        plan,
+        data_root=args.data_root,
+        include_orphans=args.include_orphans,
+        allow_empty_reference_set=args.allow_empty_reference_set,
+    )
     print(result.summary())
     return 0 if result.ok else 1
 
@@ -225,6 +224,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_prune.add_argument(
         '--yes', action='store_true', help='skip the interactive confirmation (for scripts)'
+    )
+    p_prune.add_argument(
+        '--allow-empty-reference-set',
+        action='store_true',
+        help=(
+            'permit --include-orphans to delete even when no installed manifest '
+            'declares any dataset'
+        ),
     )
     p_prune.set_defaults(func=_cmd_prune)
 
