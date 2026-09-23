@@ -208,11 +208,34 @@ def _legacy_locations() -> tuple[dict[str, str], str | None]:
 
 
 def _inside(path: Path, root: Path) -> bool:
-    """True when ``path`` resolves within ``root``, symlinks followed."""
+    """True when ``path`` resolves within ``root``, symlinks followed.
+
+    Walks up from the resolved path by filesystem identity (device and
+    inode), not by comparing path strings, so a case-insensitive filesystem's
+    alternate spelling of ``root`` or one of its ancestors still matches. A
+    component that does not exist yet (the target side of a move that has
+    not happened) is skipped up to the nearest ancestor that does exist.
+    """
     try:
-        return path.resolve().is_relative_to(root.resolve())
-    except OSError:
+        current = path.resolve()
+        root_stat = os.stat(root.resolve())
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
         return False
+    while True:
+        try:
+            current_stat = os.stat(current)
+        except OSError:
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+            continue
+        if (current_stat.st_dev, current_stat.st_ino) == (root_stat.st_dev, root_stat.st_ino):
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 def _escaping(

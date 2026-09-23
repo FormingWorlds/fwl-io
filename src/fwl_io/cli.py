@@ -1,5 +1,5 @@
-"""Command-line interface for ``fwl-io``: sync, list, fetch, check, relocate, mirror,
-mirror-publish.
+"""Command-line interface for ``fwl-io``: sync, list, fetch, check, relocate, prune,
+mirror, mirror-publish.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -120,6 +120,54 @@ def _cmd_relocate(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_prune(args: argparse.Namespace) -> int:
+    from fwl_io.prune import (
+        SHARED_TREE_WARNING,
+        _delete_unsupported,
+        _human_bytes,
+        apply_prune,
+        plan_prune,
+    )
+
+    plan = plan_prune(data_root=args.data_root)
+    print(plan.summary())
+    if not args.delete:
+        print('dry run: nothing was deleted; pass --delete to remove the superseded versions')
+        return 0 if plan.ok else 1
+    refusal = _delete_unsupported() or plan.deletion_refusal(
+        include_orphans=args.include_orphans,
+        allow_empty_reference_set=args.allow_empty_reference_set,
+    )
+    if refusal is not None:
+        print(f'fwl-io: not deleting anything, {refusal}', file=sys.stderr)
+        return 1
+    targets = list(plan.superseded) + (list(plan.orphaned) if args.include_orphans else [])
+    if not targets:
+        print('nothing to prune')
+        return 0
+    total = sum(c.size for c in targets)
+    print(f'\nabout to delete {len(targets)} version directory(ies), {_human_bytes(total)}:')
+    for c in sorted(targets, key=lambda c: c.rel):
+        print(f'  {c.rel}  ({c.state}, {_human_bytes(c.size)})')
+    print(f'\n{SHARED_TREE_WARNING}\n')
+    if not args.yes:
+        try:
+            reply = input('type "yes" to delete these directories: ')
+        except EOFError:
+            reply = ''
+        if reply.strip() != 'yes':
+            print('aborted; nothing was deleted')
+            return 1
+    result = apply_prune(
+        plan,
+        data_root=args.data_root,
+        include_orphans=args.include_orphans,
+        allow_empty_reference_set=args.allow_empty_reference_set,
+    )
+    print(result.summary())
+    return 0 if result.ok else 1
+
+
 def _cmd_mirror(args: argparse.Namespace) -> int:
     from fwl_io.mirror import mirror_to_dataverse
 
@@ -207,6 +255,31 @@ def main(argv: list[str] | None = None) -> int:
         '--dry-run', action='store_true', help='report what would move without moving it'
     )
     p_relocate.set_defaults(func=_cmd_relocate)
+
+    p_prune = sub.add_parser(
+        'prune', help='remove versioned dataset directories no installed manifest references'
+    )
+    p_prune.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_prune.add_argument(
+        '--delete', action='store_true', help='remove the directories (default is a dry run)'
+    )
+    p_prune.add_argument(
+        '--include-orphans',
+        action='store_true',
+        help='also remove directories under a subdir no installed manifest knows',
+    )
+    p_prune.add_argument(
+        '--yes', action='store_true', help='skip the interactive confirmation (for scripts)'
+    )
+    p_prune.add_argument(
+        '--allow-empty-reference-set',
+        action='store_true',
+        help=(
+            'permit --include-orphans to delete even when no installed manifest '
+            'declares any dataset'
+        ),
+    )
+    p_prune.set_defaults(func=_cmd_prune)
 
     p_mirror = sub.add_parser('mirror', help='mirror a Zenodo deposit to a Dataverse collection')
     p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')
