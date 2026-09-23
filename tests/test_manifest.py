@@ -1479,7 +1479,9 @@ def _fetch_for_progress_probe(tmp_path, monkeypatch):
     _, ds = _seed_versioned_dataset(
         tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
     )
-    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [ds]}, {}))
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+    )
 
     seen = {}
 
