@@ -1608,3 +1608,91 @@ def test_older_schema_refusal_names_both_numbers(tmp_path, monkeypatch):
     # Discrimination: at the reader's own schema the same file loads, so the
     # refusal is the number's doing.
     assert load_manifest(_write(tmp_path, f'manifest_schema = 3\n{DEMO}'))[0].key == 'demo'
+
+
+def _fetch_for_progress_probe(tmp_path, monkeypatch):
+    """Wire fetch_for onto a fake create_fetcher and return the seen-progress dict."""
+    _, ds = _seed_versioned_dataset(
+        tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
+    )
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+    )
+
+    seen = {}
+
+    def fake_create_fetcher(**kwargs):
+        seen['progress'] = kwargs.get('progress')
+
+        class _Fetcher:
+            def fetch_all(self):
+                return [tmp_path / 'a.dat']
+
+        return _Fetcher()
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', fake_create_fetcher)
+    return seen
+
+
+def test_fetch_for_forwards_progress_to_create_fetcher(tmp_path, monkeypatch):
+    """The progress flag reaches create_fetcher, the single point that wires the bar."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    # tqdm is an opt-in extra absent from the default CI install, so force it
+    # present here: this test is about forwarding, not the degrade path below.
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+    assert seen['progress'] is True
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=False)
+    assert seen['progress'] is False
+
+
+def test_fetch_for_soft_degrades_without_tqdm(tmp_path, monkeypatch, caplog):
+    """A library caller asking for a bar without tqdm still fetches, bar off."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_drops_progress_without_stderr(tmp_path, monkeypatch, caplog):
+    """With tqdm present but no stderr, the bar is dropped without the tqdm hint."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text
+
+
+def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(tmp_path, monkeypatch, caplog):
+    """Missing tqdm is still named when stderr is also gone; logging never falls back to stdout."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(tmp_path, monkeypatch, caplog):
+    """Without pooch's private tqdm binding the bar is dropped, but tqdm is not named."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.delattr('pooch.downloaders.tqdm', raising=False)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text

@@ -1099,6 +1099,119 @@ def test_downloader_carries_explicit_timeout(tmp_path):
     assert type(doi_dl).__name__ == 'DOIDownloader'
 
 
+def test_downloader_carries_progress_flag(tmp_path, monkeypatch):
+    """The ``progress`` setting reaches pooch's ``progressbar`` on both mirror kinds.
+
+    The DOI downloader defers its tqdm check, so ``progress=True`` sets its
+    ``progressbar`` without tqdm present. The HTTP downloader checks tqdm at
+    construction, so the test supplies a stand-in through pooch's module binding
+    to reach the same assertion where the optional dependency is not installed.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', object())
+    on = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert on._downloader('http://example.invalid/').progressbar is True
+    assert on._downloader(f'doi:{ZENODO}/').progressbar is True
+
+    off = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=False,
+    )
+    assert off._downloader('http://example.invalid/').progressbar is False
+    assert off._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
+def test_downloader_drops_progress_when_tqdm_absent(tmp_path, monkeypatch):
+    """A fetch with ``progress=True`` builds a bar-less downloader when tqdm is gone.
+
+    pooch's HTTP downloader raises at construction when ``progressbar=True`` and
+    tqdm is not importable, which would abort a download over a cosmetic bar.
+    With tqdm removed through pooch's module binding, both mirror kinds must
+    still build, with ``progressbar`` forced off.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', None)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
+def test_downloader_drops_progress_without_stderr(tmp_path, monkeypatch):
+    """With tqdm present but no ``sys.stderr``, both downloaders are built bar-less.
+
+    tqdm draws on stderr, so a bar requested there would fail once pooch starts
+    the download instead of degrading.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
+def test_downloader_drops_progress_when_pooch_binding_missing(tmp_path, monkeypatch):
+    """A pooch without its private ``tqdm`` binding degrades to no bar, not an error."""
+    import pooch.downloaders
+
+    monkeypatch.delattr(pooch.downloaders, 'tqdm', raising=False)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert not hasattr(pooch.downloaders, 'tqdm')
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
+def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path, capsys):
+    """A download with ``progress=True`` completes through the installed tqdm.
+
+    The other progress tests substitute pooch's tqdm binding; this one draws the
+    real bar against the local server, so it skips where the ``progress`` extra
+    is absent.
+    """
+    pytest.importorskip('tqdm')
+    base_url, registry = sample_files
+    fetcher = _fetcher(base_url, registry, tmp_path, progress=True)
+    assert fetcher._downloader(base_url).progressbar is True
+    path = fetcher.fetch('alpha.dat')
+    assert path.read_bytes() == b'0.1 0.2 0.3\n'
+    assert '100%' in capsys.readouterr().err
+
+
 def test_real_server_503_then_200_is_retried_and_served(tmp_path, monkeypatch):
     """A mirror answering 503 once, then 200, is retried through the real stack.
 

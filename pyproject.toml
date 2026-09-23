@@ -41,7 +41,12 @@ Repository = "https://github.com/FormingWorlds/fwl-io"
 Issues = "https://github.com/FormingWorlds/fwl-io/issues"
 
 [project.optional-dependencies]
+progress = [
+    # pooch's own "progress" extra requires tqdm>=4.41,<5; keep the same bounds.
+    "tqdm>=4.41,<5",
+]
 develop = [
+    "fwl-io[progress]",
     "pytest>=8.0",
     "pytest-cov",
     "pytest-timeout",

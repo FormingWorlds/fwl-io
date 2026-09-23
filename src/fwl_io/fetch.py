@@ -58,6 +58,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -159,6 +160,36 @@ def _is_transient(exc: BaseException) -> bool:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         return status in _RETRYABLE_STATUS
     return isinstance(exc, _TRANSIENT_EXC)
+
+
+def _progressbar_unavailable() -> str | None:
+    """Return why pooch cannot render a download progress bar, or ``None``.
+
+    pooch binds tqdm once, at its own import, so ``pooch.downloaders.tqdm`` is
+    ``None`` when tqdm is not installed and building a downloader with
+    ``progressbar=True`` then raises. Reading that binding is exactly what pooch
+    checks, so a missing bar is dropped rather than turned into a download error.
+
+    Returns
+    -------
+    str | None
+        ``'pooch'`` when pooch has no ``tqdm`` binding at all (it is a private
+        attribute), ``'tqdm'`` when tqdm is not installed, ``'stderr'`` when there
+        is no ``sys.stderr`` for tqdm to draw on (the download would otherwise
+        fail once it starts), and ``None`` when a bar can be drawn.
+    """
+    if not hasattr(pooch.downloaders, 'tqdm'):
+        return 'pooch'
+    if pooch.downloaders.tqdm is None:
+        return 'tqdm'
+    if sys.stderr is None:
+        return 'stderr'
+    return None
+
+
+def _progressbar_supported() -> bool:
+    """Return whether pooch can render a download progress bar."""
+    return _progressbar_unavailable() is None
 
 
 class Fetcher:
@@ -376,14 +407,17 @@ class Fetcher:
         """Build a pooch downloader for one mirror with a bounded request timeout.
 
         A ``doi:`` mirror is resolved through pooch's DOI downloader; a direct
-        base URL uses the plain HTTP downloader. Both carry the same explicit
+        base URL uses the plain HTTP downloader. Both use the same explicit
         per-request timeout (``_DOWNLOAD_TIMEOUT_S``), so a stalled socket fails
         in bounded time instead of inheriting pooch's downloader-specific
-        default.
+        default. The progress bar is requested only when it can be drawn (tqdm
+        installed and a ``sys.stderr`` present), so a fetch with
+        ``progress=True`` otherwise still runs, without a bar.
         """
+        progressbar = self.progress and _progressbar_supported()
         if mirror.startswith('doi:'):
-            return pooch.DOIDownloader(progressbar=self.progress, timeout=_DOWNLOAD_TIMEOUT_S)
-        return pooch.HTTPDownloader(progressbar=self.progress, timeout=_DOWNLOAD_TIMEOUT_S)
+            return pooch.DOIDownloader(progressbar=progressbar, timeout=_DOWNLOAD_TIMEOUT_S)
+        return pooch.HTTPDownloader(progressbar=progressbar, timeout=_DOWNLOAD_TIMEOUT_S)
 
     def _retrieve_once(self, mirror: str, fname: str, known_hash: str, into_dir: Path) -> str:
         """Download ``fname`` from a single mirror in one attempt.
@@ -846,7 +880,9 @@ def create_fetcher(
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
     progress : bool
-        Show a download progress bar (requires tqdm; useful for large files).
+        Show a download progress bar; useful for large files. The bar needs
+        tqdm and a ``sys.stderr``; if either is missing it is skipped and the
+        download runs.
     extract : str | None
         When set (``"tar"`` or ``"zip"``), the single registry entry is a
         downloadable archive; it is verified, then its members are extracted

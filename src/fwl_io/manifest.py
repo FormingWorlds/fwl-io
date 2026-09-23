@@ -630,7 +630,12 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     return found
 
 
-def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list[Path]]:
+_TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
+
+
+def fetch_for(
+    model: str, data_root: str | Path | None = None, progress: bool = False
+) -> dict[str, list[Path]]:
     """Fetch every dataset a given model requires; return paths per dataset.
 
     All matching datasets are attempted; failures are collected and raised
@@ -649,9 +654,19 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
         Model name matched (case-insensitively) against ``required_by``.
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
+    progress : bool
+        Show a per-file download progress bar. When tqdm is not installed, or
+        there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
+        continues.
     """
-    from fwl_io.fetch import create_fetcher
+    from fwl_io.fetch import _progressbar_unavailable, create_fetcher
 
+    if progress:
+        # Never fail a fetch over a cosmetic bar; name the fix only when it is tqdm.
+        reason = _progressbar_unavailable()
+        if reason == 'tqdm':
+            log.warning(_TQDM_HINT)
+        progress = reason is None
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
@@ -669,6 +684,7 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
                     dataverse=ds.dataverse,
                     registry=ds.registry(),
                     data_root=data_root,
+                    progress=progress,
                     extract=ds.extract,
                 )
                 fetched[ds.key] = fetcher.fetch_all()
