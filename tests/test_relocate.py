@@ -352,6 +352,31 @@ def test_a_symlinked_ancestor_of_the_legacy_directory_is_refused_at_plan_time(
     assert not (root / TARGET).exists()
 
 
+def test_a_symlinked_registry_file_is_refused_rather_than_moved(tmp_path, monkeypatch):
+    """A registry file that is a symlink is refused, even when its target's content matches.
+
+    Hashing follows a symlink to its target, so a symlinked file would
+    otherwise pass verification. Moving it would move the link itself, not
+    the data it points to, and leave the target's real location untouched.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    elsewhere = root / 'elsewhere.dat'
+    elsewhere.write_bytes(CONTENTS['notes.txt'])
+    (legacy / 'notes.txt').unlink()
+    (legacy / 'notes.txt').symlink_to(elsewhere)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'are symlinks' in report.entries[0].detail
+    assert (legacy / 'notes.txt').is_symlink(), 'nothing was touched'
+    assert (legacy / 'BHAC15_tracks.dat').is_file()
+    assert not (root / TARGET).exists()
+
+
 def test_a_dataset_whose_registry_is_missing_is_reported_not_moved(tmp_path, monkeypatch):
     """Without a registry there is nothing to verify against, so nothing moves.
 
@@ -646,6 +671,87 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
     assert list(outside.iterdir()) == [], 'nothing may be written through the swapped-in symlink'
     assert legacy.is_symlink(), 'the swap itself is not undone; only the restore into it is refused'
     assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
+
+
+def test_a_symlink_swapped_into_target_dir_during_rollback_is_refused(tmp_path, monkeypatch):
+    """A target directory swapped for a symlink while rollback is reading it back is refused.
+
+    The rollback reads the already-moved file out of target_dir, the same
+    open the forward move used to write it; a target_dir replaced by a
+    symlink before that read is refused rather than followed, so a swap on
+    either side of a partial move is caught the same way.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import SPLIT, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    target = root / TARGET
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    real_move = module._move_below_root
+    calls = []
+
+    def _fail_second_move(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) != 2:
+            return real_move(root_, src_parent, dst_parent, filename)
+        for entry in list(target.iterdir()):
+            entry.unlink()
+        target.rmdir()
+        target.symlink_to(outside, target_is_directory=True)
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(module, '_move_below_root', _fail_second_move)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=target, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == SPLIT
+    assert list(outside.iterdir()) == [], 'nothing may be read out through the swapped-in symlink'
+    assert target.is_symlink(), (
+        'the swap itself is not undone; only the restore out of it is refused'
+    )
+    assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
+
+
+def test_a_rollback_restores_every_file_moved_before_the_failure(tmp_path, monkeypatch):
+    """A move failing on the third of three files rolls every earlier one back, not just the first.
+
+    The rollback loop walks everything already moved; a fix that only
+    restored the most recent one would leave earlier files stranded in
+    target_dir with no report naming them.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    names = ('a.dat', 'b.dat', 'c.dat')
+    legacy.mkdir(parents=True)
+    for name in names:
+        (legacy / name).write_bytes(name.encode())
+    real_move = module._move_below_root
+    calls = []
+
+    def _fail_third_move(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) == 3:
+            raise OSError(28, 'No space left on device')
+        return real_move(root_, src_parent, dst_parent, filename)
+
+    monkeypatch.setattr(module, '_move_below_root', _fail_third_move)
+    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=names)
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    for name in ('a.dat', 'b.dat'):
+        assert (legacy / name).read_bytes() == name.encode(), f'{name} was not restored'
+    assert list((root / TARGET).iterdir()) == [], 'the target holds nothing after a full rollback'
 
 
 def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
