@@ -93,13 +93,18 @@ class RelocationReport:
     """Every dataset considered, whether or not anything happened to it.
 
     ``manifest_errors`` is carried beside them because a manifest that failed
-    to load declares datasets nobody here got to look at. Without it a report
+    to load, or was dropped for a conflict, declares datasets nobody here got to
+    look at. Without it a report
     covering nothing would read exactly like a tree with nothing left to move.
+    ``conflict_providers`` names which of ``manifest_errors`` was a conflict
+    rather than a load failure, so the summary can tell a caller which repair
+    applies.
     """
 
     entries: tuple[Relocation, ...] = ()
     manifest_errors: dict[str, str] = field(default_factory=dict)
     layout_error: str | None = None
+    conflict_providers: frozenset[str] = field(default_factory=frozenset)
 
     def _in_state(self, *states: str) -> tuple[Relocation, ...]:
         return tuple(e for e in self.entries if e.state in states)
@@ -138,7 +143,10 @@ class RelocationReport:
         """A short report, one line per dataset plus a closing count."""
         lines = [e.summary() for e in sorted(self.entries, key=lambda e: e.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+            if provider in self.conflict_providers:
+                lines.append(f'{provider}: MANIFEST NOT USED, {error}')
+            else:
+                lines.append(f'{provider}: MANIFEST FAILED TO LOAD, {error}')
         if self.layout_error is not None:
             # Without this the run reports nothing to do, which is what a tidy
             # tree also reports, and the two are not the same answer.
@@ -156,10 +164,9 @@ class RelocationReport:
                 'which was left alone'
             )
         if self.manifest_errors:
-            # A manifest that did not load may be the one declaring the dataset
-            # this tree still holds, so the counts above are a floor and saying
-            # otherwise would be the overstatement the report exists to avoid.
-            closing += f'; {len(self.manifest_errors)} manifest(s) not read, so this may be partial'
+            # An unloaded or conflict-dropped manifest may declare a dataset this
+            # tree still holds, so the counts above are a floor.
+            closing += f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
         lines.append(closing)
         return '\n'.join(lines)
 
@@ -317,14 +324,15 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
         One entry per dataset that declares a legacy location, whether or not
         that location exists on this machine.
     """
-    from fwl_io.manifest import _discover
+    from fwl_io.manifest import _discover_all
 
     root = resolve_data_root(data_root)
     locations, layout_error = _legacy_locations()
     entries: list[Relocation] = []
     seen: set[str] = set()
-    providers, manifest_errors = _discover()
-    for provider_datasets in providers.values():
+    discovery = _discover_all()
+    conflict_providers = frozenset(discovery.conflict_models)
+    for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             legacy = locations.get(ds.key)
             if legacy is None or ds.key in seen:
@@ -377,7 +385,9 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     legacy_present=legacy_dir.is_dir(),
                 )
             )
-    return RelocationReport(tuple(entries), dict(manifest_errors), layout_error)
+    return RelocationReport(
+        tuple(entries), dict(discovery.errors), layout_error, conflict_providers
+    )
 
 
 def _version_dir(ds: Dataset) -> str:
@@ -526,4 +536,6 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
             # state somebody has to look at.
             log.error('stopping after %s could not be relocated', moved.key)
             halted = True
-    return RelocationReport(tuple(done), dict(plan.manifest_errors), plan.layout_error)
+    return RelocationReport(
+        tuple(done), dict(plan.manifest_errors), plan.layout_error, plan.conflict_providers
+    )
