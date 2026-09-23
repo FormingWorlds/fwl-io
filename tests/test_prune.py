@@ -2500,7 +2500,7 @@ def test_a_real_lock_taken_mid_run_stops_every_later_removal(tmp_path, monkeypat
 
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
-    _make_tree(root)
+    dirs = _make_tree(root)
     extra = [_stamped_version(root, SUBDIR, f'{14000000 + i}') for i in range(50)]
     fetcher = create_fetcher(
         subdir='other/set',
@@ -2533,7 +2533,8 @@ def test_a_real_lock_taken_mid_run_stops_every_later_removal(tmp_path, monkeypat
 
     assert len(removed_before_lock) == 1
     assert len(report.removed) == 1, 'nothing is removed once the fetch holds its lock'
-    assert sum(d.exists() for d in extra) >= len(extra) - 1
+    targets = [dirs['superseded'], *extra]
+    assert sum(not d.exists() for d in targets) == 1, 'exactly one target is gone from disk'
     assert not report.ok
     assert any('a fetch lock is held' in c.detail for c in report.problems)
 
@@ -2748,7 +2749,7 @@ def test_a_lock_directory_that_cannot_be_searched_warns(tmp_path):
         os.chmod(lock_dir, stat.S_IRWXU)
 
     assert problem is None
-    assert any(f'{lock_dir} is not writable by this user' in w for w in warnings)
+    assert any(f'{lock_dir} is not searchable by this user' in w for w in warnings)
 
 
 def test_a_blocking_lock_entry_keeps_the_warnings_found_before_it(tmp_path):
@@ -2807,3 +2808,108 @@ def test_a_held_lock_keeps_the_warnings_found_before_it(tmp_path):
 
     assert problem == 'a fetch lock is held on the data root'
     assert any(f'{lock_dir} is not writable by this user' in w for w in warnings)
+
+
+# Round 7.
+
+
+def test_an_unwritable_lock_file_warning_survives_a_later_blocking_entry(tmp_path):
+    """The count of unwritable lock files is kept when a later entry blocks the run."""
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    theirs = lock_dir / 'a.lock'
+    theirs.write_text('')
+    os.chmod(theirs, 0o444)
+    (lock_dir / 'zzzz.lock').mkdir()
+    try:
+        problem, warnings = prune_mod._lock_scan(root)
+    finally:
+        os.chmod(theirs, stat.S_IRUSR | stat.S_IWUSR)
+
+    assert 'is not a regular file' in problem
+    assert any('1 lock file(s) are not writable by this user' in w for w in warnings)
+
+
+def test_the_probe_before_each_removal_skips_the_warning_checks(tmp_path, monkeypatch):
+    """The per-removal probe answers only whether to wait, so it makes no access checks."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    for i in range(3):
+        (_lock_dir(root) / f'{i}.lock').write_text('')
+    calls = []
+    real_access = prune_mod.os.access
+
+    def _counting(path, mode, *args, **kwargs):
+        calls.append(path)
+        return real_access(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr('fwl_io.prune.os.access', _counting)
+
+    assert prune_mod._lock_problem(root) is None
+    assert calls == []
+    assert prune_mod._lock_scan(root)[0] is None
+    assert calls, 'the full scan used for the report still checks access'
+
+
+def test_an_unwritable_lock_directory_warning_names_what_is_missing(tmp_path):
+    """The lock directory warning says whether write or search permission is missing."""
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    seen = {}
+    for mode, word in (
+        (0o555, 'writable'),
+        (0o666, 'searchable'),
+        (0o444, 'writable or searchable'),
+    ):
+        os.chmod(lock_dir, mode)
+        try:
+            seen[word] = prune_mod._lock_scan(root)[1]
+        finally:
+            os.chmod(lock_dir, stat.S_IRWXU)
+
+    for word, warnings in seen.items():
+        assert any(f'{lock_dir} is not {word} by this user;' in w for w in warnings), word
+
+
+def test_a_dangling_link_that_would_pass_a_candidate_lexically_does_not_block(
+    tmp_path, monkeypatch
+):
+    """The kernel stops at data.dat/.., so the rest of this link names nothing; nothing blocks."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    (dirs['referenced'] / 'dangling.dat').symlink_to(f'data.dat/../../r{OLD_RECID}/data.dat')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert report.scan_error is None
+    assert not dirs['superseded'].exists()
+
+
+def test_a_failing_close_does_not_escape_the_lock_probe(tmp_path, monkeypatch):
+    """An error from closing the probed lock file is not a lock problem and does not raise."""
+    import errno
+
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (_lock_dir(root) / 'a.lock').write_text('')
+    real_close = prune_mod.os.close
+    closed = []
+
+    def _close_fails(fd):
+        real_close(fd)
+        closed.append(fd)
+        raise OSError(errno.EIO, 'I/O error')
+
+    monkeypatch.setattr('fwl_io.prune.os.close', _close_fails)
+
+    assert prune_mod._lock_scan(root) == (None, ())
+    assert closed
