@@ -27,6 +27,7 @@ hash them against.
 from __future__ import annotations
 
 import logging
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -215,11 +216,31 @@ class CheckReport:
         return f'all data present, {count} dataset(s) by presence only'
 
 
+def _is_regular_file(path: Path) -> bool:
+    """True when ``path`` is a plain file; False when a component of it is absent.
+
+    Raises
+    ------
+    OSError
+        When ``path`` cannot be stat'd for any other reason, most often a
+        permission error on a directory above it. ``Path.stat()`` always
+        raises for that rather than swallowing the error, unlike
+        ``Path.is_file()``, whose own error handling has changed between
+        Python versions; going through ``stat()`` here keeps "absent" and
+        "present but unreadable" told apart the same way on every version.
+    """
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(st.st_mode)
+
+
 def _file_state(fetcher: Fetcher, name: str) -> str:
     """Classify one registry file: present and correct, absent, or otherwise."""
     path = fetcher.target_dir / name
     try:
-        if not path.is_file():
+        if not _is_regular_file(path):
             return MISSING
         return OK if fetcher.file_matches(name) else MISMATCH
     except OSError as exc:
@@ -238,7 +259,7 @@ def _member_state(path: Path) -> str:
     denies traversal, must cost that one entry and not the whole report.
     """
     try:
-        return PRESENT if path.is_file() else MISSING
+        return PRESENT if _is_regular_file(path) else MISSING
     except OSError as exc:
         log.warning('cannot read %s: %s', path, exc)
         return UNREADABLE
