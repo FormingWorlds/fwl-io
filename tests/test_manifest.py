@@ -476,7 +476,9 @@ def test_fetch_for_fetches_only_the_listed_files(http_server, tmp_path, monkeypa
     (version_dir / 'b.dat').write_bytes(contents['b.dat'])
     (version_dir / 'c.dat').write_bytes(contents['c.dat'])
 
-    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [ds]}, {}))
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+    )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')
 
     fetched = fetch_for('mymodel', data_root=data_root)
