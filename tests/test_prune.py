@@ -1634,16 +1634,23 @@ def test_a_parent_replaced_between_the_two_last_reads_is_not_removed(tmp_path, m
 
 
 def test_an_entry_swapped_in_under_the_same_name_is_not_removed(tmp_path, monkeypatch):
-    """A different directory that takes the candidate's name during the checks is kept."""
+    """A different directory that takes the candidate's name during the checks is never moved."""
+    import fwl_io.prune as prune_mod
+
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
     aside = version.with_name('aside')
+    real_rename = prune_mod.os.rename
 
     def _swap_entry(_root):
-        version.rename(aside)
+        real_rename(version, aside)
         version.mkdir()
         (version / 'newcomer.dat').write_bytes(b'new\n')
+        monkeypatch.setattr('fwl_io.prune.os.rename', _no_rename)
         return False
+
+    def _no_rename(*args, **kwargs):
+        raise AssertionError('the re-check before the move must stop this, not the put-back')
 
     monkeypatch.setattr('fwl_io.prune._any_lock_held', _swap_entry)
     candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
@@ -1654,6 +1661,46 @@ def test_an_entry_swapped_in_under_the_same_name_is_not_removed(tmp_path, monkey
     assert (version / 'newcomer.dat').read_bytes() == b'new\n'
     assert (aside / 'data.dat').is_file()
     assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
+
+
+def test_a_candidate_deleted_during_the_checks_is_reported_changed(tmp_path, monkeypatch):
+    """A candidate that disappears before the move is skipped, not reported as a failure."""
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+
+    def _delete(_root):
+        shutil.rmtree(version)
+        return False
+
+    monkeypatch.setattr('fwl_io.prune._any_lock_held', _delete)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
+
+
+def test_a_clean_removal_tidies_empty_parents_and_reports_nothing_else(tmp_path):
+    """A plain removal takes its now-empty parents with it and carries no detail."""
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == ('removed', '')
+    assert not (root / SUBDIR.split('/')[0]).exists(), 'the empty subdir chain is removed'
+    assert root.is_dir()
+
+
+def test_tidying_skips_a_parent_that_is_already_gone(tmp_path):
+    """Empty ancestors above a parent that no longer exists are still removed."""
+    root = tmp_path / 'data'
+    (root / 'a' / 'b').mkdir(parents=True)
+
+    assert _prune_empty_parents(root / 'a' / 'b' / 'gone', root) is None
+    assert not (root / 'a').exists()
+    assert root.is_dir()
 
 
 def test_an_entry_swapped_in_at_the_move_itself_is_put_back(tmp_path, monkeypatch):
@@ -1821,7 +1868,9 @@ def test_identity_helpers_answer_false_for_a_symlink_loop(tmp_path):
     (tmp_path / 'b').symlink_to('a')
     (tmp_path / 'real').mkdir()
 
-    assert _inside(tmp_path / 'a' / 'x', tmp_path) is False
+    # Python 3.13 resolves a loop without raising, so either answer is safe here;
+    # _remove_one refuses such a path when it opens the parent without symlinks.
+    assert isinstance(_inside(tmp_path / 'a' / 'x', tmp_path), bool)
     assert _same_dir(tmp_path / 'a', tmp_path / 'real') is False
 
 

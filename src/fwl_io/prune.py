@@ -29,7 +29,8 @@ The default is a dry run: the plan is printed and nothing is touched. Deletion
 needs an explicit request and, unless suppressed, an interactive confirmation.
 
 A run assumes that no other process renames or replaces directories under the
-data root while it deletes; fwl-io's own writers are kept out by the fetch lock.
+data root while it deletes. An fwl-io fetch is kept out only while it holds the
+fetch lock, which is not the whole of every fetch.
 """
 
 from __future__ import annotations
@@ -802,8 +803,8 @@ def _remove_one(
 
     This refuses a symlink or a path outside the data root, opens the
     candidate's parent from the root without following any symlink, and hands
-    over to :func:`_remove_checked`, which repeats every guard and does the
-    move and the deletion. ``referenced_link_ids`` holds the identities from
+    over to :func:`_remove_checked`, which repeats the remaining guards and
+    does the move and the deletion. ``referenced_link_ids`` holds the identities from
     :func:`_hop_identities` for the links inside referenced versions.
     """
     path = candidate.path
@@ -849,8 +850,9 @@ def _remove_checked(
 ) -> PruneCandidate:
     """Repeat every guard on one candidate, then move it into staging and delete it.
 
-    The containment, filesystem, not-referenced, stamp, leaf, link and
-    fetch-lock checks run here rather than being trusted from the plan. Right
+    The filesystem, not-referenced, stamp, leaf, link and fetch-lock checks
+    run here rather than being trusted from the plan; the caller checked
+    containment and opened ``parent_fd``. Right
     before the move, the candidate and its parent are checked once more to be
     the entries the checks read, and the moved entry is compared by device
     and inode after the move and put back if it differs. The move into the
@@ -859,9 +861,9 @@ def _remove_checked(
     the old path.
 
     This assumes that no other process renames or replaces directories under
-    the data root during a run; fwl-io's own writers are kept out by the fetch
-    lock. The re-checks narrow, but cannot close, the window such a process
-    would have.
+    the data root during a run; an fwl-io fetch is kept out only while it holds
+    the fetch lock. The re-checks narrow, but cannot close, the window such a
+    process would have.
     """
     path = candidate.path
     name = path.name
@@ -934,6 +936,8 @@ def _remove_checked(
                 os.stat(staged_name, dir_fd=staging_fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
+            except OSError as stat_exc:
+                return _failed(f'moved to {staged}, deletion not confirmed ({exc}; {stat_exc})')
             else:
                 return _failed(
                     f'moved to {staged} but not fully deleted ({exc}); delete it by hand'
@@ -941,8 +945,8 @@ def _remove_checked(
     finally:
         os.close(staging_fd)
     log.info('removed unreferenced version directory %s', path)
-    untidy = _prune_empty_parents(path.parent, root)
-    detail = f'empty parent directories kept ({untidy})' if untidy else ''
+    tidy_problem = _prune_empty_parents(path.parent, root)
+    detail = f'empty parent directories kept ({tidy_problem})' if tidy_problem else ''
     return replace(candidate, state=REMOVED, detail=detail)
 
 
@@ -978,14 +982,24 @@ def _prune_empty_parents(directory: Path, root: Path) -> str | None:
     Only ever removes a directory with nothing left in it, so a sibling version
     directory under the same subdir keeps the subdir standing, and the walk
     stops at the data root. A symlinked parent is left alone rather than
-    followed out of the tree. Returns why the walk stopped early when a parent
-    could not be resolved (a symlink loop), else ``None``; it never raises.
+    followed out of the tree. Returns why the walk stopped at a parent that is
+    a symlink or cannot be resolved (a loop, a permission error), else
+    ``None``; a parent that is already gone is skipped. It never raises.
     """
     try:
-        root = root.resolve()
-        while directory.resolve() != root and directory.resolve().is_relative_to(root):
+        root = root.resolve(strict=True)
+        while True:
+            if directory.is_symlink():
+                return f'{directory} is a symlink'
             try:
-                if directory.is_symlink() or any(directory.iterdir()):
+                resolved = directory.resolve(strict=True)
+            except FileNotFoundError:
+                directory = directory.parent
+                continue
+            if resolved == root or not resolved.is_relative_to(root):
+                return None
+            try:
+                if any(directory.iterdir()):
                     return None
                 directory.rmdir()
             except OSError:
