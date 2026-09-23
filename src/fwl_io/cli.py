@@ -87,6 +87,7 @@ def _cmd_relocate(args: argparse.Namespace) -> int:
 def _cmd_prune(args: argparse.Namespace) -> int:
     from fwl_io.prune import (
         SHARED_TREE_WARNING,
+        _delete_unsupported,
         _human_bytes,
         apply_prune,
         plan_prune,
@@ -97,7 +98,7 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     if not args.delete:
         print('dry run: nothing was deleted; pass --delete to remove the superseded versions')
         return 0 if plan.ok else 1
-    refusal = plan.deletion_refusal(
+    refusal = _delete_unsupported() or plan.deletion_refusal(
         include_orphans=args.include_orphans,
         allow_empty_reference_set=args.allow_empty_reference_set,
     )

@@ -1309,13 +1309,11 @@ def test_a_symlinked_staging_directory_is_never_used(tmp_path, monkeypatch):
 
 
 def test_a_lock_taken_during_a_delete_run_stops_the_remaining_removals(tmp_path, monkeypatch):
-    """The fetch lock is checked again during a run, not only once before it.
+    """The fetch lock is checked again before each removal, not only once before the run.
 
     A fetch that starts after the first directory is removed must stop the
-    rest of the run once the probe is due again, and the result must not read
-    as a clean one. The re-check interval is set to zero so it is always due.
+    rest of the run, and the result must not read as a clean one.
     """
-    monkeypatch.setattr('fwl_io.prune._LOCK_RECHECK_S', 0.0)
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
     dirs = _make_tree(root)
@@ -2077,24 +2075,6 @@ def _lock_dir(root):
     return lock_dir
 
 
-def test_a_symlinked_lock_entry_is_skipped_and_its_target_left_intact(tmp_path, monkeypatch):
-    """A lock entry that is a symlink is never opened, so a file it points at keeps its bytes."""
-    import fwl_io.prune as prune_mod
-
-    _install_manifest(monkeypatch, _write_manifest(tmp_path))
-    root = tmp_path / 'data'
-    _make_tree(root)
-    thesis = tmp_path / 'home' / 'thesis.tex'
-    thesis.parent.mkdir()
-    thesis.write_bytes(b'important user text\n')
-    (_lock_dir(root) / '0123abcd.lock').symlink_to(thesis)
-
-    assert prune_mod._lock_problem(root) is None
-    plan_prune(data_root=root)
-
-    assert thesis.read_bytes() == b'important user text\n'
-
-
 def test_a_symlinked_lock_directory_blocks_deletion_without_being_read(tmp_path, monkeypatch):
     """A lock directory that is a symlink is refused by name, and its target is not walked."""
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
@@ -2132,7 +2112,7 @@ def test_the_probe_sees_a_lock_held_by_the_fetcher_itself(tmp_path):
 
 
 def test_a_read_only_unheld_lock_file_does_not_block(tmp_path, monkeypatch):
-    """Another user's lock file, readable but not writable here, is tested, not assumed held."""
+    """An unheld lock file this user can read but not write is probed, and does not block."""
     import fwl_io.prune as prune_mod
 
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
@@ -2167,31 +2147,6 @@ def test_an_untestable_lock_file_blocks_with_its_own_reason(tmp_path, monkeypatc
         assert dirs['superseded'].is_dir()
     finally:
         os.chmod(lock, stat.S_IRWXU)
-
-
-def test_the_lock_is_probed_a_bounded_number_of_times_per_run(tmp_path, monkeypatch):
-    """With the clock standing still, many removals share one probe after the plan's own."""
-    import fwl_io.prune as prune_mod
-
-    _install_manifest(monkeypatch, _write_manifest(tmp_path))
-    root = tmp_path / 'data'
-    _make_tree(root)
-    extra = [_stamped_version(root, SUBDIR, f'{14000000 + i}') for i in range(20)]
-    real_probe = prune_mod._lock_problem
-    calls = []
-
-    def _counting(root_):
-        calls.append(root_)
-        return real_probe(root_)
-
-    monkeypatch.setattr('fwl_io.prune._lock_problem', _counting)
-    monkeypatch.setattr('fwl_io.prune._clock', lambda: 1000.0)
-
-    report = prune_versions(data_root=root, delete=True)
-
-    assert all(not d.exists() for d in extra)
-    assert report.ok
-    assert len(calls) == 2, 'one probe for the plan, one for the run while the clock stands still'
 
 
 def test_an_unsearchable_directory_in_a_user_subtree_is_a_scan_error(tmp_path, monkeypatch):
@@ -2527,3 +2482,215 @@ def test_locks_are_reported_uncheckable_without_no_follow_opens(tmp_path, monkey
     monkeypatch.delattr(os, 'O_NOFOLLOW')
 
     assert prune_mod._lock_problem(root) == 'fetch locks cannot be checked on this platform'
+
+
+# Round 6: probe before every removal, lock entries the fetcher cannot use.
+
+
+def test_a_real_lock_taken_mid_run_stops_every_later_removal(tmp_path, monkeypatch):
+    """A fetch lock taken by another thread after the first removal stops all the rest.
+
+    The lock is taken through the fetcher's own locking code and the real
+    clock runs, so nothing but a probe before each removal can see it.
+    """
+    import threading
+
+    import fwl_io.prune as prune_mod
+    from fwl_io.fetch import create_fetcher
+
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    extra = [_stamped_version(root, SUBDIR, f'{14000000 + i}') for i in range(50)]
+    fetcher = create_fetcher(
+        subdir='other/set',
+        registry={'a.dat': 'sha256:' + '0' * 64},
+        base_urls=['http://example.invalid/'],
+        data_root=root,
+    )
+    locked, release = threading.Event(), threading.Event()
+
+    def _fetch_holding_the_lock():
+        with fetcher._fetch_lock('a.dat', fetcher.target_dir / 'a.dat'):
+            locked.set()
+            release.wait(10)
+
+    real_rmtree = prune_mod.shutil.rmtree
+    removed_before_lock = []
+
+    def _rmtree_then_start_fetch(path, *args, **kwargs):
+        real_rmtree(path, *args, **kwargs)
+        if not locked.is_set():
+            removed_before_lock.append(path)
+            threading.Thread(target=_fetch_holding_the_lock, daemon=True).start()
+            assert locked.wait(10)
+
+    monkeypatch.setattr('fwl_io.prune.shutil.rmtree', _rmtree_then_start_fetch)
+    try:
+        report = prune_versions(data_root=root, delete=True)
+    finally:
+        release.set()
+
+    assert len(removed_before_lock) == 1
+    assert len(report.removed) == 1, 'nothing is removed once the fetch holds its lock'
+    assert sum(d.exists() for d in extra) >= len(extra) - 1
+    assert not report.ok
+    assert any('a fetch lock is held' in c.detail for c in report.problems)
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'directory', 'fifo'])
+def test_a_lock_entry_that_is_not_a_regular_file_blocks_unopened(tmp_path, monkeypatch, kind):
+    """A lock entry the fetcher cannot lock through leaves its fetch unseen, so it blocks."""
+    import fwl_io.prune as prune_mod
+
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    entry = _lock_dir(root) / '0123abcd.lock'
+    thesis = tmp_path / 'home' / 'thesis.tex'
+    thesis.parent.mkdir()
+    thesis.write_bytes(b'important user text\n')
+    if kind == 'symlink':
+        entry.symlink_to(thesis)
+    elif kind == 'directory':
+        entry.mkdir()
+    else:
+        os.mkfifo(entry)
+    opened = []
+    real_open = prune_mod.os.open
+
+    def _recording_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr('fwl_io.prune.os.open', _recording_open)
+
+    problem = prune_mod._lock_problem(root)
+    report = prune_versions(data_root=root, delete=True)
+
+    assert problem == f'lock file {entry} is not a regular file; fetch locks cannot be checked'
+    assert str(entry) not in opened
+    assert dirs['superseded'].is_dir() and not report.removed
+    assert thesis.read_bytes() == b'important user text\n'
+
+
+def test_an_unwritable_unheld_lock_file_warns_in_both_runs(tmp_path, monkeypatch, capsys):
+    """A lock file this user cannot write does not block, but the dry run and the delete say so."""
+    from fwl_io.cli import main
+
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    lock = _lock_dir(root) / 'theirs.lock'
+    lock.write_text('')
+    os.chmod(lock, 0o444)
+    try:
+        plan = plan_prune(data_root=root)
+        assert plan.lock_problem is None and plan.ok
+        assert main(['prune', '--data-root', str(root)]) == 0
+        dry = capsys.readouterr().out
+        assert main(['prune', '--data-root', str(root), '--delete', '--yes']) == 0
+        wet = capsys.readouterr().out
+    finally:
+        os.chmod(lock, stat.S_IRUSR | stat.S_IWUSR)
+
+    warning = '1 lock file(s) are not writable by this user'
+    assert warning in plan.summary() and warning in dry and warning in wet
+    assert not dirs['superseded'].exists()
+
+
+def test_an_unwritable_lock_file_that_is_held_still_blocks(tmp_path, monkeypatch):
+    """Not being writable here does not excuse a lock someone holds."""
+    import fcntl
+
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock = _lock_dir(root) / 'theirs.lock'
+    lock.write_text('')
+    os.chmod(lock, 0o444)
+    fd = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert prune_mod._lock_problem(root) == 'a fetch lock is held on the data root'
+    finally:
+        os.close(fd)
+        os.chmod(lock, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def test_an_unwritable_lock_directory_warns_by_name(tmp_path, monkeypatch):
+    """A lock directory this user cannot write means this user's fetches run unlocked; it warns."""
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    lock_dir = _lock_dir(root)
+    os.chmod(lock_dir, 0o555)
+    try:
+        plan = plan_prune(data_root=root)
+    finally:
+        os.chmod(lock_dir, stat.S_IRWXU)
+
+    assert plan.ok
+    assert f'{lock_dir} is not writable by this user' in plan.summary()
+
+
+def test_the_cli_refuses_an_unsupported_platform_before_asking(tmp_path, monkeypatch, capsys):
+    """Without the features deletion needs, the command refuses before the confirmation prompt."""
+    from fwl_io.cli import main
+
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    monkeypatch.setattr('fwl_io.prune._DIR_FD_OK', False)
+
+    def _no_prompt(prompt):
+        raise AssertionError('the prompt must not be shown on an unsupported platform')
+
+    monkeypatch.setattr('builtins.input', _no_prompt)
+
+    code = main(['prune', '--data-root', str(root), '--delete'])
+
+    assert code == 1
+    assert 'deletion is not supported on this platform' in capsys.readouterr().err
+    assert dirs['superseded'].is_dir()
+
+
+def test_a_dry_run_exits_1_where_existing_locks_cannot_be_checked(tmp_path, monkeypatch, capsys):
+    """With a lock directory and no flock, the plan is printed but does not read as clean."""
+    from fwl_io.cli import main
+
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    (_lock_dir(root) / 'a.lock').write_text('')
+    monkeypatch.setattr('fwl_io.prune.fcntl', None)
+
+    plan = plan_prune(data_root=root)
+    code = main(['prune', '--data-root', str(root)])
+
+    assert plan.lock_problem == 'fetch locks cannot be checked on this platform'
+    assert not plan.ok
+    assert code == 1
+    assert f'{SUBDIR}/r{OLD_RECID}: superseded' in capsys.readouterr().out
+
+
+def test_a_link_hop_through_an_unsearchable_directory_blocks_deletion(tmp_path, monkeypatch):
+    """A referenced link whose path cannot be read at one hop may lead anywhere, so it blocks."""
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    shut = tmp_path / 'shut'
+    (shut / 'x').mkdir(parents=True)
+    (dirs['referenced'] / 'link.dat').symlink_to(shut / 'x' / 'file.dat')
+    os.chmod(shut, stat.S_IRUSR)
+    try:
+        report = prune_versions(data_root=root, delete=True)
+    finally:
+        os.chmod(shut, stat.S_IRWXU)
+
+    assert report.scan_error is not None
+    assert dirs['superseded'].is_dir() and not report.removed

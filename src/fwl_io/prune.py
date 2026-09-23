@@ -43,7 +43,6 @@ import re
 import shutil
 import stat
 import tempfile
-import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -76,15 +75,6 @@ REMOVED = 'removed'
 REMOVE_FAILED = 'remove-failed'
 REFUSED = 'refused'
 GONE = 'gone'
-
-#: Seconds a lock probe stays valid during a delete run. A fetch that starts
-#: within this window after the last probe is not seen, the same kind of gap
-#: as the one between the last probe and a move; the probe costs one open and
-#: one flock per lock file, and most filelock releases leave lock files behind.
-_LOCK_RECHECK_S = 1.0
-
-#: The clock the lock re-check uses; a separate name so a test can hold it still.
-_clock = time.monotonic
 
 #: Whether this Python's rmtree resists symlink swaps, read once at import.
 _RMTREE_IS_SAFE = shutil.rmtree.avoids_symlink_attacks
@@ -140,6 +130,7 @@ class PruneReport:
     known_subdirs: frozenset[str] = frozenset()
     lock_problem: str | None = None
     apply_refusal: str | None = None
+    lock_warnings: tuple[str, ...] = ()
     staged_remnants: tuple[Path, ...] = ()
 
     def _in_state(self, *states: str) -> tuple[PruneCandidate, ...]:
@@ -261,6 +252,7 @@ class PruneReport:
         if self.apply_refusal is not None:
             closing += f'; deletion was refused at apply time ({self.apply_refusal})'
         lines.append(closing)
+        lines.extend(f'WARNING: {warning}' for warning in self.lock_warnings)
         if self.staged_remnants:
             lines.append(
                 f'{len(self.staged_remnants)} partly deleted version dir(s) left in '
@@ -502,75 +494,98 @@ def _leaf_problem(path: Path) -> str | None:
     return 'cannot be fully read' if unreadable else None
 
 
-def _lock_problem(root: Path) -> str | None:
-    """Why deletion must wait for a fetch lock under ``root``, or ``None`` if none is held.
+_UNLOCKED_FETCH = (
+    'a fetch by this user through them runs without a lock, which prune cannot see; '
+    'do not fetch while prune runs'
+)
+
+
+def _lock_scan(root: Path) -> tuple[str | None, tuple[str, ...]]:
+    """Probe every fetch lock under ``root``: why deletion must wait, and warnings.
 
     A lock file name is an opaque hash of the path it guards, so the whole
     lock directory is checked. Each regular lock file is opened read-only
     without following symlinks and probed with a shared, non-blocking flock,
     which conflicts with the exclusive flock a fetch holds; nothing is created,
-    truncated or written. A symlinked entry is skipped, since the fetcher's own
-    lock does not follow one either. A lock directory that is a symlink, or a
-    lock file that cannot be probed, is reported under its own reason.
+    truncated or written. An entry the fetcher could not lock through (a
+    symlink, a directory, a FIFO, a socket, a device), a lock directory that is
+    a symlink or not a directory, or a lock file that cannot be probed, blocks
+    under its own reason, since a fetch through it would run unseen. A regular
+    lock file, or the lock directory, that this user cannot write does not
+    block, so a tree shared with other users stays usable, but it is named in
+    the warnings: this user's own fetch through it would run without a lock.
+
+    Returns
+    -------
+    tuple
+        ``(problem, warnings)``: the reason deletion must wait, or ``None``,
+        and the warning lines for the report.
     """
     lock_dir = root / _LOCK_DIRNAME
     try:
         st = os.lstat(lock_dir)
     except FileNotFoundError:
-        return None
+        return None, ()
     except OSError as exc:
-        return f'cannot read {lock_dir}: {exc}'
+        return f'cannot read {lock_dir}: {exc}', ()
     if stat.S_ISLNK(st.st_mode):
-        return f'{lock_dir} is a symlink; fetch locks cannot be checked'
+        return f'{lock_dir} is a symlink; fetch locks cannot be checked', ()
     if not stat.S_ISDIR(st.st_mode):
         # A fetch then runs without a lock, so its state cannot be seen here.
-        return f'{lock_dir} is not a directory; fetch locks cannot be checked'
+        return f'{lock_dir} is not a directory; fetch locks cannot be checked', ()
     if fcntl is None or not hasattr(os, 'O_NOFOLLOW'):
-        return 'fetch locks cannot be checked on this platform'
+        return 'fetch locks cannot be checked on this platform', ()
     try:
         with os.scandir(lock_dir) as entries:
             names = sorted(e.name for e in entries if e.name.endswith('.lock'))
     except OSError as exc:
-        return f'cannot read {lock_dir}: {exc}'
+        return f'cannot read {lock_dir}: {exc}', ()
+    warnings: list[str] = []
+    if not os.access(lock_dir, os.W_OK):
+        warnings.append(
+            f'{lock_dir} is not writable by this user; a fetch by this user runs '
+            'without a lock, which prune cannot see; do not fetch while prune runs'
+        )
+    unwritable = 0
     for name in names:
         path = lock_dir / name
         try:
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                continue
+            entry = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f'cannot test lock file {path}: {exc}', ()
+        if not stat.S_ISREG(entry.st_mode):
+            return f'lock file {path} is not a regular file; fetch locks cannot be checked', ()
+        try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             continue
         except OSError as exc:
-            return f'cannot test lock file {path}: {exc}'
+            return f'cannot test lock file {path}: {exc}', ()
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            return 'a fetch lock is held on the data root'
+            return 'a fetch lock is held on the data root', ()
         except OSError as exc:
-            return f'cannot test lock file {path}: {exc}'
+            return f'cannot test lock file {path}: {exc}', ()
         else:
             with contextlib.suppress(OSError):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-    return None
+        if not os.access(path, os.W_OK):
+            unwritable += 1
+    if unwritable:
+        warnings.append(
+            f'{unwritable} lock file(s) are not writable by this user; {_UNLOCKED_FETCH}'
+        )
+    return None, tuple(warnings)
 
 
-class _LockGate:
-    """Re-probe the fetch locks during a delete run at most once per ``_LOCK_RECHECK_S``."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.checked_at: float | None = None
-        self.problem: str | None = None
-
-    def problem_now(self) -> str | None:
-        """The current lock problem, probing again only when the last probe is stale."""
-        now = _clock()
-        if self.checked_at is None or now - self.checked_at >= _LOCK_RECHECK_S:
-            self.problem = _lock_problem(self.root)
-            self.checked_at = now
-        return self.problem
+def _lock_problem(root: Path) -> str | None:
+    """Why deletion must wait for a fetch lock, or ``None``; see :func:`_lock_scan`."""
+    return _lock_scan(root)[0]
 
 
 #: Symlinks followed while tracing one link before giving up, the usual kernel limit.
@@ -606,7 +621,11 @@ def _symlink_hops(link: Path) -> set[Path]:
                 continue
             step = current / part
             hops.add(step)
-            if not step.is_symlink():
+            try:
+                is_link = stat.S_ISLNK(os.lstat(step).st_mode)
+            except FileNotFoundError:
+                is_link = False
+            if not is_link:
                 current = step
                 continue
             budget -= 1
@@ -685,6 +704,7 @@ class _Build:
     resolve_error: str | None
     scan_error: str | None
     lock_problem: str | None
+    lock_warnings: tuple[str, ...]
     referenced_link_ids: frozenset[tuple[int, int]]
     case_insensitive: bool
     staged_remnants: tuple[Path, ...]
@@ -699,6 +719,7 @@ class _Build:
             self.known_subdirs,
             self.lock_problem,
             staged_remnants=self.staged_remnants,
+            lock_warnings=self.lock_warnings,
         )
 
 
@@ -851,6 +872,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
+    lock_problem, lock_warnings = _lock_scan(root)
     symlink_targets: set[Path] = set()
     if for_delete:
         symlink_targets, symlink_error = _referenced_symlink_targets(referenced)
@@ -863,7 +885,8 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         manifest_errors=manifest_errors,
         resolve_error=resolve_error,
         scan_error=scan_error,
-        lock_problem=_lock_problem(root),
+        lock_problem=lock_problem,
+        lock_warnings=lock_warnings,
         referenced_link_ids=_hop_identities(symlink_targets),
         case_insensitive=case_insensitive,
         staged_remnants=_staged_remnants(root),
@@ -933,7 +956,6 @@ def _remove_one(
     referenced_link_ids: frozenset[tuple[int, int]] = frozenset(),
     *,
     case_insensitive: bool = False,
-    lock_gate: _LockGate | None = None,
 ) -> PruneCandidate:
     """Delete one version directory, re-checking every guard at the last moment.
 
@@ -972,7 +994,6 @@ def _remove_one(
             referenced,
             referenced_link_ids,
             case_insensitive=case_insensitive,
-            lock_gate=lock_gate if lock_gate is not None else _LockGate(root),
         )
     finally:
         os.close(parent_fd)
@@ -987,7 +1008,6 @@ def _remove_checked(
     referenced_link_ids: frozenset[tuple[int, int]],
     *,
     case_insensitive: bool,
-    lock_gate: _LockGate,
 ) -> PruneCandidate:
     """Repeat every guard on one candidate, then move it into staging and delete it.
 
@@ -1035,7 +1055,7 @@ def _remove_checked(
         return _refuse(f'{problem}; not removed')
     if (before.st_dev, before.st_ino) in referenced_link_ids:
         return _refuse('a referenced file symlinks into this directory; not removed')
-    lock_problem = lock_gate.problem_now()
+    lock_problem = _lock_problem(root)
     if lock_problem is not None:
         return _refuse(f'{lock_problem}; not removed')
     staging = root / _STAGING_DIRNAME
@@ -1206,7 +1226,6 @@ def prune_versions(
         # A dry run, or a run the reference set will not allow: report, do nothing.
         return report
     targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
-    gate = _LockGate(root)
     results = [
         _remove_one(
             c,
@@ -1214,7 +1233,6 @@ def prune_versions(
             build.referenced,
             build.referenced_link_ids,
             case_insensitive=build.case_insensitive,
-            lock_gate=gate,
         )
         if c.state in targets
         else c
@@ -1296,7 +1314,6 @@ def apply_prune(
     # in this call's fresh build: the plan bounds what may go, and the fresh
     # state catches a directory that stopped being safe to remove since.
     fresh_by_dir = {fresh.path: fresh for fresh in build.candidates}
-    gate = _LockGate(root)
     results = []
     for c in report.candidates:
         fresh = fresh_by_dir.get(c.path)
@@ -1326,7 +1343,6 @@ def apply_prune(
                 build.referenced,
                 build.referenced_link_ids,
                 case_insensitive=build.case_insensitive,
-                lock_gate=gate,
             )
         )
     return replace(current, candidates=tuple(results))
