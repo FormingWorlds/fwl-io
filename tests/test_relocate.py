@@ -256,6 +256,50 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
     assert (root / TARGET / 'notes.txt').is_file()
 
 
+def test_a_platform_missing_a_safe_move_capability_refuses_up_front(tmp_path, monkeypatch):
+    """A platform that cannot move directories safely is refused before anything touches disk.
+
+    The same capability check prune.py's deletion uses; a platform without it
+    is refused cleanly rather than failing part way through the first move
+    with an error that names an implementation detail instead of the reason.
+    """
+    import fwl_io.relocate as module
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.delattr(module.os, 'O_DIRECTORY', raising=False)
+
+    report = relocate_all(data_root=root)
+
+    assert report.platform_error is not None
+    assert not report.ok
+    assert report.moved == (), 'the plan is reported but nothing was moved'
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypatch):
+    """A legacy directory that is itself a symlink is refused at the plan step, not the move.
+
+    A symlinked directory whose target is a real, intact copy of the dataset
+    inside the data root would otherwise hash as verified and only fail once
+    the move tries to open it with a no-follow directory handle; refusing it
+    here means the dry run tells the truth about what will happen.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    real = root / 'elsewhere'
+    _populate(real)
+    (root / LEGACY).parent.mkdir(parents=True, exist_ok=True)
+    (root / LEGACY).symlink_to(real, target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=True)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'symlink' in report.entries[0].detail
+    assert not (root / TARGET).exists()
+
+
 def test_a_dataset_whose_registry_is_missing_is_reported_not_moved(tmp_path, monkeypatch):
     """Without a registry there is nothing to verify against, so nothing moves.
 
@@ -505,6 +549,48 @@ def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, mo
     assert len(calls) == 3, 'one move succeeded, one failed, one rollback was attempted'
 
 
+def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, monkeypatch):
+    """A legacy directory swapped for a symlink while rollback is restoring a file is refused.
+
+    The restore goes through the same dir-fd primitive as the forward move, so
+    a legacy directory replaced by a symlink between the first file's move and
+    the rollback attempt is refused rather than followed: nothing is written
+    outside the data root, and the outcome is SPLIT, not a silent FAILED that
+    would read as the tree being back to how it started.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import SPLIT, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    real_move = module._move_below_root
+    calls = []
+
+    def _swap_then_fail(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) == 1:
+            return real_move(root_, src_parent, dst_parent, filename)
+        for entry in list(legacy.iterdir()):
+            entry.unlink()
+        legacy.rmdir()
+        legacy.symlink_to(outside, target_is_directory=True)
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(module, '_move_below_root', _swap_then_fail)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == SPLIT
+    assert list(outside.iterdir()) == [], 'nothing may be written through the swapped-in symlink'
+    assert legacy.is_symlink(), 'the swap itself is not undone; only the restore into it is refused'
+
+
 def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
     """A symlink swapped into legacy_dir between the containment check and the move is refused.
 
@@ -548,15 +634,15 @@ def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, 
     )
 
 
-def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monkeypatch):
-    """After a dataset fails to move, the ones behind it are left alone.
+def test_a_failed_move_does_not_stop_the_others_from_being_tried(tmp_path, monkeypatch):
+    """A dataset that fails to move does not keep the ones behind it from being attempted.
 
-    Continuing would move more data past a tree somebody already has to look
-    at, and the entries that never ran are reported still ready rather than
-    quietly dropped.
+    Each dataset's move is independent of every other one, so a tree somebody
+    already has to look at is no reason to leave the rest merely ready when
+    they could just as well be moved too.
     """
     import fwl_io.relocate as module
-    from fwl_io.relocate import FAILED, RelocationReport
+    from fwl_io.relocate import FAILED, MOVED, RelocationReport
 
     planned = RelocationReport(
         (
@@ -565,16 +651,18 @@ def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monk
         )
     )
     monkeypatch.setattr(module, 'plan_relocations', lambda data_root=None: planned)
-    monkeypatch.setattr(
-        module,
-        '_move_one',
-        lambda entry, root: Relocation(entry.key, FAILED, detail='disk full'),
-    )
+
+    def _fake_move(entry, root):
+        if entry.key == 'a.first':
+            return Relocation(entry.key, FAILED, detail='disk full')
+        return Relocation(entry.key, MOVED)
+
+    monkeypatch.setattr(module, '_move_one', _fake_move)
 
     report = module.relocate_all(data_root=tmp_path)
 
-    assert [e.state for e in report.entries] == [FAILED, READY]
-    assert [e.key for e in report.ready] == ['b.second'], 'the untried one is still ready'
+    assert [e.state for e in report.entries] == [FAILED, MOVED]
+    assert [e.key for e in report.moved] == ['b.second'], 'the second dataset was still attempted'
     assert len(report.faults) == 1
 
 

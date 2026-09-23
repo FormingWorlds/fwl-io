@@ -22,6 +22,10 @@ once the move has happened.
 A dataset packaged as an archive is reported rather than moved. Its registry
 pins the packed archive, and a legacy tree holds the extracted members, so
 there is nothing to hash the tree against.
+
+A run assumes that no other process renames or replaces directories under the
+data root while it moves files. An fwl-io fetch is kept out only while it
+holds the fetch lock, which is not the whole of every fetch.
 """
 
 from __future__ import annotations
@@ -30,13 +34,19 @@ import logging
 import os
 import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
-from fwl_io.fs_guard import _inside, _is_regular_file, _open_dir_below, _open_or_make_dir_below
+from fwl_io.fs_guard import (
+    _delete_unsupported,
+    _inside,
+    _is_regular_file,
+    _open_dir_below,
+    _open_or_make_dir_below,
+)
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
@@ -73,6 +83,9 @@ class Relocation:
     state: str
     legacy_dir: Path | None = None
     target_dir: Path | None = None
+    #: Names actually moved or scheduled to move: the present-and-verified
+    #: subset of the registry for ``READY`` and ``MOVED``, empty otherwise.
+    #: Not the dataset's whole registry; an absent file is never in here.
     files: tuple[str, ...] = ()
     detail: str = ''
     legacy_present: bool = False
@@ -102,13 +115,15 @@ class RelocationReport:
     covering nothing would read exactly like a tree with nothing left to move.
     ``conflict_providers`` names which of ``manifest_errors`` was a conflict
     rather than a load failure, so the summary can tell a caller which repair
-    applies.
+    applies. ``platform_error`` is set instead of moving anything when this
+    platform lacks what a safe move needs.
     """
 
     entries: tuple[Relocation, ...] = ()
     manifest_errors: dict[str, str] = field(default_factory=dict)
     layout_error: str | None = None
     conflict_providers: frozenset[str] = field(default_factory=frozenset)
+    platform_error: str | None = None
 
     def _in_state(self, *states: str) -> tuple[Relocation, ...]:
         return tuple(e for e in self.entries if e.state in states)
@@ -116,7 +131,12 @@ class RelocationReport:
     @property
     def ok(self) -> bool:
         """True when every legacy tree found was dealt with and none was skipped."""
-        return not self.faults and not self.manifest_errors and self.layout_error is None
+        return (
+            not self.faults
+            and not self.manifest_errors
+            and self.layout_error is None
+            and self.platform_error is None
+        )
 
     @property
     def ready(self) -> tuple[Relocation, ...]:
@@ -155,6 +175,8 @@ class RelocationReport:
             # Without this the run reports nothing to do, which is what a tidy
             # tree also reports, and the two are not the same answer.
             lines.append(f'LEGACY LAYOUT UNREADABLE, {self.layout_error}')
+        if self.platform_error is not None:
+            lines.append(f'PLATFORM NOT SUPPORTED, {self.platform_error}')
         if not lines:
             return 'no dataset declares a legacy location'
         done, waiting, bad = len(self.moved), len(self.ready), len(self.faults)
@@ -289,10 +311,25 @@ def _classify(
         return ALREADY_CURRENT, detail, ()
     if not legacy_dir.is_dir():
         return ABSENT, '', ()
+    if legacy_dir.is_symlink():
+        return UNRESOLVABLE, f'{legacy_dir} is a symlink, not a plain directory; not moved', ()
     try:
-        present = [name for name in registry if _is_regular_file(legacy_dir / name)]
+        present, linked = [], []
+        for name in registry:
+            path = legacy_dir / name
+            if path.is_symlink():
+                linked.append(name)
+            elif _is_regular_file(path):
+                present.append(name)
     except OSError as exc:
         return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
+    if linked:
+        return (
+            UNRESOLVABLE,
+            f'{len(linked)} of {len(registry)} file(s) in {legacy_dir} are symlinks, '
+            'not plain files; not moved',
+            (),
+        )
     if not present:
         return INCOMPLETE, f'0 of {len(registry)} file(s) present in {legacy_dir}', ()
     try:
@@ -418,11 +455,16 @@ def _move_below_root(
     """Move ``filename`` from ``root/src_parent`` to ``root/dst_parent``.
 
     Both parents are opened as directory handles from ``root``, following no
-    symlink below it; the destination's parent is created the same no-follow
-    way if it does not exist yet. The source entry is re-checked to still be
-    a plain file, not a symlink, in the same call that moves it, so a symlink
-    swapped into either tree after the plan's containment check is refused
-    rather than moved through or renamed.
+    symlink below it, so a parent directory replaced by a symlink after the
+    plan's containment check is refused rather than walked into; the
+    destination's parent is created the same no-follow way if it does not
+    exist yet. The source entry is checked once more, against the open parent
+    handle, to still be a plain file rather than a symlink, immediately
+    before the move. That check and the move itself are still two syscalls on
+    the same name, so this does not cover the entry itself being swapped in
+    the instant between them; closing that window needs no other process to
+    rename or replace entries under the data root while a run is in progress,
+    the same assumption this module states for the rest of a run.
     """
     src_fd = _open_dir_below(root, src_parent)
     try:
@@ -478,11 +520,19 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
             done.append(name)
     except OSError as exc:
         # Put back what was moved, so a failure part way leaves the tree as it
-        # was rather than split across two layouts.
+        # was rather than split across two layouts. The same dir-fd primitive
+        # as the forward move, reversed, so the restore gets the same
+        # containment guarantee the move itself does.
         unrestored = []
         for name in done:
+            name_parts = PurePosixPath(name).parts
             try:
-                os.replace(entry.target_dir / name, entry.legacy_dir / name)
+                _move_below_root(
+                    root,
+                    target_rel + name_parts[:-1],
+                    legacy_rel + name_parts[:-1],
+                    name_parts[-1],
+                )
             except OSError:
                 unrestored.append(name)
         if unrestored:
@@ -582,19 +632,21 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
     plan = plan_relocations(data_root)
     if dry_run:
         return plan
+    unsupported = _delete_unsupported()
+    if unsupported is not None:
+        return replace(plan, platform_error=unsupported)
     root = resolve_data_root(data_root)
-    done, halted = [], False
+    done = []
     for entry in plan.entries:
-        if entry.state != READY or halted:
+        if entry.state != READY:
             done.append(entry)
             continue
         moved = _move_one(entry, root)
         done.append(moved)
         if moved.state in (FAILED, SPLIT):
-            # Stop rather than move more data past a tree that is already in a
-            # state somebody has to look at.
-            log.error('stopping after %s could not be relocated', moved.key)
-            halted = True
+            # Reported and left for a person to look at; a fault in one
+            # dataset says nothing about the ones after it, so they still run.
+            log.error('%s could not be relocated', moved.key)
     return RelocationReport(
         tuple(done), dict(plan.manifest_errors), plan.layout_error, plan.conflict_providers
     )
