@@ -219,7 +219,7 @@ def _inside(path: Path, root: Path) -> bool:
     try:
         current = path.resolve()
         root_stat = os.stat(root.resolve())
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
         return False
     while True:
         try:

@@ -31,6 +31,7 @@ needs an explicit request and, unless suppressed, an interactive confirmation.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -284,7 +285,10 @@ def _same_dir(a: Path, b: Path) -> bool:
     try:
         return os.path.samefile(a, b)
     except OSError:
-        return a.resolve() == b.resolve()
+        try:
+            return a.resolve() == b.resolve()
+        except (OSError, RuntimeError):
+            return False
 
 
 def _existing_root(data_root: str | Path | None) -> Path:
@@ -455,31 +459,49 @@ def _any_lock_held(root: Path) -> bool:
     return False
 
 
-def _symlink_hops(link: Path) -> set[Path]:
-    """Every path a symlink chain passes through, plus its final target.
+#: Symlinks followed while tracing one link before giving up, the usual kernel limit.
+_MAX_SYMLINKS = 40
 
-    Each hop is spelled with its parent resolved but its own name kept, so a
-    chain that passes through a candidate on its way elsewhere still names
-    the candidate. The walk stops at 40 hops, the usual kernel limit.
+
+def _symlink_hops(link: Path) -> set[Path]:
+    """Every path the kernel visits while resolving ``link``.
+
+    The link text is walked one name at a time, as the kernel does, and each
+    name is recorded before any symlink it names is followed. A chain that
+    passes through a candidate, through a symlinked directory inside one, or
+    by way of ``..``, therefore names the candidate itself.
+
+    Raises
+    ------
+    OSError
+        When the link cannot be read or more than ``_MAX_SYMLINKS`` links are
+        met, which includes a loop.
     """
     hops: set[Path] = set()
-    current = link
-    for _ in range(40):
-        try:
-            nxt = Path(os.readlink(current))
-            if not nxt.is_absolute():
-                nxt = current.parent / nxt
-            nxt = nxt.parent.resolve() / nxt.name
-        except OSError:
-            break
-        hops.add(nxt)
-        if not nxt.is_symlink():
-            break
-        current = nxt
-    try:
-        hops.add(link.resolve())
-    except OSError:
-        pass
+    budget = _MAX_SYMLINKS
+
+    def _visit(text: str, base: Path) -> Path:
+        nonlocal budget
+        target = Path(text)
+        current = Path(target.anchor) if target.is_absolute() else base
+        for part in target.parts[1:] if target.is_absolute() else target.parts:
+            if part == '.':
+                continue
+            if part == '..':
+                current = current.parent
+                continue
+            step = current / part
+            hops.add(step)
+            if not step.is_symlink():
+                current = step
+                continue
+            budget -= 1
+            if budget < 0:
+                raise OSError(errno.ELOOP, 'too many levels of symbolic links', str(link))
+            current = _visit(os.readlink(step), current)
+        return current
+
+    _visit(os.readlink(link), link.parent)
     return hops
 
 
@@ -492,11 +514,10 @@ def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str |
     """Every hop of every symlink found inside a referenced directory.
 
     Collected once so ``_remove_one`` can refuse a candidate that a current
-    pin's own files point into, directly or through a chain of links, rather
-    than walking every referenced directory again for each candidate. The
-    second value is the first read error met, if any: an unreadable part of a
-    referenced directory may hold a symlink into any candidate, so the caller
-    must not delete.
+    pin's own links pass through, rather than walking every referenced
+    directory again for each candidate. The second value is the first error
+    met, if any: an unreadable part of a referenced directory, or a link that
+    cannot be traced, may lead into any candidate, so the caller must not delete.
     """
     targets: set[Path] = set()
     error: str | None = None
@@ -514,7 +535,10 @@ def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str |
             for name in (*dirnames, *filenames):
                 candidate = current / name
                 if candidate.is_symlink():
-                    targets |= _symlink_hops(candidate)
+                    try:
+                        targets |= _symlink_hops(candidate)
+                    except OSError as exc:
+                        _capture(exc)
     return targets, error
 
 
@@ -732,6 +756,20 @@ def plan_prune(data_root: str | Path | None = None) -> PruneReport:
     return _build(_existing_root(data_root)).report()
 
 
+def _open_dir_below(root: Path, parts: tuple[str, ...]) -> int:
+    """Open ``root/parts...`` as a directory, following no symlink below ``root``."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _remove_one(
     candidate: PruneCandidate,
     root: Path,
@@ -764,61 +802,122 @@ def _remove_one(
     if not _inside(path, root):
         return _refuse(f'resolves outside {root}; not removed')
     try:
-        before = os.lstat(path)
+        rel = path.relative_to(root)
+    except ValueError:
+        return _refuse(f'is not spelled below {root}; not removed')
+    try:
+        parent_fd = _open_dir_below(root, rel.parent.parts)
+    except OSError as exc:
+        return _refuse(f'its parent cannot be opened without symlinks ({exc}); not removed')
+    try:
+        return _remove_checked(
+            candidate,
+            root,
+            rel,
+            parent_fd,
+            referenced,
+            referenced_symlink_targets,
+            case_insensitive=case_insensitive,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _remove_checked(
+    candidate: PruneCandidate,
+    root: Path,
+    rel: Path,
+    parent_fd: int,
+    referenced: set[Path],
+    referenced_symlink_targets: frozenset[Path],
+    *,
+    case_insensitive: bool,
+) -> PruneCandidate:
+    """The checks and the move of :func:`_remove_one`, with the parent held open.
+
+    The entry is identified by device and inode through ``parent_fd``, a
+    handle reached from the data root without following any symlink, and it
+    is moved and deleted through handles only. A parent directory swapped for
+    a symlink after the handle was opened therefore cannot redirect the move
+    out of the tree, and an entry swapped in the parent itself is caught by
+    its identity after the move and put back.
+    """
+    path = candidate.path
+    name = path.name
+
+    def _refuse(detail: str) -> PruneCandidate:
+        return replace(candidate, state=REFUSED, detail=detail)
+
+    def _failed(detail: str) -> PruneCandidate:
+        return replace(candidate, state=REMOVE_FAILED, detail=detail)
+
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         on_other_device = before.st_dev != os.stat(root).st_dev
     except OSError as exc:
         return _refuse(f'cannot be checked ({exc}); not removed')
+    if not stat.S_ISDIR(before.st_mode):
+        return _refuse('is not a plain directory; not removed')
     if on_other_device or os.path.ismount(path):
         return _refuse('is a mount point or on another filesystem; not removed')
     if any(_same_dir(path, ref) for ref in referenced):
         return _refuse('is a referenced version; not removed')
     if any(_inside(ref, path) for ref in referenced):
         return _refuse('contains a referenced version; not removed')
-    try:
-        rel_parent = path.relative_to(root).parent.as_posix()
-    except ValueError:
-        return _refuse(f'is not spelled below {root}; not removed')
-    if not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive):
+    if not _has_matching_stamp(path, rel.parent.as_posix(), case_insensitive=case_insensitive):
         return _refuse('has no matching stamp; not removed')
     problem = _leaf_problem(path)
     if problem is not None:
         return _refuse(f'{problem}; not removed')
-    if any(_enters(target, path) for target in referenced_symlink_targets):
+    if any(_enters(hop, path) for hop in referenced_symlink_targets):
         return _refuse('a referenced file symlinks into this directory; not removed')
     if _any_lock_held(root):
         return _refuse('a fetch lock is held on the data root; not removed')
     staging = root / _STAGING_DIRNAME
+    staged_name = f'prune-{uuid.uuid4().hex}'
+    staged = staging / staged_name
     try:
-        staging.mkdir(exist_ok=True)
-        if staging.is_symlink() or not staging.is_dir():
-            return _refuse(f'{staging} is not a plain directory; not removed')
-        staged = staging / f'prune-{uuid.uuid4().hex}'
-        os.rename(path, staged)
-    except OSError as exc:
-        return replace(candidate, state=REMOVE_FAILED, detail=f'could not move it aside: {exc}')
-    try:
-        moved = os.lstat(staged)
-    except OSError as exc:
-        detail = f'moved to {staged}, then could not be checked ({exc})'
-        return replace(candidate, state=REMOVE_FAILED, detail=detail)
-    if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
-        # The path changed under us (a parent swapped for a symlink): put it back.
+        root_fd = _open_dir_below(root, ())
         try:
-            os.rename(staged, path)
-        except OSError as exc:
-            detail = f'changed while checked; moved to {staged}, not put back ({exc})'
-            return replace(candidate, state=REMOVE_FAILED, detail=detail)
-        return _refuse('changed while it was checked; not removed')
-    _prune_empty_parents(path.parent, root)
-    try:
-        shutil.rmtree(staged)
+            try:
+                os.mkdir(_STAGING_DIRNAME, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        finally:
+            os.close(root_fd)
+        staging_fd = _open_dir_below(root, (_STAGING_DIRNAME,))
     except OSError as exc:
-        if os.path.lexists(staged):
-            return replace(
-                candidate,
-                state=REMOVE_FAILED,
-                detail=f'moved to {staged} but not fully deleted ({exc}); delete it by hand',
-            )
+        return _refuse(f'{staging} is not a usable plain directory ({exc}); not removed')
+    try:
+        try:
+            os.rename(name, staged_name, src_dir_fd=parent_fd, dst_dir_fd=staging_fd)
+        except OSError as exc:
+            return _failed(f'could not move it aside: {exc}')
+        try:
+            moved = os.stat(staged_name, dir_fd=staging_fd, follow_symlinks=False)
+        except OSError as exc:
+            return _failed(f'moved to {staged}, then could not be checked ({exc})')
+        if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+            # A different entry took the name after the checks: put it back.
+            try:
+                os.rename(staged_name, name, src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
+            except OSError as exc:
+                return _failed(f'changed while checked; moved to {staged}, not put back ({exc})')
+            return _refuse('changed while it was checked; not removed')
+        _prune_empty_parents(path.parent, root)
+        try:
+            shutil.rmtree(staged_name, dir_fd=staging_fd)
+        except OSError as exc:
+            try:
+                os.stat(staged_name, dir_fd=staging_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                return _failed(
+                    f'moved to {staged} but not fully deleted ({exc}); delete it by hand'
+                )
+    finally:
+        os.close(staging_fd)
     log.info('removed unreferenced version directory %s', path)
     return replace(candidate, state=REMOVED, detail='')
 
@@ -979,7 +1078,7 @@ def apply_prune(
     for c in report.candidates:
         fresh = fresh_by_dir.get(c.path)
         if fresh is None:
-            fresh = next((f for f in build.candidates if _same_dir(f.path, c.path)), None)
+            fresh = next((f for f in build.candidates if _same_entry(f.path, c.path)), None)
         if fresh is None:
             if not os.path.lexists(c.path):
                 results.append(replace(c, state=GONE, size=0, detail='no longer on disk'))

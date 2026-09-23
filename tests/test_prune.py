@@ -1272,7 +1272,7 @@ def test_a_failed_move_aside_leaves_the_directory_whole(tmp_path, monkeypatch):
     root = tmp_path / 'data'
     dirs = _make_tree(root)
 
-    def _fail(src, dst):
+    def _fail(src, dst, **kwargs):
         raise OSError('simulated rename failure')
 
     monkeypatch.setattr('fwl_io.prune.os.rename', _fail)
@@ -1299,7 +1299,7 @@ def test_a_symlinked_staging_directory_is_never_used(tmp_path, monkeypatch):
 
     [refused] = report.problems
     assert refused.state == REFUSED
-    assert refused.detail.endswith('is not a plain directory; not removed')
+    assert 'is not a usable plain directory' in refused.detail
     assert (dirs['superseded'] / 'data.dat').is_file()
     assert list(outside_staging.iterdir()) == [], 'nothing is moved outside the root'
 
@@ -1428,18 +1428,18 @@ def test_remove_one_refuses_a_directory_on_another_device(tmp_path, monkeypatch)
     """A version directory whose device differs from the root's is never deleted."""
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
-    real_lstat = os.lstat
+    real_stat = os.stat
 
-    def _lstat(path, *args, **kwargs):
-        st = real_lstat(path, *args, **kwargs)
-        if Path(path) != version:
+    def _stat(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if kwargs.get('dir_fd') is None or path != version.name:
             return st
         fields = list(st[:10])
         fields[2] = st.st_dev + 1
         return os.stat_result(fields)
 
-    monkeypatch.setattr('fwl_io.prune.os.lstat', _lstat)
-    # ismount reads os.lstat too; pin it so only the device comparison can refuse.
+    monkeypatch.setattr('fwl_io.prune.os.stat', _stat)
+    # ismount reads os.lstat; pin it so only the device comparison can refuse.
     monkeypatch.setattr('fwl_io.prune.os.path.ismount', lambda path: False)
     candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
 
@@ -1493,12 +1493,12 @@ def test_a_symlinked_version_name_inside_a_candidate_makes_it_unrecognised(tmp_p
     assert (dirs['superseded'] / _STAMP_FILENAME).is_file()
 
 
-def test_remove_one_puts_back_a_directory_whose_parent_was_swapped(tmp_path, monkeypatch):
-    """A parent replaced by a symlink after the checks cannot redirect the delete.
+def test_a_parent_swapped_after_the_checks_cannot_redirect_the_delete(tmp_path, monkeypatch):
+    """A parent replaced by a symlink during the last lock check changes nothing outside.
 
-    The swap happens during the last lock check, so the rename would move a
-    same-named directory from outside the data root. The moved entry is not the
-    one that was checked, so it goes back where it came from and nothing is deleted.
+    The parent is held open from before the checks, so the move takes the
+    checked directory from where it now sits and never the same-named
+    directory the symlink points at.
     """
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
@@ -1516,12 +1516,59 @@ def test_remove_one_puts_back_a_directory_whose_parent_was_swapped(tmp_path, mon
 
     result = _remove_one(candidate, root, referenced=set())
 
-    assert (result.state, result.detail) == (
-        REFUSED,
-        'changed while it was checked; not removed',
-    )
+    assert result.state == 'removed'
     assert (victim / 'data.dat').read_bytes() == b'version payload\n'
-    assert (parent.with_name('moved_away') / version.name / 'data.dat').is_file()
+    assert not (parent.with_name('moved_away') / version.name).exists()
+
+
+def test_a_parent_swapped_before_the_handle_is_opened_is_refused(tmp_path, monkeypatch):
+    """A parent that is a symlink when the handle is opened stops the removal outright."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    outside = tmp_path / 'user_elsewhere'
+    victim = _stamped_version(outside, '', OLD_RECID, stamp_subdir=SUBDIR)
+    parent = version.parent
+    real_inside = prune_mod._inside
+
+    def _inside_then_swap(path, root_):
+        answer = real_inside(path, root_)
+        if path == version and not parent.is_symlink():
+            parent.rename(parent.with_name('moved_away'))
+            parent.symlink_to(outside, target_is_directory=True)
+        return answer
+
+    monkeypatch.setattr('fwl_io.prune._inside', _inside_then_swap)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert result.state == REFUSED
+    assert 'cannot be opened without symlinks' in result.detail
+    assert (victim / 'data.dat').read_bytes() == b'version payload\n'
+
+
+def test_an_entry_swapped_in_under_the_same_name_is_put_back(tmp_path, monkeypatch):
+    """A different directory that takes the candidate's name after the checks is not deleted."""
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    aside = version.with_name('aside')
+
+    def _swap_entry(_root):
+        version.rename(aside)
+        version.mkdir()
+        (version / 'newcomer.dat').write_bytes(b'new\n')
+        return False
+
+    monkeypatch.setattr('fwl_io.prune._any_lock_held', _swap_entry)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == (REFUSED, 'changed while it was checked; not removed')
+    assert (version / 'newcomer.dat').read_bytes() == b'new\n'
+    assert (aside / 'data.dat').is_file()
     assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
 
 
@@ -1547,6 +1594,108 @@ def test_a_symlink_chain_through_a_candidate_protects_it(tmp_path, monkeypatch):
         'a referenced file symlinks into this directory; not removed',
     )
     assert (dirs['referenced'] / 'link.dat').read_bytes() == b'outside\n'
+
+
+def test_a_link_through_a_symlinked_dir_inside_a_candidate_protects_it(tmp_path, monkeypatch):
+    """A referenced link that reaches through a symlinked directory in a candidate keeps it."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    outside_dir = tmp_path / 'outside_dir'
+    outside_dir.mkdir()
+    (outside_dir / 'file.dat').write_bytes(b'outside\n')
+    (dirs['superseded'] / 'd').symlink_to(outside_dir, target_is_directory=True)
+    (dirs['referenced'] / 'link.dat').symlink_to(dirs['superseded'] / 'd' / 'file.dat')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    [refused] = report.problems
+    assert refused.detail == 'a referenced file symlinks into this directory; not removed'
+    assert (dirs['referenced'] / 'link.dat').read_bytes() == b'outside\n'
+
+
+def test_a_link_passing_through_a_candidate_by_dotdot_protects_it(tmp_path, monkeypatch):
+    """A relative link that walks through a candidate and back out with ``..`` keeps it."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    through = f'../r{OLD_RECID}/../r{RECID}/data.dat'
+    (dirs['referenced'] / 'link.dat').symlink_to(through)
+
+    report = prune_versions(data_root=root, delete=True)
+
+    [refused] = report.problems
+    assert refused.detail == 'a referenced file symlinks into this directory; not removed'
+    assert dirs['superseded'].is_dir()
+
+
+def test_a_symlink_loop_in_a_referenced_version_refuses_without_raising(tmp_path, monkeypatch):
+    """A link loop that cannot be traced blocks deletion with a reason instead of an exception."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    (dirs['referenced'] / 'a').symlink_to('b')
+    (dirs['referenced'] / 'b').symlink_to('a')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert report.scan_error is not None
+    assert 'a referenced version cannot be fully read' in report.scan_error
+    assert not report.removed and dirs['superseded'].is_dir()
+    assert not report.ok
+
+
+def test_apply_never_deletes_a_planned_reference_through_a_swapped_symlink(tmp_path, monkeypatch):
+    """A planned target replaced by a link to the planned-referenced dir cannot delete that dir.
+
+    The pin advances before apply, so the old pin is superseded in the fresh
+    view, and the planned target is now a symlink to it. Matching plan and
+    fresh entries by identity without following links keeps the old pin.
+    """
+    _install_manifest(monkeypatch, _write_pinned_manifest(tmp_path, RECID))
+    root = tmp_path / 'data'
+    old = _stamped_version(root, SUBDIR, OLD_RECID)
+    current = _stamped_version(root, SUBDIR, RECID)
+    _stamped_version(root, SUBDIR, NEW_RECID)
+    plan = plan_prune(data_root=root)
+    _write_pinned_manifest(tmp_path, NEW_RECID)
+    shutil.rmtree(old)
+    old.symlink_to(current, target_is_directory=True)
+
+    result = apply_prune(plan, data_root=root)
+
+    assert current.is_dir(), 'the plan listed this as referenced, so apply must not remove it'
+    assert (current / 'data.dat').is_file()
+    assert old.is_symlink()
+    assert not result.removed
+
+
+def test_identity_helpers_answer_false_for_a_symlink_loop(tmp_path):
+    """A looping path is neither inside the root nor the same directory as anything."""
+    from fwl_io.prune import _same_dir
+    from fwl_io.relocate import _inside
+
+    (tmp_path / 'a').symlink_to('b')
+    (tmp_path / 'b').symlink_to('a')
+    (tmp_path / 'real').mkdir()
+
+    assert _inside(tmp_path / 'a' / 'x', tmp_path) is False
+    assert _same_dir(tmp_path / 'a', tmp_path / 'real') is False
+
+
+def test_a_symlink_in_staging_is_not_reported_as_a_remnant(tmp_path, monkeypatch):
+    """Only real leftover directories in staging are listed, never a link placed there."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (root / _STAGING_DIRNAME / 'prune-link').symlink_to(elsewhere, target_is_directory=True)
+    (root / _STAGING_DIRNAME / 'prune-real').mkdir()
+
+    report = plan_prune(data_root=root)
+
+    assert [p.name for p in report.staged_remnants] == ['prune-real']
 
 
 def test_apply_marks_a_planned_directory_gone_when_it_vanished(tmp_path, monkeypatch):
