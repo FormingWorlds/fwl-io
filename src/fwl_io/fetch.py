@@ -881,8 +881,8 @@ def create_fetcher(
         Override for the data root; defaults to the resolved FWL_DATA tree.
     progress : bool
         Show a download progress bar; useful for large files. The bar needs
-        tqdm and a ``sys.stderr``; without either it is skipped and the download
-        runs.
+        tqdm and a ``sys.stderr``; if either is missing it is skipped and the
+        download runs.
     extract : str | None
         When set (``"tar"`` or ``"zip"``), the single registry entry is a
         downloadable archive; it is verified, then its members are extracted

@@ -58,9 +58,9 @@ def _resolve_progress(requested: bool | None) -> bool:
     naming the fix prints only when tqdm is the missing piece and ``--progress``
     was asked for explicitly, so an auto-mode fetch on a terminal degrades
     without a message, and never when there is no stderr, since ``print`` would
-    then fall back to stdout. Auto mode
-    treats a missing, non-callable, or raising ``stderr.isatty`` as "not a
-    terminal" so resolving the default never aborts the fetch.
+    then fall back to stdout. Auto mode treats a missing, non-callable, or
+    raising ``stderr.isatty`` as "not a terminal" so resolving the default never
+    aborts the fetch.
     """
     if requested is None:
         isatty = getattr(sys.stderr, 'isatty', None)
