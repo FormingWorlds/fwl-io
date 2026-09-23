@@ -34,6 +34,8 @@ The dotted key is the location below `FWL_DATA`, so this dataset lands in `inter
 
 If the deposit is a single archive that consumers expect unpacked, add `extract = "tar"` or `extract = "zip"`; the archive is downloaded, checksum-verified, and unpacked into the dataset directory. See [Archive datasets](../Explanations/manifests.md#archive-datasets).
 
+If the deposit holds files this dataset does not need, add `files = ["name1", "name2"]` to list the ones it does. The registry then lists only those, and fetch, check and mirror handle only those. See [Partial datasets](../Explanations/manifests.md#partial-datasets).
+
 ## 3. Generate the registry
 
 ```bash

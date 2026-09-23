@@ -55,4 +55,4 @@ These are tracked as issues and open for input:
 - **Per-member archive checksums**: an archive dataset (`extract = "tar"` / `"zip"`) verifies the downloaded archive against its checksum, but the registry does not record a checksum per extracted member; a member deleted after extraction is detected on refetch (the stamp lists the member names) and healed, but a member corrupted in place is not.
 - **Dataverse mirror script**: mirroring a Zenodo deposit to Dataverse is a manual step; a sync script is planned.
 - **Checksum strength**: registries carry the checksums Zenodo publishes (md5); recording sha256 at sync time is under consideration.
-- **Progress reporting**: downloads are silent by default; a progress option exists per fetcher but is not yet wired through the CLI.
+- **Progress reporting for mirroring**: the downloads run by `fwl-io mirror` show no progress bar, unlike `fwl-io fetch`.

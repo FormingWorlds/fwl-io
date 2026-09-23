@@ -19,9 +19,14 @@ from pathlib import Path, PurePosixPath
 
 
 def validate_entry_name(name: str) -> None:
-    """Reject registry file names that could escape the dataset directory."""
+    """Reject registry file names that could escape the dataset directory or break its format."""
     if '\\' in name:
         raise ValueError(f'registry name {name!r} contains a backslash')
+    if any(c.isspace() for c in name):
+        raise ValueError(
+            f'registry name {name!r} contains whitespace, which the registry file '
+            f'format (whitespace-delimited "name hash" lines) cannot hold'
+        )
     parts = PurePosixPath(name).parts
     if name.startswith('/') or not parts:
         raise ValueError(f'registry name {name!r} must be a relative path')

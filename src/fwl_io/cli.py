@@ -49,10 +49,46 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def _resolve_progress(requested: bool | None) -> bool:
+    """Resolve the fetch progress-bar setting, degrading if no bar can be drawn.
+
+    ``requested`` is the parsed ``--progress`` / ``--no-progress`` flag; ``None``
+    means auto, on when stderr is a terminal. When a bar is wanted but cannot be
+    drawn, return ``False`` so the download still runs without one. The note
+    naming the fix prints only when tqdm is the missing piece and ``--progress``
+    was asked for explicitly, so an auto-mode fetch on a terminal degrades
+    without a message, and never when there is no stderr, since ``print`` would
+    then fall back to stdout. Auto mode treats a missing, non-callable, or
+    raising ``stderr.isatty`` as "not a terminal" so resolving the default never
+    aborts the fetch.
+    """
+    if requested is None:
+        isatty = getattr(sys.stderr, 'isatty', None)
+        try:
+            on = bool(isatty()) if callable(isatty) else False
+        except Exception:
+            on = False
+    else:
+        on = requested
+    if not on:
+        return False
+    from fwl_io.fetch import _progressbar_unavailable
+
+    reason = _progressbar_unavailable()
+    if reason is not None:
+        if requested and reason == 'tqdm' and sys.stderr is not None:
+            from fwl_io.manifest import _TQDM_HINT
+
+            print(_TQDM_HINT, file=sys.stderr)
+        return False
+    return True
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetch_for
 
-    fetched = fetch_for(args.model, data_root=args.data_root)
+    progress = _resolve_progress(args.progress)
+    fetched = fetch_for(args.model, data_root=args.data_root, progress=progress)
     if not fetched:
         print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
         return 1
@@ -149,6 +185,7 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
         subject=args.subject,
         publish=not args.no_publish,
         dry_run=args.dry_run,
+        files=args.file or None,
     )
     if persistent_id is None:
         print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
@@ -194,6 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch = sub.add_parser('fetch', help='fetch every dataset a model requires')
     p_fetch.add_argument('model', help='model name matched against required_by')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_fetch.add_argument(
+        '--progress',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='show a download progress bar (default: on when stderr is a terminal); needs tqdm',
+    )
     p_fetch.set_defaults(func=_cmd_fetch)
 
     p_check = sub.add_parser(
@@ -254,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
         '--subject',
         default='Astronomy and Astrophysics',
         help='Dataverse citation subject (the server rejects a value outside its vocabulary)',
+    )
+    p_mirror.add_argument(
+        '--file',
+        action='append',
+        metavar='NAME',
+        help='mirror only this file of the record (repeatable); match the dataset "files" list',
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
     p_mirror.add_argument(

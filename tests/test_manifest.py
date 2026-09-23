@@ -16,6 +16,8 @@ from fwl_io.manifest import (
     load_manifest,
     shared_manifest_path,
 )
+from fwl_io.registry import load_registry
+from fwl_io.sync import sync_manifest
 
 pytestmark = pytest.mark.unit
 
@@ -380,6 +382,109 @@ def test_unknown_extract_kind_rejected(tmp_path):
     assert load_manifest(_write(tmp_path, good))[0].extract == 'tar'
 
 
+def test_files_filter_loads_onto_the_dataset(tmp_path):
+    """A declared ``files`` list is carried onto the dataset; absent means the whole record."""
+    with_files = '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat", "b.dat"]\n'
+    assert load_manifest(_write(tmp_path, with_files))[0].files == ('a.dat', 'b.dat')
+    without = '[g.d]\nzenodo = "10.5281/zenodo.1"\n'
+    assert load_manifest(_write(tmp_path, without))[0].files is None
+
+
+@pytest.mark.parametrize(
+    ('files', 'match'),
+    [
+        ('"a.dat"', 'non-empty list'),
+        ('[]', 'non-empty list'),
+        ('[1]', 'non-empty list'),
+        ('["a.dat", "a.dat"]', 'more than once'),
+        ('["../a.dat"]', '"files" entry'),
+        ('["/abs.dat"]', '"files" entry'),
+        ('["a b.dat"]', 'whitespace'),
+    ],
+)
+def test_malformed_files_list_rejected(tmp_path, files, match):
+    """A ``files`` value that is not a clean list of plain names fails at load time."""
+    text = f'[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = {files}\n'
+    with pytest.raises(ValueError, match=match):
+        load_manifest(_write(tmp_path, text))
+
+
+def test_files_and_extract_cannot_be_combined(tmp_path):
+    """An archive dataset is one file, so a ``files`` list beside ``extract`` is refused."""
+    text = '[g.d]\nzenodo = "10.5281/zenodo.1"\nextract = "tar"\nfiles = ["a.tar"]\n'
+    with pytest.raises(ValueError, match='cannot be combined'):
+        load_manifest(_write(tmp_path, text))
+
+
+def test_registry_must_match_the_files_list(tmp_path):
+    """A registry naming other files than ``files`` is refused, in either direction."""
+    ds = load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat"]\n'))[
+        0
+    ]
+    ds.registry_path.write_text('a.dat sha256:aa\n')
+    assert ds.registry() == {'a.dat': 'sha256:aa'}
+    ds.registry_path.write_text('a.dat sha256:aa\nb.dat sha256:bb\n')
+    with pytest.raises(ValueError, match=r"in the registry only: \['b.dat'\]"):
+        ds.registry()
+    ds.registry_path.write_text('b.dat sha256:bb\n')
+    with pytest.raises(ValueError, match=r'in "files" only: \[\'a.dat\'\]'):
+        ds.registry()
+
+
+def _serve_record(root, recid, payload):
+    api_dir = root / 'api' / 'records'
+    api_dir.mkdir(parents=True, exist_ok=True)
+    (api_dir / str(recid)).write_text(json.dumps(payload))
+
+
+def test_fetch_for_fetches_only_the_listed_files(http_server, tmp_path, monkeypatch):
+    """A "files" filter drives sync (registry) and fetch (disk), not just an exact-match seed.
+
+    The record carries three files; the manifest declares two. sync_manifest must
+    write a registry of only those two (the direct proof the sync-time filter
+    works), and fetch_for must then return only those two paths offline, with the
+    third file's absence from the registry being what stops it from ever being
+    fetched, whether or not it happens to exist on disk.
+    """
+    base_url, root = http_server
+    contents = {'a.dat': b'A\n', 'b.dat': b'BB\n', 'c.dat': b'C\n'}
+    checksums = {}
+    for name, payload in contents.items():
+        source = tmp_path / name
+        source.write_bytes(payload)
+        checksums[name] = 'sha256:' + pooch.file_hash(str(source), alg='sha256')
+    record = {
+        'id': 1234567,
+        'conceptrecid': '1234566',
+        'files': [{'key': name, 'checksum': checksums[name]} for name in contents],
+    }
+    _serve_record(root, 1234567, record)
+
+    manifest_path = _write(
+        tmp_path,
+        '[star.tracks.demo]\nzenodo = "10.5281/zenodo.1234567"\n'
+        'required_by = ["mymodel"]\nfiles = ["a.dat", "b.dat"]\n',
+    )
+    written = sync_manifest(manifest_path, api_base=f'{base_url}api/records')
+    assert load_registry(written[0]) == {'a.dat': checksums['a.dat'], 'b.dat': checksums['b.dat']}
+
+    ds = load_manifest(manifest_path)[0]
+    data_root = tmp_path / 'data'
+    version_dir = data_root / ds.subdir / 'r1234567'
+    version_dir.mkdir(parents=True)
+    (version_dir / 'a.dat').write_bytes(contents['a.dat'])
+    (version_dir / 'b.dat').write_bytes(contents['b.dat'])
+    (version_dir / 'c.dat').write_bytes(contents['c.dat'])
+
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+    )
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+
+    fetched = fetch_for('mymodel', data_root=data_root)
+    assert sorted(p.name for p in fetched[ds.key]) == ['a.dat', 'b.dat']
+
+
 def test_missing_registry_gives_actionable_error(tmp_path):
     """A dataset whose registry was never generated names the command to run."""
     ds = load_manifest(_write(tmp_path, GOOD))[0]
@@ -392,21 +497,52 @@ def test_missing_registry_gives_actionable_error(tmp_path):
 
 
 @pytest.mark.smoke
-def test_shared_manifest_ships_and_parses_empty():
-    """The shared manifest ships with the package and parses cleanly.
+def test_shared_manifest_ships_and_loads_every_registry():
+    """The shared manifest ships with the package and every dataset has a registry.
 
-    It declares no datasets: nothing is consumed by several models, and the
-    Baraffe tracks ship with the MORS package. A comment-only manifest is a
-    valid one, and parsing it must yield an empty dataset list rather than
-    raising.
+    Loading resolves each dataset's registry file, so a dataset added without
+    running ``fwl-io sync`` fails here instead of at a user's first fetch.
     """
     path = shared_manifest_path()
     assert path.is_file()
-    # The file still carries content (the machinery header), so an empty parse
-    # is a deliberate no-datasets result, not a truncated or missing file.
-    assert path.read_text().strip()
     datasets = load_manifest(path)
-    assert datasets == []
+    assert datasets
+    keys = [ds.key for ds in datasets]
+    assert len(keys) == len(set(keys))
+    for ds in datasets:
+        assert ds.registry(), ds.key
+
+
+def test_shared_manifest_datasets_sharing_a_record_load_apart():
+    """Datasets that filter one Zenodo record to different files stay separate."""
+    by_key = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
+    unified = [
+        by_key[k]
+        for k in (
+            'interior.eos.paleos_iron',
+            'interior.eos.paleos_mgsio3_unified',
+            'interior.eos.paleos_h2o',
+        )
+    ]
+    assert len({ds.zenodo for ds in unified}) == 1
+    assert len({tuple(ds.registry()) for ds in unified}) == 3
+    for ds in unified:
+        assert tuple(ds.registry()) == ds.files
+    assert by_key['interior.eos.chabrier_2021_hhe'].extract == 'tar'
+
+
+def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
+    """Every legacy-layout key names a shared dataset or one a model manifest declares."""
+    from fwl_io.relocate import _legacy_locations
+
+    locations, error = _legacy_locations()
+    assert error is None
+    declared = {ds.key for ds in load_manifest(shared_manifest_path())}
+    assert set(locations) - declared == {
+        'observe.exoplanet_reference',
+        'observe.mass_radius.zeng_2019',
+        'star.tracks.baraffe_2015',
+    }
 
 
 class _FakeDist:
@@ -1472,3 +1608,91 @@ def test_older_schema_refusal_names_both_numbers(tmp_path, monkeypatch):
     # Discrimination: at the reader's own schema the same file loads, so the
     # refusal is the number's doing.
     assert load_manifest(_write(tmp_path, f'manifest_schema = 3\n{DEMO}'))[0].key == 'demo'
+
+
+def _fetch_for_progress_probe(tmp_path, monkeypatch):
+    """Wire fetch_for onto a fake create_fetcher and return the seen-progress dict."""
+    _, ds = _seed_versioned_dataset(
+        tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
+    )
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+    )
+
+    seen = {}
+
+    def fake_create_fetcher(**kwargs):
+        seen['progress'] = kwargs.get('progress')
+
+        class _Fetcher:
+            def fetch_all(self):
+                return [tmp_path / 'a.dat']
+
+        return _Fetcher()
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', fake_create_fetcher)
+    return seen
+
+
+def test_fetch_for_forwards_progress_to_create_fetcher(tmp_path, monkeypatch):
+    """The progress flag reaches create_fetcher, the single point that wires the bar."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    # tqdm is an opt-in extra absent from the default CI install, so force it
+    # present here: this test is about forwarding, not the degrade path below.
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+    assert seen['progress'] is True
+
+    fetch_for('mymodel', data_root=tmp_path / 'data', progress=False)
+    assert seen['progress'] is False
+
+
+def test_fetch_for_soft_degrades_without_tqdm(tmp_path, monkeypatch, caplog):
+    """A library caller asking for a bar without tqdm still fetches, bar off."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_drops_progress_without_stderr(tmp_path, monkeypatch, caplog):
+    """With tqdm present but no stderr, the bar is dropped without the tqdm hint."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text
+
+
+def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(tmp_path, monkeypatch, caplog):
+    """Missing tqdm is still named when stderr is also gone; logging never falls back to stdout."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(tmp_path, monkeypatch, caplog):
+    """Without pooch's private tqdm binding the bar is dropped, but tqdm is not named."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.delattr('pooch.downloaders.tqdm', raising=False)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text

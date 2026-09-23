@@ -16,6 +16,7 @@ Manifest schema, one table per dataset, identified by its ``zenodo`` key::
     dataverse = "10.34894/ABCDEF"           # optional download mirror
     required_by = ["aragog", "zalmoxis", "spider"]
     extract = "tar"                         # optional: unpack a single-archive deposit
+    files = ["eos.dat", "grid.dat"]         # optional: use only these files of the record
 
 The optional root ``manifest_schema`` names the schema the file was written
 against. A manifest that declares one is held to it: only the schema the
@@ -35,6 +36,11 @@ the version directory named for its Zenodo record.
 A deposit packaged as one archive declares ``extract = "tar"`` or ``"zip"``; its
 registry lists the archive, and the fetcher downloads and checksum-verifies it,
 then extracts the members into the dataset directory (the archive is not kept).
+
+A deposit that carries more than the dataset needs declares ``files``, a list of
+file names within the record. The registry, and with it fetch, check, relocate
+and the Dataverse mirror, then covers only those files; without ``files`` the
+whole record is the dataset. ``files`` and ``extract`` cannot be combined.
 
 Every dataset requires a Zenodo version DOI: the committed registry is
 generated from the Zenodo record, so Dataverse is a download mirror, not an
@@ -59,7 +65,7 @@ from pathlib import Path
 
 from fwl_io.archive import ARCHIVE_KINDS
 from fwl_io.doi import ZENODO_DOI_PATTERN, zenodo_record_id
-from fwl_io.registry import load_registry
+from fwl_io.registry import load_registry, validate_entry_name
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -80,7 +86,7 @@ _KEY_SEGMENT_PATTERN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]*')
 
 # Every field a dataset table may declare. A manifest naming anything else is
 # either a typo or written against a schema this fwl-io does not know.
-_DATASET_FIELDS = frozenset({'name', 'zenodo', 'dataverse', 'required_by', 'extract'})
+_DATASET_FIELDS = frozenset({'name', 'zenodo', 'dataverse', 'required_by', 'extract', 'files'})
 
 # The manifest schema this code implements, listed in the manifests
 # documentation. Incremented whenever a manifest written for the previous
@@ -225,6 +231,7 @@ class Dataset:
     required_by: tuple[str, ...] = field(default_factory=tuple)
     registry_path: Path | None = None
     extract: str | None = None
+    files: tuple[str, ...] | None = None
 
     @property
     def subdir(self) -> str:
@@ -232,12 +239,26 @@ class Dataset:
         return self.key.replace('.', '/')
 
     def registry(self) -> dict[str, str]:
-        """Return the committed name-to-hash registry for this dataset."""
+        """Return the committed name-to-hash registry for this dataset.
+
+        A dataset that declares ``files`` must have a registry naming exactly
+        those files, so a registry left over from before the list changed is
+        refused rather than fetched in part or in excess.
+        """
         if self.registry_path is None or not self.registry_path.is_file():
             raise FileNotFoundError(
                 f'no registry file for dataset {self.key!r}; run: fwl-io sync <manifest>'
             )
-        return load_registry(self.registry_path)
+        entries = load_registry(self.registry_path)
+        if self.files is not None and set(entries) != set(self.files):
+            extra = sorted(set(entries) - set(self.files))
+            absent = sorted(set(self.files) - set(entries))
+            raise ValueError(
+                f'the registry of dataset {self.key!r} does not match its "files" list '
+                f'(in the registry only: {extra}; in "files" only: {absent}); '
+                f'run: fwl-io sync <manifest>'
+            )
+        return entries
 
 
 def _validate_key_segment(segment: str, parent: str) -> None:
@@ -350,6 +371,28 @@ def _walk_tables(
     return leaves
 
 
+def _validate_files(key: str, files: object, extract: str | None) -> tuple[str, ...]:
+    """Check a dataset's ``files`` list and return it as a tuple."""
+    if not isinstance(files, list) or not files or not all(isinstance(n, str) for n in files):
+        raise ValueError(
+            f'dataset {key!r}: "files" must be a non-empty list of file names, got {files!r}'
+        )
+    if len(set(files)) != len(files):
+        duplicated = sorted({name for name in files if files.count(name) > 1})
+        raise ValueError(f'dataset {key!r}: "files" lists {duplicated} more than once')
+    for name in files:
+        try:
+            validate_entry_name(name)
+        except ValueError as exc:
+            raise ValueError(f'dataset {key!r}: "files" entry: {exc}') from exc
+    if extract is not None:
+        raise ValueError(
+            f'dataset {key!r}: "files" cannot be combined with "extract"; an archive '
+            f'dataset is one file and is unpacked whole'
+        )
+    return tuple(files)
+
+
 def load_manifest(path: str | Path) -> list[Dataset]:
     """Load and validate all datasets declared in one manifest file."""
     path = Path(path)
@@ -400,6 +443,9 @@ def load_manifest(path: str | Path) -> list[Dataset]:
             raise ValueError(
                 f'dataset {key!r}: extract value {extract!r} must be one of {ARCHIVE_KINDS}'
             )
+        files = table.get('files')
+        if files is not None:
+            files = _validate_files(key, files, extract)
         datasets.append(
             Dataset(
                 key=key,
@@ -409,6 +455,7 @@ def load_manifest(path: str | Path) -> list[Dataset]:
                 required_by=tuple(required_by),
                 registry_path=path.parent / f'{key}.registry.txt',
                 extract=extract,
+                files=files,
             )
         )
     return datasets
@@ -583,7 +630,12 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     return found
 
 
-def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list[Path]]:
+_TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
+
+
+def fetch_for(
+    model: str, data_root: str | Path | None = None, progress: bool = False
+) -> dict[str, list[Path]]:
     """Fetch every dataset a given model requires; return paths per dataset.
 
     All matching datasets are attempted; failures are collected and raised
@@ -602,9 +654,19 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
         Model name matched (case-insensitively) against ``required_by``.
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
+    progress : bool
+        Show a per-file download progress bar. When tqdm is not installed, or
+        there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
+        continues.
     """
-    from fwl_io.fetch import create_fetcher
+    from fwl_io.fetch import _progressbar_unavailable, create_fetcher
 
+    if progress:
+        # Never fail a fetch over a cosmetic bar; name the fix only when it is tqdm.
+        reason = _progressbar_unavailable()
+        if reason == 'tqdm':
+            log.warning(_TQDM_HINT)
+        progress = reason is None
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
@@ -622,6 +684,7 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
                     dataverse=ds.dataverse,
                     registry=ds.registry(),
                     data_root=data_root,
+                    progress=progress,
                     extract=ds.extract,
                 )
                 fetched[ds.key] = fetcher.fetch_all()
