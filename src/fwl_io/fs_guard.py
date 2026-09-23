@@ -518,13 +518,15 @@ def _open_or_make_dir_below(root: Path, parts: tuple[str, ...]) -> int:
     return fd
 
 
-def _delete_unsupported() -> str | None:
+def _delete_unsupported(*, operation: str = 'deletion') -> str | None:
     """Why this platform cannot delete or move safely, or ``None`` when it can.
 
     Safe deletion and safe relocation both move directories through handles
     opened without following symlinks and probe fetch locks with flock; a
     platform without these (such as Windows) is refused up front rather than
-    failing part way. Checked by feature, not by platform name.
+    failing part way. Checked by feature, not by platform name. ``operation``
+    names the caller's own action in the message, so a relocation refused
+    this way does not read as a deletion.
     """
     missing = [name for name in ('O_DIRECTORY', 'O_NOFOLLOW') if not hasattr(os, name)]
     if not _DIR_FD_OK:
@@ -534,5 +536,5 @@ def _delete_unsupported() -> str | None:
     if fcntl is None:
         missing.append('flock')
     if missing:
-        return f'deletion is not supported on this platform (missing {", ".join(missing)})'
+        return f'{operation} is not supported on this platform (missing {", ".join(missing)})'
     return None

@@ -24,8 +24,9 @@ pins the packed archive, and a legacy tree holds the extracted members, so
 there is nothing to hash the tree against.
 
 A run assumes that no other process renames or replaces directories under the
-data root while it moves files. An fwl-io fetch is kept out only while it
-holds the fetch lock, which is not the whole of every fetch.
+data root while it moves files. Unlike a deletion, a move does not check the
+fetch lock, so a fetch running at the same time is not detected at all; do
+not relocate while a fetch could be running.
 """
 
 from __future__ import annotations
@@ -34,19 +35,13 @@ import logging
 import os
 import stat
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
-from fwl_io.fs_guard import (
-    _delete_unsupported,
-    _inside,
-    _is_regular_file,
-    _open_dir_below,
-    _open_or_make_dir_below,
-)
+from fwl_io.fs_guard import _inside, _is_regular_file, _open_dir_below, _open_or_make_dir_below
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
@@ -83,9 +78,10 @@ class Relocation:
     state: str
     legacy_dir: Path | None = None
     target_dir: Path | None = None
-    #: Names actually moved or scheduled to move: the present-and-verified
-    #: subset of the registry for ``READY`` and ``MOVED``, empty otherwise.
-    #: Not the dataset's whole registry; an absent file is never in here.
+    #: The present-and-verified subset of the registry this move attempted:
+    #: set from ``READY`` on, carried unchanged through ``MOVED``, ``FAILED``
+    #: and ``SPLIT``; empty for every other state. Not the dataset's whole
+    #: registry, an absent file is never in here.
     files: tuple[str, ...] = ()
     detail: str = ''
     legacy_present: bool = False
@@ -115,15 +111,13 @@ class RelocationReport:
     covering nothing would read exactly like a tree with nothing left to move.
     ``conflict_providers`` names which of ``manifest_errors`` was a conflict
     rather than a load failure, so the summary can tell a caller which repair
-    applies. ``platform_error`` is set instead of moving anything when this
-    platform lacks what a safe move needs.
+    applies.
     """
 
     entries: tuple[Relocation, ...] = ()
     manifest_errors: dict[str, str] = field(default_factory=dict)
     layout_error: str | None = None
     conflict_providers: frozenset[str] = field(default_factory=frozenset)
-    platform_error: str | None = None
 
     def _in_state(self, *states: str) -> tuple[Relocation, ...]:
         return tuple(e for e in self.entries if e.state in states)
@@ -131,12 +125,7 @@ class RelocationReport:
     @property
     def ok(self) -> bool:
         """True when every legacy tree found was dealt with and none was skipped."""
-        return (
-            not self.faults
-            and not self.manifest_errors
-            and self.layout_error is None
-            and self.platform_error is None
-        )
+        return not self.faults and not self.manifest_errors and self.layout_error is None
 
     @property
     def ready(self) -> tuple[Relocation, ...]:
@@ -175,8 +164,6 @@ class RelocationReport:
             # Without this the run reports nothing to do, which is what a tidy
             # tree also reports, and the two are not the same answer.
             lines.append(f'LEGACY LAYOUT UNREADABLE, {self.layout_error}')
-        if self.platform_error is not None:
-            lines.append(f'PLATFORM NOT SUPPORTED, {self.platform_error}')
         if not lines:
             return 'no dataset declares a legacy location'
         done, waiting, bad = len(self.moved), len(self.ready), len(self.faults)
@@ -426,6 +413,30 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 )
                 continue
             state, detail, files = _classify(legacy_dir, target_dir, registry)
+            if state == READY:
+                # The same no-follow open the actual move uses, so a symlinked
+                # component anywhere in legacy_dir's path is caught here,
+                # before the plan says the dataset is ready, not only once the
+                # move itself opens it: is_dir() inside _classify already
+                # resolves symlinks, so a legacy_dir reached through one still
+                # passed as READY; only this open can tell the two apart. Only
+                # a READY result needs it, so a dataset _classify already
+                # refuses or already calls done never depends on this
+                # platform's capabilities.
+                try:
+                    fd = _open_dir_below(root, legacy_dir.relative_to(root).parts)
+                except (OSError, AttributeError) as exc:
+                    # AttributeError is this platform lacking O_DIRECTORY: the
+                    # same primitive the actual move uses, probed here so a
+                    # legacy tree that is actually present is refused by name
+                    # instead of crashing the plan or the move itself.
+                    state, detail, files = (
+                        UNRESOLVABLE,
+                        f'{legacy_dir} cannot be safely opened: {exc}',
+                        (),
+                    )
+                else:
+                    os.close(fd)
             entries.append(
                 Relocation(
                     ds.key,
@@ -632,9 +643,6 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
     plan = plan_relocations(data_root)
     if dry_run:
         return plan
-    unsupported = _delete_unsupported()
-    if unsupported is not None:
-        return replace(plan, platform_error=unsupported)
     root = resolve_data_root(data_root)
     done = []
     for entry in plan.entries:

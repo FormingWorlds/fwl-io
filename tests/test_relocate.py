@@ -256,12 +256,15 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
     assert (root / TARGET / 'notes.txt').is_file()
 
 
-def test_a_platform_missing_a_safe_move_capability_refuses_up_front(tmp_path, monkeypatch):
-    """A platform that cannot move directories safely is refused before anything touches disk.
+def test_a_platform_missing_a_safe_move_capability_refuses_that_dataset(tmp_path, monkeypatch):
+    """A platform that cannot move directories safely refuses the affected dataset by name.
 
-    The same capability check prune.py's deletion uses; a platform without it
-    is refused cleanly rather than failing part way through the first move
-    with an error that names an implementation detail instead of the reason.
+    The same no-follow open the actual move uses is probed at plan time for
+    every dataset the hash check found ready, so a platform without it is
+    refused cleanly there, before a move is attempted, rather than crashing
+    part way through with an error that names an implementation detail
+    instead of the reason. A dry run reports the same refusal, so it never
+    promises a move the real run cannot make.
     """
     import fwl_io.relocate as module
 
@@ -270,12 +273,38 @@ def test_a_platform_missing_a_safe_move_capability_refuses_up_front(tmp_path, mo
     _populate(root / LEGACY)
     monkeypatch.delattr(module.os, 'O_DIRECTORY', raising=False)
 
+    plan = relocate_all(data_root=root, dry_run=True)
     report = relocate_all(data_root=root)
 
-    assert report.platform_error is not None
-    assert not report.ok
-    assert report.moved == (), 'the plan is reported but nothing was moved'
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'cannot be safely opened' in result.entries[0].detail
+        assert not result.ok
+        assert result.moved == ()
     assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+def test_a_tidy_tree_is_not_refused_for_a_platform_capability_it_never_needed(
+    tmp_path, monkeypatch
+):
+    """A platform missing a safe-move capability does not refuse a tree with nothing to move.
+
+    The capability is only probed for a dataset the hash check already found
+    ready; a tree where every dataset is absent or already at its current
+    location never reaches that probe, so it is not refused over a
+    limitation moving it would never actually hit.
+    """
+    import fwl_io.relocate as module
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET)
+    monkeypatch.delattr(module.os, 'O_DIRECTORY', raising=False)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ALREADY_CURRENT]
+    assert report.ok
 
 
 def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypatch):
@@ -292,6 +321,29 @@ def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypa
     _populate(real)
     (root / LEGACY).parent.mkdir(parents=True, exist_ok=True)
     (root / LEGACY).symlink_to(real, target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=True)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'symlink' in report.entries[0].detail
+    assert not (root / TARGET).exists()
+
+
+def test_a_symlinked_ancestor_of_the_legacy_directory_is_refused_at_plan_time(
+    tmp_path, monkeypatch
+):
+    """A symlink higher up in legacy_dir's path is refused at plan time, not only the leaf.
+
+    ``legacy_dir`` itself not being a symlink is not enough: the leaf check
+    above passes an intact-looking directory reached through a symlinked
+    parent, and the same open the move already uses is what tells the two
+    apart, at plan time as well as when the move actually runs.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    real_parent = root / 'bigdisk'
+    _populate(real_parent / 'Baraffe')
+    (root / LEGACY).parent.symlink_to(real_parent, target_is_directory=True)
 
     report = relocate_all(data_root=root, dry_run=True)
 
@@ -569,9 +621,13 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
     real_move = module._move_below_root
     calls = []
 
-    def _swap_then_fail(root_, src_parent, dst_parent, filename):
+    def _fail_second_move(root_, src_parent, dst_parent, filename):
         calls.append(filename)
-        if len(calls) == 1:
+        if len(calls) != 2:
+            # Every call but the one that fails, including the rollback that
+            # follows, goes to the real primitive: only that way does a
+            # passing test mean the real dir-fd guard refused the restore,
+            # rather than this fake's own bookkeeping standing in for it.
             return real_move(root_, src_parent, dst_parent, filename)
         for entry in list(legacy.iterdir()):
             entry.unlink()
@@ -579,7 +635,7 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
         legacy.symlink_to(outside, target_is_directory=True)
         raise OSError(28, 'No space left on device')
 
-    monkeypatch.setattr(module, '_move_below_root', _swap_then_fail)
+    monkeypatch.setattr(module, '_move_below_root', _fail_second_move)
     entry = Relocation(
         KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
     )
@@ -589,6 +645,7 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
     assert result.state == SPLIT
     assert list(outside.iterdir()) == [], 'nothing may be written through the swapped-in symlink'
     assert legacy.is_symlink(), 'the swap itself is not undone; only the restore into it is refused'
+    assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
 
 
 def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
