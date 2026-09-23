@@ -466,26 +466,164 @@ def shared_manifest_path() -> Path:
     return Path(__file__).parent / 'data' / 'shared_manifest.toml'
 
 
-def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
-    """Load every installed manifest; return (datasets per provider, errors)."""
+@dataclass(frozen=True)
+class _Discovery:
+    """Result of loading every installed manifest.
+
+    ``found`` holds the datasets of each usable provider. ``errors`` holds one
+    message per provider left out, whether it failed to load or conflicts with
+    another. ``conflict_models`` maps the ``errors`` key of each provider left
+    out for a conflict to the lower-cased models its datasets serve.
+    """
+
+    found: dict[str, list[Dataset]]
+    errors: dict[str, str]
+    conflict_models: dict[str, frozenset[str]]
+
+    def errors_for(self, model: str) -> dict[str, str]:
+        """Return the ``errors`` that can affect ``model``, a lower-cased name.
+
+        A provider that failed to load is always included, since its datasets
+        are unknown and the model may have needed them. A provider left out for
+        a conflict is included only when its datasets serve the model.
+        """
+        return {
+            name: msg
+            for name, msg in self.errors.items()
+            if name not in self.conflict_models or model in self.conflict_models[name]
+        }
+
+
+def _models_served(datasets: list[Dataset]) -> frozenset[str]:
+    """Return the lower-cased model names the datasets are required by."""
+    return frozenset(m.lower() for ds in datasets for m in ds.required_by)
+
+
+def _unique_key(key: str, taken: dict[str, str]) -> str:
+    """Return ``key``, suffixed with a counter if ``taken`` already has it."""
+    candidate, n = key, 1
+    while candidate in taken:
+        n += 1
+        candidate = f'{key} #{n}'
+    return candidate
+
+
+def _drop_duplicate_names(
+    loaded: list[tuple[str, str, str, list[Dataset]]], errors: dict[str, str]
+) -> tuple[dict[str, list[Dataset]], dict[str, frozenset[str]]]:
+    """Keep the providers with a unique entry-point name; report the others.
+
+    ``loaded`` holds ``(name, package label, entry-point target, datasets)`` per
+    provider that loaded. Every provider sharing a name is dropped, since their
+    datasets cannot be attributed to one manifest, and each gets its own entry
+    in ``errors``. The target is always known, so the message identifies each
+    entry even when its package metadata is missing.
+    """
+    by_name: dict[str, list[tuple[str, str, list[Dataset]]]] = {}
+    for name, label, target, datasets in loaded:
+        by_name.setdefault(name, []).append((label, target, datasets))
     found: dict[str, list[Dataset]] = {}
+    models: dict[str, frozenset[str]] = {}
+    for name, claimants in by_name.items():
+        if len(claimants) == 1:
+            found[name] = claimants[0][2]
+            continue
+        claimants = sorted(claimants, key=lambda c: (c[0], c[1]))
+        who = '; '.join(f'{label} (target {target})' for label, target, _ in claimants)
+        message = (
+            f'the {name!r} manifest entry point is registered {len(claimants)} times, '
+            f'by {who}; fwl-io cannot tell which manifest is meant and uses none of them. '
+            f'Make a single package register {name!r} once: uninstall or pin the others, '
+            f'or remove the repeated entry.'
+        )
+        for _label, target, datasets in claimants:
+            key = _unique_key(f'{name} ({target})', errors)
+            errors[key] = message
+            models[key] = _models_served(datasets)
+            log.warning('skipping manifest provider %r: %s', key, message)
+    return found, models
+
+
+def _drop_conflicting_datasets(
+    found: dict[str, list[Dataset]], errors: dict[str, str]
+) -> dict[str, frozenset[str]]:
+    """Remove every provider that claims a location another provider also claims.
+
+    Locations are compared case-folded, the rule a single manifest already
+    applies, so ``Star.Tracks`` from one provider conflicts with ``star.tracks``
+    from another. A collision inside one manifest is caught by ``load_manifest``;
+    this is the cross-provider half, visible only once every installed manifest
+    is loaded. Each dropped provider gets one entry in ``errors``; a provider
+    with no contested location stays in ``found``.
+    """
+    claims: dict[str, list[tuple[str, str]]] = {}
+    for provider, datasets in found.items():
+        for ds in datasets:
+            claims.setdefault(ds.subdir.lower(), []).append((provider, ds.key))
+    conflicts = {loc: sorted(owners) for loc, owners in claims.items() if len(owners) > 1}
+    dropped = sorted({provider for owners in conflicts.values() for provider, _ in owners})
+    models: dict[str, frozenset[str]] = {}
+    for provider in dropped:
+        lines = [
+            'manifests from different providers claim the same dataset location '
+            f'({provider!r} is one of them):'
+        ]
+        for loc in sorted(conflicts):
+            owners = conflicts[loc]
+            if any(p == provider for p, _ in owners):
+                claimants = ', '.join(f'{p!r} declares {key!r}' for p, key in owners)
+                lines.append(f'  {loc}: {claimants}')
+        lines.append(
+            'Each location must have one provider, so fwl-io uses none of the providers '
+            'named above. Uninstall or pin all but one of them, or remove the repeated '
+            'entry, so a single manifest declares each location.'
+        )
+        key = _unique_key(provider, errors)
+        message = '\n'.join(lines)
+        errors[key] = message
+        models[key] = _models_served(found[provider])
+        log.warning('skipping manifest provider %r: %s', key, message)
+    for provider in dropped:
+        del found[provider]
+    return models
+
+
+def _discover_all() -> _Discovery:
+    """Load every installed manifest; never raises for their state.
+
+    A provider that cannot be loaded, shares an entry-point name with another
+    provider, or claims a dataset location another provider also claims is left
+    out of ``found`` and reported in ``errors``, so the rest keep working.
+    """
     errors: dict[str, str] = {}
+    loaded: list[tuple[str, str, str, list[Dataset]]] = []
     for ep in entry_points(group='fwl_io.manifests'):
+        target = getattr(ep, 'value', None) or ep.name
+        label = getattr(getattr(ep, 'dist', None), 'name', None) or target
         try:
             manifest_path = ep.load()()
-            found[ep.name] = load_manifest(manifest_path)
+            loaded.append((ep.name, label, target, load_manifest(manifest_path)))
         except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
-            errors[ep.name] = str(exc)
+            errors[_unique_key(ep.name, errors)] = str(exc)
             log.warning('skipping manifest provider %r: %s', ep.name, exc)
-    return found, errors
+    found, conflict_models = _drop_duplicate_names(loaded, errors)
+    conflict_models.update(_drop_conflicting_datasets(found, errors))
+    return _Discovery(found, errors, conflict_models)
+
+
+def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
+    """Return ``(datasets per provider, error per provider left out)``."""
+    result = _discover_all()
+    return result.found, result.errors
 
 
 def discover_manifests() -> dict[str, list[Dataset]]:
     """Collect datasets from every installed ``fwl_io.manifests`` entry point.
 
     Entry points must resolve to a zero-argument callable returning the
-    manifest path. A provider whose manifest fails to load is skipped with a
-    logged warning, so one broken package cannot break data access for every
+    manifest path. A provider whose manifest fails to load, or that conflicts
+    with another provider, is skipped and reported by ``fwl-io list`` and
+    ``check_for``, so one broken package cannot break data access for every
     other model.
     """
     found, _ = _discover()
@@ -517,7 +655,9 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
-    providers, provider_errors = _discover()
+    discovery = _discover_all()
+    providers = discovery.found
+    provider_errors = discovery.errors_for(model)
     for datasets in providers.values():
         for ds in datasets:
             if model not in tuple(r.lower() for r in ds.required_by):
@@ -540,7 +680,10 @@ def fetch_for(model: str, data_root: str | Path | None = None) -> dict[str, list
             report.append(f'{len(failures)} dataset(s) failed:')
             report += [f'  {key}: {msg}' for key, msg in sorted(failures.items())]
         if provider_errors:
-            report.append(f'{len(provider_errors)} manifest(s) could not be read:')
-            report += [f'  {name}: {msg}' for name, msg in sorted(provider_errors.items())]
+            report.append(f'{len(provider_errors)} manifest(s) not used:')
+            by_message: dict[str, list[str]] = {}
+            for name, msg in sorted(provider_errors.items()):
+                by_message.setdefault(msg, []).append(name)
+            report += [f'  {", ".join(names)}: {msg}' for msg, names in by_message.items()]
         raise RuntimeError('\n'.join(report))
     return fetched

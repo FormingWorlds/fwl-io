@@ -543,10 +543,17 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
     }
 
 
+class _FakeDist:
+    def __init__(self, name):
+        self.name = name
+
+
 class _FakeEntryPoint:
-    def __init__(self, name, target):
+    def __init__(self, name, target, dist=None, value=None):
         self.name = name
         self._target = target
+        self.dist = _FakeDist(dist) if dist else None
+        self.value = value or f'{dist or "pkg"}.{name}:manifest_path'
 
     def load(self):
         return self._target
@@ -568,6 +575,571 @@ def test_discovery_isolates_broken_providers(tmp_path, monkeypatch):
     found = discover_manifests()
     assert set(found) == {'good-model'}
     assert len(found['good-model']) == 2
+
+
+def _provider_manifest(tmp_path, name, text):
+    """Write one provider's manifest under its own directory below tmp_path."""
+    path = tmp_path / name / 'manifest.toml'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+_SHARED_EOS = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+_OTHER_EOS = (
+    '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+    'required_by = ["othermodel"]\n'
+)
+
+
+def _colliding_providers(tmp_path, monkeypatch, text=_OTHER_EOS):
+    """Install two providers declaring one location, plus an unrelated third."""
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', text)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', text)),
+        _FakeEntryPoint(
+            'package-c',
+            lambda: _provider_manifest(
+                tmp_path,
+                'c',
+                '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.9"\nrequired_by = ["mors"]\n',
+            ),
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+
+def test_two_providers_claiming_one_location_are_dropped_and_reported(tmp_path, monkeypatch):
+    """Providers that declare one location leave discovery; the rest stay loaded."""
+    _colliding_providers(tmp_path, monkeypatch)
+
+    found, errors = manifest._discover()
+    assert set(found) == {'package-c'}, 'only the provider with no contested location stays'
+    assert set(errors) == {'package-a', 'package-b'}, 'one error per dropped provider'
+    for provider, message in errors.items():
+        # The reader needs the contested location, every claimant and the fix.
+        assert 'interior_lookup_tables/demo_eos' in message
+        assert 'package-a' in message and 'package-b' in message, provider
+        assert 'manifests from different providers' in message
+        assert 'Uninstall or pin' in message
+    assert 'package-c' not in ''.join(errors.values())
+
+
+def test_a_load_error_and_a_conflict_error_are_classified_apart(tmp_path, monkeypatch):
+    """``conflict_models`` names only the conflict, never the plain load failure.
+
+    A caller such as ``cli.py`` picks the verdict label by testing membership
+    in ``conflict_models``; a load failure and a conflict must land on opposite
+    sides of that test even though both end up as ``errors`` entries.
+    """
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    eps = [
+        _FakeEntryPoint('broken', broken),
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', _OTHER_EOS)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', _OTHER_EOS)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    discovery = manifest._discover_all()
+
+    assert set(discovery.errors) == {'broken', 'package-a', 'package-b'}
+    assert 'broken' not in discovery.conflict_models, 'a load failure is not a conflict'
+    assert {'package-a', 'package-b'} <= set(discovery.conflict_models)
+
+
+def test_a_dataset_location_conflict_logs_a_warning_per_dropped_provider(
+    tmp_path, monkeypatch, caplog
+):
+    """A caller of discover_manifests(), not just list/check, learns of a dropped provider."""
+    _colliding_providers(tmp_path, monkeypatch)
+
+    with caplog.at_level('WARNING', logger='fwl.fwl_io.manifest'):
+        discover_manifests()
+
+    warnings = [r.message for r in caplog.records if r.levelname == 'WARNING']
+    assert any('package-a' in m for m in warnings)
+    assert any('package-b' in m for m in warnings)
+
+
+def test_conflict_does_not_raise_from_discover_manifests(tmp_path, monkeypatch):
+    """The public discovery call returns the surviving providers on a conflict."""
+    _colliding_providers(tmp_path, monkeypatch)
+    assert set(discover_manifests()) == {'package-c'}
+
+
+def test_case_only_difference_across_providers_conflicts(tmp_path, monkeypatch):
+    """Keys differing only in case resolve to one directory and still conflict."""
+    lower = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+    upper = '[Interior_Lookup_Tables.Demo_EOS]\nzenodo = "10.5281/zenodo.7654321"\n'
+    eps = [
+        _FakeEntryPoint('lower-pkg', lambda: _provider_manifest(tmp_path, 'a', lower)),
+        _FakeEntryPoint('upper-pkg', lambda: _provider_manifest(tmp_path, 'b', upper)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    # Without the case fold the two locations would look distinct and both load.
+    assert found == {}
+    assert set(errors) == {'lower-pkg', 'upper-pkg'}
+    assert 'lower-pkg' in errors['upper-pkg'] and 'upper-pkg' in errors['lower-pkg']
+
+
+def test_three_providers_claiming_one_location_are_all_named(tmp_path, monkeypatch):
+    """A three-way location collision drops and names every claimant."""
+    eps = [
+        _FakeEntryPoint(f'package-{x}', lambda x=x: _provider_manifest(tmp_path, x, _SHARED_EOS))
+        for x in 'abc'
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert set(errors) == {'package-a', 'package-b', 'package-c'}
+    for message in errors.values():
+        assert all(f'package-{x}' in message for x in 'abc')
+
+
+def test_provider_with_one_contested_location_is_dropped_whole(tmp_path, monkeypatch):
+    """A provider is dropped whole, even when only one of its datasets collides."""
+    two = _SHARED_EOS + '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.9"\n'
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', two)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', _SHARED_EOS)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert set(errors) == {'package-a', 'package-b'}
+
+
+def test_providers_linked_only_through_a_middle_provider_are_all_dropped(tmp_path, monkeypatch):
+    """A shares a location with B and B with C: A and C share none, yet all three go."""
+    a = '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+    b = a + '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+    c = '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+    eps = [
+        _FakeEntryPoint('package-a', lambda: _provider_manifest(tmp_path, 'a', a)),
+        _FakeEntryPoint('package-b', lambda: _provider_manifest(tmp_path, 'b', b)),
+        _FakeEntryPoint('package-c', lambda: _provider_manifest(tmp_path, 'c', c)),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert set(errors) == {'package-a', 'package-b', 'package-c'}
+
+
+def _stub_check_layer(tmp_path, monkeypatch):
+    """Stub the fetcher and registry so check_for reaches no network or disk state."""
+    from fwl_io.check import DatasetCheck
+
+    monkeypatch.setattr('fwl_io.check.create_fetcher', lambda **kw: object())
+    monkeypatch.setattr(
+        'fwl_io.check.check_dataset',
+        lambda fetcher, key: DatasetCheck(key, key, tmp_path, (), verifiable=True),
+    )
+    monkeypatch.setattr('fwl_io.manifest.Dataset.registry', lambda self: {'a.dat': 'md5:00'})
+
+
+def test_check_for_an_uninvolved_model_ignores_the_conflict(tmp_path, monkeypatch):
+    """A conflict between packages a model never reads does not fail its check."""
+    from fwl_io.check import check_for
+
+    _colliding_providers(tmp_path, monkeypatch)
+    _stub_check_layer(tmp_path, monkeypatch)
+
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert report.manifest_errors == {}
+    assert set(report.datasets) == {'star.tracks.baraffe'}
+    assert report.ok
+
+
+def test_check_for_a_model_that_needs_a_dropped_dataset_reports_the_conflict(tmp_path, monkeypatch):
+    """A conflict that drops a dataset the model reads fails its check."""
+    from fwl_io.check import check_for
+
+    _colliding_providers(tmp_path, monkeypatch)
+    _stub_check_layer(tmp_path, monkeypatch)
+
+    report = check_for('othermodel', data_root=tmp_path / 'data')
+    assert set(report.manifest_errors) == {'package-a', 'package-b'}
+    assert 'interior_lookup_tables/demo_eos' in report.manifest_errors['package-a']
+    assert report.datasets == {}
+    assert not report.ok
+
+
+def test_check_for_reports_a_load_error_unrelated_to_the_model(tmp_path, monkeypatch):
+    """A provider that failed to load may have served the model, so it is always reported."""
+    from fwl_io.check import check_for
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    good = _provider_manifest(
+        tmp_path,
+        'good',
+        '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.9"\nrequired_by = ["mors"]\n',
+    )
+    eps = [_FakeEntryPoint('good', lambda: good), _FakeEntryPoint('broken', broken)]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+    _stub_check_layer(tmp_path, monkeypatch)
+
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert set(report.manifest_errors) == {'broken'}
+    assert set(report.datasets) == {'star.tracks.baraffe'}
+    assert not report.ok
+
+
+def test_plan_relocations_survives_a_provider_conflict(tmp_path, monkeypatch):
+    """plan_relocations keeps its never-raise contract under a conflict."""
+    from fwl_io.relocate import plan_relocations
+
+    _colliding_providers(tmp_path, monkeypatch)
+
+    plan = plan_relocations(data_root=tmp_path / 'data')
+    assert set(plan.manifest_errors) == {'package-a', 'package-b'}
+
+
+def test_fetch_for_a_model_that_needs_a_dropped_dataset_names_the_conflict(tmp_path, monkeypatch):
+    """A model served by a dropped provider fails with the conflict in the message."""
+    _colliding_providers(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        fetch_for('othermodel', data_root=tmp_path / 'data')
+    message = str(excinfo.value)
+    assert 'manifests from different providers' in message
+    assert 'interior_lookup_tables/demo_eos' in message
+
+
+def test_fetch_for_an_uninvolved_model_ignores_the_conflict(tmp_path, monkeypatch):
+    """A model that needs nothing from a dropped provider is not blocked by it."""
+    _colliding_providers(tmp_path, monkeypatch)
+
+    # 'mors' is served by the unconflicted provider; its fetch reaches the
+    # network layer, so stub the fetcher and check only that no conflict raises.
+    class _Fetcher:
+        def fetch_all(self):
+            return [tmp_path / 'file']
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', lambda **kw: _Fetcher())
+    monkeypatch.setattr('fwl_io.manifest.Dataset.registry', lambda self: {'a.dat': 'md5:00'})
+    assert fetch_for('mors', data_root=tmp_path / 'data') == {
+        'star.tracks.baraffe': [tmp_path / 'file']
+    }
+
+
+def test_distinct_locations_across_providers_load_without_conflict(tmp_path, monkeypatch):
+    """Two providers with different locations both survive discovery (no false positive)."""
+    eps = [
+        _FakeEntryPoint(
+            'mors',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+        ),
+        _FakeEntryPoint(
+            'proteus',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found = discover_manifests()
+    assert set(found) == {'mors', 'proteus'}
+    assert [ds.key for ds in found['mors']] == ['star.tracks.baraffe']
+    assert [ds.key for ds in found['proteus']] == ['interior.eos.demo']
+
+
+def test_duplicate_entry_point_name_drops_every_provider_with_it(tmp_path, monkeypatch):
+    """Packages sharing one entry-point name are all dropped and reported, none raise."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+        _FakeEntryPoint(
+            'other',
+            lambda: _provider_manifest(
+                tmp_path, 'c', '[spectral_files.demo]\nzenodo = "10.5281/zenodo.3"\n'
+            ),
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert set(found) == {'other'}
+    assert len(errors) == 2, 'one error per dropped provider'
+    for message in errors.values():
+        assert 'mors-data' in message and 'proteus-data' in message
+        assert 'uninstall or pin' in message
+
+
+def test_a_duplicate_entry_point_name_logs_a_warning_per_dropped_provider(
+    tmp_path, monkeypatch, caplog
+):
+    """A caller of discover_manifests() also learns of a name collision through the log."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with caplog.at_level('WARNING', logger='fwl.fwl_io.manifest'):
+        manifest._discover()
+
+    warnings = [r.message for r in caplog.records if r.levelname == 'WARNING']
+    assert any('mors-data' in m for m in warnings)
+    assert any('proteus-data' in m for m in warnings)
+
+
+def test_three_entries_with_one_name_are_all_dropped_and_named(tmp_path, monkeypatch):
+    """A three-way entry-point name collision drops every entry and names each package."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda x=x, i=i: _provider_manifest(
+                tmp_path, x, f'[star.tracks.{x}]\nzenodo = "10.5281/zenodo.{i}"\n'
+            ),
+            dist=f'data-{x}',
+        )
+        for i, x in enumerate('abc', start=1)
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert len(errors) == 3, 'one error per dropped entry'
+    for message in errors.values():
+        assert 'registered 3 times' in message
+        assert all(f'data-{x}' in message for x in 'abc')
+
+
+def test_duplicate_name_without_metadata_still_says_which_entries_collided(tmp_path, monkeypatch):
+    """With no distribution metadata the entry-point targets identify the entries."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            value='first_pkg.data:manifest_path',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            value='second_pkg.data:manifest_path',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    for message in errors.values():
+        assert 'first_pkg.data:manifest_path' in message
+        assert 'second_pkg.data:manifest_path' in message
+
+
+def test_one_package_registering_a_name_twice_is_not_called_two_packages(tmp_path, monkeypatch):
+    """The message for a same-package duplicate names one package, not two."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'a', '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist='mors-data',
+            value='mors_data.a:path',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='mors-data',
+            value='mors_data.b:path',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    assert len(errors) == 2, 'both entries are reported even though they share a package'
+    for message in errors.values():
+        assert 'two packages' not in message and 'two installed packages' not in message
+        assert 'registered 2 times' in message
+        assert 'mors_data.a:path' in message and 'mors_data.b:path' in message
+
+
+def test_duplicate_name_message_does_not_depend_on_entry_point_order(tmp_path, monkeypatch):
+    """The claimants are listed in a fixed order, whatever order the environment yields."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda x=x: _provider_manifest(
+                tmp_path, x, f'[interior.eos.demo_{x}]\nzenodo = "10.5281/zenodo.1"\n'
+            ),
+            dist=f'pkg-{x}',
+            value=f'pkg_{x}:path',
+        )
+        for x in ('a', 'b', 'c')
+    ]
+    messages = []
+    for ordered in (eps, eps[::-1]):
+        monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group, e=ordered: e)
+        _, errors = manifest._discover()
+        messages.append(sorted(set(errors.values())))
+    assert messages[0] == messages[1]
+    assert len(messages[0]) == 1
+
+
+def test_fetch_for_a_model_that_needs_a_duplicate_name_dataset_fails(tmp_path, monkeypatch):
+    """A duplicate entry-point name is a conflict for fetch_for, by the models it served."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path,
+                'a',
+                '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n',
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path, 'b', '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\n'
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(RuntimeError, match='registered 2 times'):
+        fetch_for('mors', data_root=tmp_path / 'data')
+    assert fetch_for('unrelated', data_root=tmp_path / 'data') == {}
+
+
+def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch):
+    """A broken provider that shares a name does not hide a working namesake's data.
+
+    ``discover_manifests`` and ``check_for`` both still surface the working
+    provider's dataset. ``fetch_for`` still refuses for the model the broken
+    provider might have served: that is its documented conservative policy for
+    an unreadable manifest, not the working namesake's data going missing.
+    """
+    from fwl_io.check import check_for
+
+    good = _provider_manifest(
+        tmp_path,
+        'good',
+        '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n',
+    )
+
+    def broken():
+        raise ImportError('provider package is broken')
+
+    eps = [
+        _FakeEntryPoint('manifest', broken),
+        _FakeEntryPoint('manifest', lambda: good),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    # The broken namesake is skipped, not raised on, so the working one survives.
+    found = discover_manifests()
+    assert set(found) == {'manifest'}
+    assert [ds.key for ds in found['manifest']] == ['star.tracks.baraffe']
+
+    _stub_check_layer(tmp_path, monkeypatch)
+    report = check_for('mors', data_root=tmp_path / 'data')
+    assert set(report.datasets) == {'star.tracks.baraffe'}, 'the working namesake is still checked'
+    assert set(report.manifest_errors) == {'manifest'}, 'the broken namesake is still reported'
+    assert not report.ok, 'a load failure that may have served the model fails the check'
+
+    monkeypatch.setattr('fwl_io.fetch.create_fetcher', lambda **kw: object())
+    with pytest.raises(RuntimeError, match=r'manifest\(s\) not used'):
+        fetch_for('mors', data_root=tmp_path / 'data')
+
+
+def test_two_broken_providers_with_one_name_are_both_reported(tmp_path, monkeypatch):
+    """Load failures under one entry-point name keep one error each."""
+
+    def broken(text):
+        def load():
+            raise ImportError(text)
+
+        return load
+
+    eps = [
+        _FakeEntryPoint('manifest', broken('first is broken')),
+        _FakeEntryPoint('manifest', broken('second is broken')),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    found, errors = manifest._discover()
+    assert found == {}
+    # A shared key would keep only the later message and hide the first failure.
+    assert sorted(errors.values()) == ['first is broken', 'second is broken']
+
+
+def test_fetch_for_prints_a_shared_conflict_message_once(tmp_path, monkeypatch):
+    """Entries dropped for one duplicate name share one message, listed under all their labels."""
+    eps = [
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path,
+                'a',
+                '[star.tracks.baraffe]\nzenodo = "10.5281/zenodo.1"\nrequired_by = ["mors"]\n',
+            ),
+            dist='mors-data',
+        ),
+        _FakeEntryPoint(
+            'manifest',
+            lambda: _provider_manifest(
+                tmp_path,
+                'b',
+                '[interior.eos.demo]\nzenodo = "10.5281/zenodo.2"\nrequired_by = ["mors"]\n',
+            ),
+            dist='proteus-data',
+        ),
+    ]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        fetch_for('mors', data_root=tmp_path / 'data')
+    message = str(excinfo.value)
+    assert message.count('registered 2 times') == 1
+    assert 'manifest (mors-data.manifest:manifest_path), manifest (proteus-data.' in message
 
 
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
@@ -594,8 +1166,8 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
         data_root, 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
     )
     monkeypatch.setattr(
-        'fwl_io.manifest._discover',
-        lambda: ({'shared': [wanted]}, {'mymodel': 'unreadable manifest'}),
+        'fwl_io.manifest._discover_all',
+        lambda: manifest._Discovery({'shared': [wanted]}, {'mymodel': 'unreadable manifest'}, {}),
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
 
@@ -604,7 +1176,9 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
     # The partial result is reported too, so the user knows what did arrive.
     assert '1 dataset(s) arrived' in str(excinfo.value)
     # Discrimination: the same call without the broken provider returns the data.
-    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'shared': [wanted]}, {}))
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'shared': [wanted]}, {}, {})
+    )
     fetched = fetch_for('mymodel', data_root=data_root)
     assert [p.name for p in fetched[wanted.key]] == ['a.dat']
 
@@ -618,8 +1192,8 @@ def test_fetch_for_reports_a_dataset_failure_and_an_unreadable_manifest_together
     )
     broken.registry_path.unlink()  # the dataset now fails on its missing registry
     monkeypatch.setattr(
-        'fwl_io.manifest._discover',
-        lambda: ({'shared': [broken]}, {'mymodel': 'unreadable manifest'}),
+        'fwl_io.manifest._discover_all',
+        lambda: manifest._Discovery({'shared': [broken]}, {'mymodel': 'unreadable manifest'}, {}),
     )
     with pytest.raises(RuntimeError) as excinfo:
         fetch_for('mymodel', data_root=tmp_path / 'data')
@@ -709,7 +1283,10 @@ def test_fetch_for_stamps_each_required_dataset_and_skips_others(tmp_path, monke
         data_root, 'interior/eos/demo', '222', {'c.dat': b'C\n'}, ('someone_else',)
     )
 
-    monkeypatch.setattr('fwl_io.manifest._discover', lambda: ({'prov': [wanted, other]}, {}))
+    monkeypatch.setattr(
+        'fwl_io.manifest._discover_all',
+        lambda: manifest._Discovery({'prov': [wanted, other]}, {}, {}),
+    )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # all files pre-seeded; no network
 
     fetched = fetch_for('mymodel', data_root=data_root)
