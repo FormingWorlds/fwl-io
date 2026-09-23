@@ -32,13 +32,16 @@ class MissingDataRootError(RuntimeError):
     """No data root is configured: FWL_DATA is unset and no path was given."""
 
 
-def resolve_data_root(explicit: str | Path | None = None) -> Path:
+def resolve_data_root(explicit: str | Path | None = None, *, create: bool = True) -> Path:
     """Return the writable root of the FWL data tree, creating it if needed.
 
     Parameters
     ----------
     explicit : str | Path | None
         Caller-supplied override. When None, ``FWL_DATA`` must be set.
+    create : bool
+        Create the directory when it does not exist. A caller that only reads
+        or removes from an existing tree passes False and checks for itself.
 
     Returns
     -------
@@ -60,7 +63,8 @@ def resolve_data_root(explicit: str | Path | None = None) -> Path:
             'or pass an explicit data_root path'
         )
     root = root.expanduser().absolute()
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root
 
 

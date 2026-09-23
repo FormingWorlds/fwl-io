@@ -207,7 +207,7 @@ def _legacy_locations() -> tuple[dict[str, str], str | None]:
     return safe, None
 
 
-def inside(path: Path, root: Path) -> bool:
+def _inside(path: Path, root: Path) -> bool:
     """True when ``path`` resolves within ``root``, symlinks followed.
 
     Walks up from the resolved path by filesystem identity (device and
@@ -248,11 +248,11 @@ def _escaping(
     while the directory holding it looks perfectly ordinary.
     """
     for path in (legacy_dir, target_dir):
-        if not inside(path, root):
+        if not _inside(path, root):
             return path
     for name in names:
         for path in (legacy_dir / name, target_dir / name):
-            if not inside(path, root):
+            if not _inside(path, root):
                 return path
     return None
 
@@ -364,7 +364,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
             legacy_dir = root / legacy
             try:
                 registry = ds.registry()
-                target_dir = root / version_dir(ds)
+                target_dir = root / _version_dir(ds)
             except Exception as exc:  # noqa: BLE001 -- reported, never raised
                 entries.append(
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
@@ -413,7 +413,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
     )
 
 
-def version_dir(ds: Dataset) -> str:
+def _version_dir(ds: Dataset) -> str:
     """The dataset's location below the data root, version directory included."""
     from fwl_io.doi import zenodo_record_id
 

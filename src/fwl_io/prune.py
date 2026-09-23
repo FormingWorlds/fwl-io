@@ -8,16 +8,17 @@ directories and, only when asked, deletes them.
 
 Nothing is deleted on trust. A version directory is removed only when it can be
 proven unreferenced: it must carry the fetcher's own stamp naming the record it
-holds, it must sit under a subdirectory that a currently declared dataset uses
-(an older pin of a known dataset), and the reference set it is checked against
-must be complete. If any installed manifest fails to load, any dataset's
-version directory cannot be computed, the reference set is empty, or a fetch
-lock is held anywhere on the tree, the run refuses to delete rather than act on
-a partial or contested view.
+holds and the subdir it sits under, it must sit under a subdirectory that a
+currently declared dataset uses (an older pin of a known dataset), and the
+reference set it is checked against must be complete. If any installed
+manifest fails to load, any dataset's version directory cannot be computed,
+part of the tree cannot be read, or a fetch lock is held anywhere on the tree,
+the run refuses to delete rather than act on a partial or contested view. An
+orphan-including run also refuses when the reference set is empty.
 
 A directory that matches the version-directory name shape but carries no stamp
-naming its own record id is never a delete target: it is reported separately
-as unrecognised, since the name alone is not proof of what it holds.
+naming its own record id and location is never a delete target: it is reported
+separately as unrecognised, since the name alone is not proof of what it holds.
 
 A version directory under a subdirectory no installed manifest knows is
 reported as orphaned rather than removed. On a shared data tree it may be the
@@ -34,16 +35,16 @@ import logging
 import os
 import re
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from filelock import FileLock, Timeout
 
-from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME
-from fwl_io.fetch import read_stamp as _read_stamp
+from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME, Fetcher
 from fwl_io.paths import resolve_data_root
-from fwl_io.relocate import inside as _inside
-from fwl_io.relocate import version_dir as _version_dir
+from fwl_io.relocate import _inside, _version_dir
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -278,19 +279,56 @@ def _same_dir(a: Path, b: Path) -> bool:
         return a.resolve() == b.resolve()
 
 
-def _fs_is_case_insensitive(root: Path) -> bool:
-    """True when ``root``'s filesystem treats case as insignificant.
+def _existing_root(data_root: str | Path | None) -> Path:
+    """The data root, which must already exist; this never creates it.
 
-    Detected once per run by flipping the case of ``root``'s own name and
-    checking whether that spelling still resolves to ``root``.
+    Raises
+    ------
+    FileNotFoundError
+        When the resolved root is not an existing directory, so a mistyped
+        root fails clearly rather than reading as an empty tree.
     """
-    flipped = root.name.swapcase()
-    if flipped == root.name:
-        return False
+    root = resolve_data_root(data_root, create=False)
+    if not root.is_dir():
+        raise FileNotFoundError(f'data root {root} does not exist; nothing to prune')
+    return root
+
+
+def _same_entry(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` are the same directory entry, symlinks not followed."""
     try:
-        return os.path.samefile(root, root.parent / flipped)
+        sa, sb = os.lstat(a), os.lstat(b)
     except OSError:
         return False
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
+def _fs_is_case_insensitive(root: Path) -> bool:
+    """True when the filesystem holding ``root``'s entries treats case as insignificant.
+
+    The probe looks inside ``root``, since ``root``'s own name lives on its
+    parent's filesystem. An entry whose name has cased letters is looked up
+    under the flipped spelling; with no such entry, a probe file is created in
+    ``root`` and removed again. Any failure answers False, which only makes
+    subdir matching stricter.
+    """
+    try:
+        with os.scandir(root) as entries:
+            name = next((e.name for e in entries if e.name.swapcase() != e.name), None)
+    except OSError:
+        return False
+    if name is not None:
+        return _same_entry(root / name, root / name.swapcase())
+    try:
+        fd, probe_name = tempfile.mkstemp(dir=root, prefix='.fwl-io-case-probe-')
+    except OSError:
+        return False
+    os.close(fd)
+    probe = Path(probe_name)
+    try:
+        return _same_entry(probe, probe.with_name(probe.name.swapcase()))
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 def _matches_subdir(parent_subdir: str, known_subdirs: set[str], case_insensitive: bool) -> bool:
@@ -321,32 +359,51 @@ def _shadows_known_subdir(rel: str, known_subdirs: set[str], case_insensitive: b
     return any(known.startswith(prefix) for known in known_subdirs)
 
 
-def _has_matching_stamp(path: Path) -> bool:
-    """True when ``path`` carries a fetcher stamp naming its own record id."""
-    stamp = _read_stamp(path)
-    if stamp is None:
+def _has_matching_stamp(path: Path, rel_parent: str, *, case_insensitive: bool) -> bool:
+    """True when ``path`` carries the stamp a fetch wrote into this very directory.
+
+    The stamp must name the directory's own record id and, as its subdir,
+    ``rel_parent``: the directory's parent relative to the data root. A copy
+    of a fetched version elsewhere in the tree keeps its stamp, whose subdir
+    then names somewhere else, so the stamp does not vouch for the copy.
+    """
+    stamp = Fetcher._read_stamp(path)
+    if stamp is None or stamp.get('record_id') != path.name.removeprefix('r'):
         return False
-    return stamp.get('record_id') == path.name.removeprefix('r')
+    subdir = stamp.get('subdir')
+    if not isinstance(subdir, str):
+        return False
+    subdir = PurePosixPath(subdir).as_posix()
+    if case_insensitive:
+        return subdir.casefold() == rel_parent.casefold()
+    return subdir == rel_parent
 
 
 def _contains_nested_version_or_stamp(path: Path) -> bool:
-    """True when a directory strictly below ``path`` looks like another version.
+    """True when ``path`` may hold another version below its own top level.
 
     A version directory is a leaf: nothing a manifest declares lives inside
     one. A candidate that contains a further ``r<digits>`` directory, or a
     stamp file below its own top level, is not a single pin but a subtree that
     happens to also match the version-name shape, and removing it could take a
-    live, differently-versioned pin nested inside.
+    live, differently-versioned pin nested inside. Directory names are checked
+    before descending, and any part of the tree that cannot be read counts as
+    a match, since what it holds cannot be shown.
     """
-    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+    unreadable = False
+
+    def _fail(_exc: OSError) -> None:
+        nonlocal unreadable
+        unreadable = True
+
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False, onerror=_fail):
         current = Path(dirpath)
-        if current != path:
-            if _VERSION_DIR_PATTERN.fullmatch(current.name):
-                return True
-            if _STAMP_FILENAME in filenames:
-                return True
+        if current != path and _STAMP_FILENAME in filenames:
+            return True
+        if any(_VERSION_DIR_PATTERN.fullmatch(d) for d in dirnames):
+            return True
         dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
-    return False
+    return unreadable
 
 
 def _any_lock_held(root: Path) -> bool:
@@ -376,16 +433,27 @@ def _any_lock_held(root: Path) -> bool:
     return False
 
 
-def _referenced_symlink_targets(referenced: set[Path]) -> set[Path]:
+def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str | None]:
     """Resolved targets of every symlink found inside a referenced directory.
 
     Collected once so ``_remove_one`` can refuse a candidate that a current
     pin's own files point into, rather than walking every referenced
-    directory again for each candidate.
+    directory again for each candidate. The second value is the first read
+    error met, if any: an unreadable part of a referenced directory may hold
+    a symlink into any candidate, so the caller must not delete.
     """
     targets: set[Path] = set()
+    error: str | None = None
+
+    def _capture(exc: OSError) -> None:
+        nonlocal error
+        if error is None:
+            error = str(exc)
+
     for ref in referenced:
-        for dirpath, dirnames, filenames in os.walk(ref, followlinks=False):
+        if not ref.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(ref, followlinks=False, onerror=_capture):
             current = Path(dirpath)
             for name in (*dirnames, *filenames):
                 candidate = current / name
@@ -394,7 +462,7 @@ def _referenced_symlink_targets(referenced: set[Path]) -> set[Path]:
                         targets.add(candidate.resolve())
                     except OSError:
                         continue
-    return targets
+    return targets, error
 
 
 @dataclass(frozen=True)
@@ -408,7 +476,8 @@ class _Build:
     resolve_error: str | None
     scan_error: str | None
     lock_held: bool
-    referenced_symlink_targets: set[Path]
+    referenced_symlink_targets: frozenset[Path]
+    case_insensitive: bool
 
     def report(self) -> PruneReport:
         """The plan as a :class:`PruneReport`, without acting on anything."""
@@ -528,8 +597,12 @@ def _classify(
     return ORPHANED
 
 
-def _build(root: Path) -> _Build:
-    """Classify every version directory under ``root`` without touching anything."""
+def _build(root: Path, *, for_delete: bool = False) -> _Build:
+    """Classify every version directory under ``root`` without touching anything.
+
+    ``for_delete`` also collects the symlink targets inside referenced
+    directories, which only a removal checks; a dry run skips that walk.
+    """
     referenced, known_subdirs, manifest_errors, resolve_error = _reference_set(root)
     blocked = bool(manifest_errors) or resolve_error is not None
     case_insensitive = _fs_is_case_insensitive(root)
@@ -537,21 +610,28 @@ def _build(root: Path) -> _Build:
     candidates: list[PruneCandidate] = []
     for path in version_dirs:
         rel = path.relative_to(root)
+        rel_parent = rel.parent.as_posix()
         is_referenced = any(_same_dir(path, ref) for ref in referenced)
         state = _classify(
-            rel.parent.as_posix(),
+            rel_parent,
             is_referenced,
             known_subdirs,
             blocked,
             case_insensitive=case_insensitive,
         )
         if state != REFERENCED and (
-            not _has_matching_stamp(path) or _contains_nested_version_or_stamp(path)
+            not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive)
+            or _contains_nested_version_or_stamp(path)
         ):
             state = UNRECOGNISED
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
+    symlink_targets: set[Path] = set()
+    if for_delete:
+        symlink_targets, symlink_error = _referenced_symlink_targets(referenced)
+        if scan_error is None and symlink_error is not None:
+            scan_error = f'a referenced version cannot be fully read: {symlink_error}'
     return _Build(
         candidates=tuple(candidates),
         referenced=referenced,
@@ -560,7 +640,8 @@ def _build(root: Path) -> _Build:
         resolve_error=resolve_error,
         scan_error=scan_error,
         lock_held=_any_lock_held(root),
-        referenced_symlink_targets=_referenced_symlink_targets(referenced),
+        referenced_symlink_targets=frozenset(symlink_targets),
+        case_insensitive=case_insensitive,
     )
 
 
@@ -577,8 +658,13 @@ def plan_prune(data_root: str | Path | None = None) -> PruneReport:
     PruneReport
         One entry per ``r<record-id>`` directory found, classified against the
         installed manifests, with per-category reclaimable bytes.
+
+    Raises
+    ------
+    FileNotFoundError
+        When the data root does not exist. A plan never creates it.
     """
-    return _build(resolve_data_root(data_root)).report()
+    return _build(_existing_root(data_root)).report()
 
 
 def _remove_one(
@@ -586,42 +672,73 @@ def _remove_one(
     root: Path,
     referenced: set[Path],
     referenced_symlink_targets: frozenset[Path] = frozenset(),
+    *,
+    case_insensitive: bool = False,
 ) -> PruneCandidate:
     """Delete one version directory, re-checking every guard at the last moment.
 
-    The containment, symlink, and not-referenced checks are repeated here
-    rather than trusted from the plan, so the guarantee that this only ever
-    removes an unreferenced, stamped, leaf version directory inside the data
-    root belongs to the code that does the removing.
+    The containment, symlink, filesystem, not-referenced, stamp, leaf and
+    fetch-lock checks are repeated here rather than trusted from the plan, so
+    the guarantee that this only ever removes an unreferenced, stamped, leaf
+    version directory inside the data root belongs to the code that does the
+    removing.
+
+    The directory is first renamed into the staging directory under the data
+    root, which is atomic, and only then deleted. A reader never sees it half
+    deleted at its own path, and a deletion that fails part way leaves the
+    remnant in staging, named in the result, rather than a stampless tree
+    at the old path that no later prune could recognise.
     """
     path = candidate.path
+
+    def _refuse(detail: str) -> PruneCandidate:
+        return replace(candidate, state=REFUSED, detail=detail)
+
     if path.is_symlink():
-        return replace(candidate, state=REFUSED, detail='is a symlink; not removed')
+        return _refuse('is a symlink; not removed')
     if not _inside(path, root):
-        return replace(candidate, state=REFUSED, detail=f'resolves outside {root}; not removed')
-    if any(_same_dir(path, ref) for ref in referenced):
-        return replace(candidate, state=REFUSED, detail='is a referenced version; not removed')
-    if any(_inside(ref, path) for ref in referenced):
-        return replace(
-            candidate, state=REFUSED, detail='contains a referenced version; not removed'
-        )
-    if not _has_matching_stamp(path):
-        return replace(candidate, state=REFUSED, detail='has no matching stamp; not removed')
-    if _contains_nested_version_or_stamp(path):
-        return replace(
-            candidate, state=REFUSED, detail='contains a nested version or stamp; not removed'
-        )
-    if any(_inside(target, path) for target in referenced_symlink_targets):
-        return replace(
-            candidate,
-            state=REFUSED,
-            detail='a referenced file symlinks into this directory; not removed',
-        )
+        return _refuse(f'resolves outside {root}; not removed')
     try:
-        shutil.rmtree(path)
+        on_other_device = os.lstat(path).st_dev != os.stat(root).st_dev
     except OSError as exc:
-        return replace(candidate, state=REMOVE_FAILED, detail=str(exc))
+        return _refuse(f'cannot be checked ({exc}); not removed')
+    if on_other_device or os.path.ismount(path):
+        return _refuse('is a mount point or on another filesystem; not removed')
+    if any(_same_dir(path, ref) for ref in referenced):
+        return _refuse('is a referenced version; not removed')
+    if any(_inside(ref, path) for ref in referenced):
+        return _refuse('contains a referenced version; not removed')
+    try:
+        rel_parent = path.relative_to(root).parent.as_posix()
+    except ValueError:
+        return _refuse(f'is not spelled below {root}; not removed')
+    if not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive):
+        return _refuse('has no matching stamp; not removed')
+    if _contains_nested_version_or_stamp(path):
+        return _refuse('contains a nested version or stamp; not removed')
+    if any(_inside(target, path) for target in referenced_symlink_targets):
+        return _refuse('a referenced file symlinks into this directory; not removed')
+    if _any_lock_held(root):
+        return _refuse('a fetch lock is held on the data root; not removed')
+    staging = root / _STAGING_DIRNAME
+    try:
+        staging.mkdir(exist_ok=True)
+        if staging.is_symlink() or not staging.is_dir():
+            return _refuse(f'{staging} is not a plain directory; not removed')
+        staged = staging / f'prune-{uuid.uuid4().hex}'
+        os.rename(path, staged)
+    except OSError as exc:
+        return replace(candidate, state=REMOVE_FAILED, detail=f'could not move it aside: {exc}')
     _prune_empty_parents(path.parent, root)
+    try:
+        shutil.rmtree(staged)
+    except OSError as exc:
+        if os.path.lexists(staged):
+            return replace(
+                candidate,
+                state=REMOVE_FAILED,
+                detail=f'moved to {staged} but not fully deleted ({exc}); delete it by hand',
+            )
     log.info('removed unreferenced version directory %s', path)
     return replace(candidate, state=REMOVED, detail='')
 
@@ -679,9 +796,14 @@ def prune_versions(
     -------
     PruneReport
         The plan, with each removed directory's entry rewritten to say so.
+
+    Raises
+    ------
+    FileNotFoundError
+        When the data root does not exist.
     """
-    root = resolve_data_root(data_root)
-    build = _build(root)
+    root = _existing_root(data_root)
+    build = _build(root, for_delete=delete)
     report = build.report()
     if not delete or report.deletion_refusal(
         include_orphans=include_orphans, allow_empty_reference_set=allow_empty_reference_set
@@ -690,7 +812,13 @@ def prune_versions(
         return report
     targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
     results = [
-        _remove_one(c, root, build.referenced, frozenset(build.referenced_symlink_targets))
+        _remove_one(
+            c,
+            root,
+            build.referenced,
+            build.referenced_symlink_targets,
+            case_insensitive=build.case_insensitive,
+        )
         if c.state in targets
         else c
         for c in build.candidates
@@ -707,15 +835,17 @@ def apply_prune(
 ) -> PruneReport:
     """Delete exactly the version directories a prior plan reported.
 
-    The plan the caller showed and confirmed is the delete set. This removes
-    the superseded directories in ``report``, and the orphaned ones when
-    ``include_orphans`` is set, rather than rescanning and acting on a set the
-    caller never saw. Every removal still re-checks its guards against a
-    freshly computed reference set, so a directory a manifest started to use
-    between plan and apply is kept.
+    The plan the caller showed and confirmed is the most that is deleted. A
+    directory is removed only when the plan listed it as a target (superseded,
+    or orphaned when ``include_orphans`` is set) and a fresh classification
+    made by this call still does. A directory the plan showed in any other
+    state is kept, even when the tree changed so that it now looks like a
+    target, and so is a directory a manifest started to use between plan and
+    apply. Every removal also re-checks its own guards at the moment it runs.
 
     Deletion is refused outright when the current reference-set state no
-    longer permits it, which matches the failure-closed posture of the plan.
+    longer permits it, or when the plan lists a directory outside the data
+    root, which means it was built for another root.
 
     Parameters
     ----------
@@ -737,9 +867,22 @@ def apply_prune(
         the reference-set error signals recomputed at apply time. ``ok`` is
         false, and ``apply_refusal`` names why, when the tree changed under
         this call into a state the plan could no longer delete from.
+
+    Raises
+    ------
+    FileNotFoundError
+        When the data root does not exist.
     """
-    root = resolve_data_root(data_root)
-    build = _build(root)
+    root = _existing_root(data_root)
+    stray = next((c for c in report.candidates if not _inside(c.path, root)), None)
+    if stray is not None:
+        return replace(
+            report,
+            apply_refusal=(
+                f'the plan lists {stray.path}, outside {root}; it was built for another root'
+            ),
+        )
+    build = _build(root, for_delete=True)
     current = build.report()
     refusal = current.deletion_refusal(
         include_orphans=include_orphans, allow_empty_reference_set=allow_empty_reference_set
@@ -748,21 +891,25 @@ def apply_prune(
         # The tree changed under us into a state the plan could not delete from.
         return replace(current, candidates=report.candidates, apply_refusal=refusal)
     targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
-    # Each candidate's classification is re-read from this call's own fresh
-    # build, not trusted from the plan: a manifest installed or removed
-    # between plan and apply can move a directory between superseded and
-    # orphaned, and only the state at this moment decides whether it needs
-    # the orphan opt-in to be removed.
+    # A candidate must be a target both in the plan the caller confirmed and
+    # in this call's fresh build: the plan bounds what may go, and the fresh
+    # state catches a directory that stopped being safe to remove since.
     fresh_by_dir = {fresh.path: fresh for fresh in build.candidates}
     results = []
     for c in report.candidates:
         fresh = fresh_by_dir.get(c.path)
         if fresh is None:
             fresh = next((f for f in build.candidates if _same_dir(f.path, c.path)), None)
-        if fresh is None or fresh.state not in targets:
+        if c.state not in targets or fresh is None or fresh.state not in targets:
             results.append(fresh if fresh is not None else c)
             continue
         results.append(
-            _remove_one(fresh, root, build.referenced, frozenset(build.referenced_symlink_targets))
+            _remove_one(
+                fresh,
+                root,
+                build.referenced,
+                build.referenced_symlink_targets,
+                case_insensitive=build.case_insensitive,
+            )
         )
     return replace(current, candidates=tuple(results))
