@@ -44,11 +44,10 @@ log = logging.getLogger('fwl.' + __name__)
 
 _LAYOUT_RESOURCE = 'legacy_layout.toml'
 
-# What a dataset's legacy tree turned out to be. Only ``READY`` describes
-# something to do; the rest say why nothing was done, and are kept apart
-# because they call for different responses. ``INCOMPLETE`` and ``MISMATCH``
-# are faults in the tree, the other two are the ordinary cases of a dataset
-# that has already moved or never had a legacy copy at all.
+# What a dataset's legacy tree turned out to be. ``READY`` covers a complete
+# tree and one where every present file matches but others are absent, left
+# for the fetcher to fill in later. ``MISMATCH`` is the remaining fault;
+# ``INCOMPLETE`` stays defined for compatibility but is no longer produced.
 READY = 'ready'
 ABSENT = 'absent'
 ALREADY_CURRENT = 'already-current'
@@ -263,8 +262,20 @@ def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
     return None
 
 
-def _classify(legacy_dir: Path, target_dir: Path, registry: dict[str, str]) -> tuple[str, str]:
-    """Decide what the two trees on disk allow, without touching either."""
+def _classify(
+    legacy_dir: Path, target_dir: Path, registry: dict[str, str]
+) -> tuple[str, str, tuple[str, ...]]:
+    """Decide what the two trees on disk allow, without touching either.
+
+    Returns
+    -------
+    tuple
+        ``(state, detail, files)``, where ``files`` is the subset of
+        ``registry`` this dataset should actually move: empty for every state
+        but ``READY``, where it is every present file, verified against the
+        registry. A present file that does not match still blocks the whole
+        move, so an absent file never masks a corrupt one.
+    """
     if _all_match(target_dir, registry):
         detail = f'already at {target_dir}'
         if legacy_dir.is_dir():
@@ -272,23 +283,27 @@ def _classify(legacy_dir: Path, target_dir: Path, registry: dict[str, str]) -> t
             # than needed. Naming it is as far as this goes: deleting data the
             # user has not asked to lose is not this command's business.
             detail += f'; the copy at {legacy_dir} is now redundant and was left alone'
-        return ALREADY_CURRENT, detail
+        return ALREADY_CURRENT, detail, ()
     if not legacy_dir.is_dir():
-        return ABSENT, ''
-    missing = [name for name in registry if not (legacy_dir / name).is_file()]
-    if missing:
-        return INCOMPLETE, f'{len(missing)} of {len(registry)} file(s) absent from {legacy_dir}'
+        return ABSENT, '', ()
+    present = [name for name in registry if (legacy_dir / name).is_file()]
+    if not present:
+        return ABSENT, '', ()
     try:
-        wrong = [
-            name
-            for name, digest in registry.items()
-            if not _hash_matches(legacy_dir / name, digest)
-        ]
+        wrong = [name for name in present if not _hash_matches(legacy_dir / name, registry[name])]
     except OSError as exc:
-        return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}'
+        return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
     if wrong:
-        return MISMATCH, f'{len(wrong)} file(s) differ from the registry in {legacy_dir}'
-    return READY, ''
+        return MISMATCH, f'{len(wrong)} file(s) differ from the registry in {legacy_dir}', ()
+    absent = sorted(set(registry) - set(present))
+    if absent:
+        detail = (
+            f'{len(present)} of {len(registry)} file(s) present and verified in {legacy_dir}; '
+            f'{len(absent)} absent, to be fetched at the new location'
+        )
+    else:
+        detail = ''
+    return READY, detail, tuple(sorted(present))
 
 
 def _all_match(directory: Path, registry: dict[str, str]) -> bool:
@@ -367,14 +382,14 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     )
                 )
                 continue
-            state, detail = _classify(legacy_dir, target_dir, registry)
+            state, detail, files = _classify(legacy_dir, target_dir, registry)
             entries.append(
                 Relocation(
                     ds.key,
                     state,
                     legacy_dir=legacy_dir,
                     target_dir=target_dir,
-                    files=tuple(sorted(registry)),
+                    files=files,
                     detail=detail,
                     legacy_present=legacy_dir.is_dir(),
                 )
@@ -496,6 +511,7 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
         legacy_dir=entry.legacy_dir,
         target_dir=entry.target_dir,
         files=entry.files,
+        detail=entry.detail,
     )
 
 

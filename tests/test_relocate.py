@@ -19,7 +19,6 @@ from fwl_io.relocate import (
     _LAYOUT_RESOURCE,
     ABSENT,
     ALREADY_CURRENT,
-    INCOMPLETE,
     MISMATCH,
     MOVED,
     READY,
@@ -115,12 +114,14 @@ def test_a_file_that_differs_from_the_registry_stops_the_move(tmp_path, monkeypa
     assert not (root / TARGET).exists(), 'no half-move: the target is not created'
 
 
-def test_a_legacy_tree_missing_a_file_is_reported_not_half_moved(tmp_path, monkeypatch):
-    """An incomplete tree is left whole rather than partly relocated.
+def test_a_legacy_tree_missing_a_file_moves_the_present_one_and_reports_the_rest(
+    tmp_path, monkeypatch
+):
+    """A partial legacy tree moves the file it has and leaves the rest to the fetcher.
 
-    The edge case that matters: moving the files that are present would leave
-    the dataset split across two layouts, which is the one state neither the
-    reader nor the fetcher can interpret.
+    Moving only what is present and verified is the common case for a record
+    a model fetches only part of; the fetcher fills in what is absent at the
+    new location afterwards, which is what the module docstring describes.
     """
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -128,9 +129,30 @@ def test_a_legacy_tree_missing_a_file_is_reported_not_half_moved(tmp_path, monke
 
     report = relocate_all(data_root=root)
 
-    assert [e.state for e in report.entries] == [INCOMPLETE]
-    assert '1 of 2 file(s) absent' in report.entries[0].detail
-    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file()
+    assert [e.state for e in report.entries] == [MOVED]
+    assert '1 of 2 file(s) present and verified' in report.entries[0].detail
+    assert '1 absent' in report.entries[0].detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not (root / TARGET / 'notes.txt').exists()
+    assert not (root / LEGACY).exists(), 'the moved file must not leave a half-empty legacy dir'
+
+
+def test_a_present_file_that_mismatches_still_blocks_a_partial_move(tmp_path, monkeypatch):
+    """A present-but-corrupt file blocks the move even though another file is simply absent.
+
+    An absent file must never mask a corrupt one: verifying only the files
+    that happen to be present would let a partial, damaged tree move on the
+    strength of the files it never had a chance to get wrong.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MISMATCH]
+    assert report.faults
+    assert (root / LEGACY / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
     assert not (root / TARGET).exists()
 
 
@@ -766,7 +788,6 @@ def test_an_archive_dataset_is_refused_rather_than_called_incomplete(tmp_path, m
 
     (entry,) = [e for e in report.entries if e.key == KEY]
     assert entry.state == UNRESOLVABLE, f'archive dataset reported as {entry.state}'
-    assert entry.state != INCOMPLETE
     assert 'archive' in entry.detail
     for name, body in CONTENTS.items():
         assert (legacy_dir / name).read_bytes() == body

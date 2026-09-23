@@ -56,3 +56,5 @@
 "interior.eos.paleos_mgsio3_unified" = "zalmoxis_eos/EOS_PALEOS_MgSiO3_unified"
 "interior.eos.paleos_h2o" = "zalmoxis_eos/EOS_PALEOS_H2O"
 "interior.eos.chabrier_2021_hhe" = "zalmoxis_eos/EOS_Chabrier2021_HHe"
+"atmos_clim.surface_albedos.hammond_2024" = "surface_albedos/Hammond24"
+"interior_struct.eos.seager_2007" = "EOS_material_properties/EOS_Seager2007"
