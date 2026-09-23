@@ -527,6 +527,18 @@ def test_fetch_progress_hint_is_not_written_to_stdout_without_stderr(monkeypatch
 
 
 @pytest.mark.unit
+def test_fetch_progress_dropped_without_stderr_even_with_tqdm(monkeypatch, capsys):
+    """An explicit ``--progress`` with tqdm present but no stderr runs without a bar."""
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo', '--progress']) == 0
+    assert seen['progress'] is False
+    assert 'pip install' not in capsys.readouterr().out
+
+
+@pytest.mark.unit
 def test_fetch_progress_auto_survives_stderr_with_raising_isatty(monkeypatch):
     """Auto mode resolves to no bar when ``stderr.isatty`` raises any exception.
 

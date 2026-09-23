@@ -58,6 +58,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -168,8 +169,12 @@ def _progressbar_supported() -> bool:
     ``None`` when tqdm is not installed and building a downloader with
     ``progressbar=True`` then raises. Reading that binding is exactly what pooch
     checks, so a missing bar is dropped rather than turned into a download error.
+    A missing ``sys.stderr`` degrades the same way, since tqdm renders there by
+    default and would otherwise fail once pooch starts the download. The
+    binding is a private pooch attribute, so a missing one also degrades
+    rather than raising.
     """
-    return pooch.downloaders.tqdm is not None
+    return getattr(pooch.downloaders, 'tqdm', None) is not None and sys.stderr is not None
 
 
 class Fetcher:

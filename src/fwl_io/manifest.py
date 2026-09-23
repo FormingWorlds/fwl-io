@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
@@ -608,14 +609,17 @@ def fetch_for(
     data_root : str | Path | None
         Override for the data root; defaults to the resolved FWL_DATA tree.
     progress : bool
-        Show a per-file download progress bar. When tqdm is not installed the
-        bar is skipped and the fetch continues.
+        Show a per-file download progress bar. When tqdm is not installed, or
+        there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
+        continues.
     """
     from fwl_io.fetch import _progressbar_supported, create_fetcher
 
     if progress and not _progressbar_supported():
-        # Never fail a fetch over a cosmetic bar: drop it when tqdm is absent.
-        log.warning(_TQDM_HINT)
+        # Never fail a fetch over a cosmetic bar. With a stderr present, the
+        # only reason the bar is unsupported is a missing tqdm.
+        if sys.stderr is not None:
+            log.warning(_TQDM_HINT)
         progress = False
     model = model.lower()
     fetched: dict[str, list[Path]] = {}

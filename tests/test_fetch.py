@@ -1156,6 +1156,46 @@ def test_downloader_drops_progress_when_tqdm_absent(tmp_path, monkeypatch):
     assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
 
 
+def test_downloader_drops_progress_without_stderr(tmp_path, monkeypatch):
+    """With tqdm present but no ``sys.stderr``, both downloaders are built bar-less.
+
+    tqdm draws on stderr, so a bar requested there would fail once pooch starts
+    the download instead of degrading.
+    """
+    import pooch.downloaders
+
+    monkeypatch.setattr(pooch.downloaders, 'tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
+def test_downloader_drops_progress_when_pooch_binding_missing(tmp_path, monkeypatch):
+    """A pooch without its private ``tqdm`` binding degrades to no bar, not an error."""
+    import pooch.downloaders
+
+    monkeypatch.delattr(pooch.downloaders, 'tqdm', raising=False)
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:aaa'},
+        base_urls=['http://example.invalid/'],
+        zenodo=ZENODO,
+        data_root=tmp_path,
+        progress=True,
+    )
+    assert not hasattr(pooch.downloaders, 'tqdm')
+    assert fetcher._downloader('http://example.invalid/').progressbar is False
+    assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
+
+
 def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path):
     """A download with ``progress=True`` completes through the installed tqdm.
 

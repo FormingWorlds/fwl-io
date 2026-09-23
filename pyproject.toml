@@ -46,6 +46,7 @@ progress = [
     "tqdm>=4.41,<5",
 ]
 develop = [
+    "fwl-io[progress]",
     "pytest>=8.0",
     "pytest-cov",
     "pytest-timeout",

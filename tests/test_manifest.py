@@ -1522,3 +1522,16 @@ def test_fetch_for_soft_degrades_without_tqdm(tmp_path, monkeypatch, caplog):
 
     assert seen['progress'] is False
     assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_drops_progress_without_stderr(tmp_path, monkeypatch, caplog):
+    """With tqdm present but no stderr, the bar is dropped without the tqdm hint."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', object())
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text
