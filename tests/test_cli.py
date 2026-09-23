@@ -297,7 +297,7 @@ def test_check_reports_missing_data_and_exits_nonzero(tmp_path, capsys, monkeypa
     # this the test would pass just as well against a misplaced registry file
     # and would be proving nothing about the check itself.
     assert '1 missing' in out
-    assert 'MANIFEST UNREADABLE' not in out
+    assert 'MANIFEST NOT USED' not in out
     # Resolving a path creates the data root, as it does for every entry point.
     # What a check must not do is populate it: no dataset directory, no file.
     assert list(data_root.iterdir()) == [], 'a check must not create the tree it inspects'
@@ -388,7 +388,7 @@ def test_relocate_exits_nonzero_when_a_manifest_could_not_be_read(tmp_path, caps
     out = capsys.readouterr().out
 
     assert code == 1, 'an unread manifest cannot exit as success'
-    assert 'MANIFEST UNREADABLE' in out
+    assert 'MANIFEST FAILED TO LOAD' in out
     assert 'may be partial' in out
 
 
@@ -418,5 +418,116 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
     out = capsys.readouterr().out
 
     assert code == 0
-    assert 'MANIFEST UNREADABLE' not in out
+    assert 'MANIFEST NOT USED' not in out
     assert 'absent' in out
+
+
+@pytest.mark.unit
+def test_list_prints_conflicting_providers_as_failed_without_a_traceback(
+    tmp_path, capsys, monkeypatch
+):
+    """Two providers claiming one location are listed as failed, exit 1, no traceback."""
+    text = '[interior_lookup_tables.demo_eos]\nzenodo = "10.5281/zenodo.1234567"\n'
+
+    class _EP:
+        def __init__(self, name, sub):
+            self.name = name
+            self.sub = sub
+
+        def load(self):
+            def path():
+                target = tmp_path / self.sub / 'manifest.toml'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+                return target
+
+            return path
+
+    eps = [_EP('package-a', 'a'), _EP('package-b', 'b')]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+
+    code = main(['list'])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert '[package-a] NOT USED' in captured.err
+    assert '[package-b] NOT USED' in captured.err
+    assert 'interior_lookup_tables/demo_eos' in captured.err
+    assert 'Traceback' not in captured.err
+    assert captured.out == '', 'neither conflicting provider is listed as loaded'
+
+
+def _conflicting_providers(tmp_path, model):
+    """Two entry points whose manifests claim the same dataset location.
+
+    Both read fine; the fault is that they collide, so a caller must not
+    confuse this with a provider whose manifest could not be read at all.
+    """
+    text = (
+        '[interior_lookup_tables.demo_eos]\n'
+        'zenodo = "10.5281/zenodo.1234567"\n'
+        f'required_by = ["{model}"]\n'
+    )
+
+    class _EP:
+        def __init__(self, name, sub):
+            self.name = name
+            self.sub = sub
+
+        def load(self):
+            def path():
+                target = tmp_path / self.sub / 'manifest.toml'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+                return target
+
+            return path
+
+    return [_EP('package-a', 'a'), _EP('package-b', 'b')]
+
+
+@pytest.mark.unit
+def test_check_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, capsys, monkeypatch):
+    """A real cross-provider conflict, driven through main(), reads as NOT USED."""
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points', lambda group: _conflicting_providers(tmp_path, 'demo')
+    )
+
+    code = main(['check', 'demo', '--data-root', str(tmp_path / 'data')])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert 'package-a: MANIFEST NOT USED' in out
+    assert 'package-b: MANIFEST NOT USED' in out
+    assert 'FAILED TO LOAD' not in out
+
+
+@pytest.mark.unit
+def test_fetch_reports_both_conflicting_providers_as_not_used(tmp_path, capsys, monkeypatch):
+    """A real cross-provider conflict is aggregated into fetch's failure report."""
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points', lambda group: _conflicting_providers(tmp_path, 'demo')
+    )
+
+    code = main(['fetch', 'demo', '--data-root', str(tmp_path / 'data')])
+    err = capsys.readouterr().err
+
+    assert code == 1
+    assert 'manifest(s) not used' in err
+    assert 'package-a' in err and 'package-b' in err
+    assert 'Traceback' not in err
+
+
+@pytest.mark.unit
+def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, capsys, monkeypatch):
+    """A real cross-provider conflict, driven through main(), reads as NOT USED."""
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points', lambda group: _conflicting_providers(tmp_path, 'demo')
+    )
+
+    code = main(['relocate', '--data-root', str(tmp_path / 'data')])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert 'package-a: MANIFEST NOT USED' in out
+    assert 'package-b: MANIFEST NOT USED' in out
+    assert 'FAILED TO LOAD' not in out
