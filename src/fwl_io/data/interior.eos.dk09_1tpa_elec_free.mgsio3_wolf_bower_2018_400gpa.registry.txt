@@ -1,0 +1,8 @@
+adiabat_temp_grad_melt.dat md5:b3d68f3a7b95f909b76e537d7b31fca0
+adiabat_temp_grad_solid.dat md5:8ef514f9ba85058cd1364adb4c018c5d
+density_melt.dat md5:f01780457393480e760b4b5075d3c3e3
+density_solid.dat md5:373ea9229bb263b320f76f630f874268
+heat_capacity_melt.dat md5:d841bad96c2b683f879ca4ae9f8e59ee
+heat_capacity_solid.dat md5:a2900c0ce03c15c633d92fbe529465a7
+thermal_exp_melt.dat md5:d6df1c9a8521995cfd02f3b3e667b2b0
+thermal_exp_solid.dat md5:f476fea23ffb8111336277fc0c977e10

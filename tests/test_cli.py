@@ -449,6 +449,24 @@ def test_relocate_exits_zero_on_a_tree_with_nothing_to_move(tmp_path, capsys, mo
     assert 'absent' in out
 
 
+def test_mirror_command_forwards_repeated_file_options(monkeypatch):
+    """Each ``--file`` reaches the mirror as one entry of the ``files`` list."""
+    seen = {}
+
+    def fake_mirror(doi, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', fake_mirror)
+    monkeypatch.setenv('DATAVERSE_TOKEN', 't')
+    argv = ['mirror', '10.5281/zenodo.5', '--collection', 'c', '--dry-run']
+    argv += ['--contact-name', 'n', '--contact-email', 'e@x.org']
+    assert main(argv + ['--file', 'a.dat', '--file', 'b.dat']) == 0
+    assert seen['files'] == ['a.dat', 'b.dat']
+    assert main(argv) == 0
+    assert seen['files'] is None
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     'flags, tty, expected',

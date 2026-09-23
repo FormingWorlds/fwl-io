@@ -72,6 +72,20 @@ def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str
     return entries
 
 
+def select_files(
+    entries: dict[str, str], wanted: tuple[str, ...] | list[str], *, source: str
+) -> dict[str, str]:
+    """Return the entries named in ``wanted``; raise when one is not there.
+
+    A name absent from the record is an error rather than a silent omission, so
+    a misspelt or removed file cannot leave a dataset quietly incomplete.
+    """
+    absent = sorted(set(wanted) - set(entries))
+    if absent:
+        raise ValueError(f'{source} does not contain {absent}; it lists {sorted(entries)}')
+    return {name: entries[name] for name in wanted}
+
+
 def sync_dataset(dataset: Dataset, api_base: str = ZENODO_API) -> Path:
     """Regenerate the committed registry file for one dataset."""
     if not dataset.zenodo:
@@ -79,6 +93,8 @@ def sync_dataset(dataset: Dataset, api_base: str = ZENODO_API) -> Path:
     if dataset.registry_path is None:
         raise ValueError(f'dataset {dataset.key!r} has no registry path')
     entries = fetch_zenodo_registry(dataset.zenodo, api_base=api_base)
+    if dataset.files is not None:
+        entries = select_files(entries, dataset.files, source=f'Zenodo record of {dataset.key!r}')
     write_registry(dataset.registry_path, entries)
     return dataset.registry_path
 

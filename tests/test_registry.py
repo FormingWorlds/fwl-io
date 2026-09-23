@@ -40,7 +40,7 @@ def test_traversal_names_rejected_on_load(tmp_path, name):
         load_registry(path)
 
 
-@pytest.mark.parametrize('name', ['../escape.dat', '/abs.dat'])
+@pytest.mark.parametrize('name', ['../escape.dat', '/abs.dat', 'a b.dat'])
 def test_traversal_names_rejected_on_write(tmp_path, name):
     with pytest.raises(ValueError):
         write_registry(tmp_path / 'reg.txt', {name: 'sha256:aaa'})

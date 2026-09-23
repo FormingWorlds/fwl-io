@@ -67,10 +67,10 @@ Exit is 1 when a legacy tree was found and could not be moved, when an installed
 ```bash
 DATAVERSE_TOKEN=... fwl-io mirror <zenodo-doi> --collection <alias> \
     [--dataverse-url URL] [--contact-email EMAIL] [--subject SUBJECT] \
-    [--no-publish] [--dry-run]
+    [--file NAME ...] [--no-publish] [--dry-run]
 ```
 
-Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. A contact email (`--contact-email`) is required to create a dataset; only `--dry-run`, which makes no Dataverse writes, is exempt. `--subject` is validated by the server when the dataset is created, so a value outside the target installation's citation vocabulary is rejected then. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
+Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. A contact email (`--contact-email`) is required to create a dataset; only `--dry-run`, which makes no Dataverse writes, is exempt. `--subject` is validated by the server when the dataset is created, so a value outside the target installation's citation vocabulary is rejected then. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. `--file NAME` restricts the mirror to that file of the deposit; repeat it for several files. Without `--file`, every file of the deposit is mirrored, and a name the deposit does not hold is an error. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
 
 ## fwl-io mirror-publish
 

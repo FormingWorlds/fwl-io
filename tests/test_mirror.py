@@ -219,6 +219,33 @@ def test_upload_disables_tabular_ingest_and_sends_the_real_bytes(http_server, da
     assert b'filename="a.dat"' in bodies and b'filename="b.dat"' in bodies
 
 
+def test_files_argument_mirrors_only_the_listed_files(http_server, dataverse_server):
+    """Only the named files are uploaded; the rest of the record stays behind."""
+    _, calls = _mirror(http_server, dataverse_server, files=['b.dat'])
+    adds = [c for c in calls if c['path'].endswith('/add')]
+    assert len(adds) == 1
+    assert b'filename="b.dat"' in adds[0]['body']
+    assert b'filename="a.dat"' not in adds[0]['body']
+
+
+def test_files_argument_naming_an_absent_file_is_refused_before_any_call(
+    http_server, dataverse_server
+):
+    """A file the record does not hold aborts the mirror before Dataverse is touched."""
+    dv_url, calls = dataverse_server
+    with pytest.raises(ValueError, match='c.dat'):
+        _mirror(http_server, dataverse_server, files=['a.dat', 'c.dat'])
+    assert calls == []
+
+
+def test_files_argument_empty_list_is_refused_before_any_call(http_server, dataverse_server):
+    """An empty ``files`` list would create a dataset with nothing in it, so it is refused."""
+    dv_url, calls = dataverse_server
+    with pytest.raises(ValueError, match='selects no files'):
+        _mirror(http_server, dataverse_server, files=[])
+    assert calls == []
+
+
 def test_no_publish_creates_draft_without_publishing(http_server, dataverse_server):
     """With publish disabled the dataset is created and filled but not published."""
     result, calls = _mirror(http_server, dataverse_server, publish=False)
