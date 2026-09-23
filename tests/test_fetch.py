@@ -47,6 +47,35 @@ def test_download_verify_and_place(sample_files, tmp_path):
     assert not any(staging.iterdir()), 'staging is empty after a clean fetch'
 
 
+def test_a_stale_prune_remnant_in_staging_is_cleaned_before_a_fetch(sample_files, tmp_path):
+    """A leftover ``prune-*`` directory in staging ages out like any other stale entry.
+
+    A ``fwl-io prune`` run that fails part way through a removal leaves a
+    ``prune-<uuid>`` directory behind in the same staging directory a fetch
+    uses. The age-based cleanup in ``_staging_dir`` does not single out its
+    own leftovers by name, so an old-enough remnant from prune is removed the
+    same way an old-enough remnant of the fetcher's own would be.
+    """
+    import os
+    import time
+
+    from fwl_io.fetch import _STAGING_MAX_AGE_S
+
+    base_url, registry = sample_files
+    staging = tmp_path / '.fwl-io-staging'
+    staging.mkdir(parents=True)
+    remnant = staging / 'prune-deadbeefdeadbeefdeadbeefdeadbeef'
+    remnant.mkdir()
+    (remnant / 'leftover.dat').write_bytes(b'x')
+    old = time.time() - _STAGING_MAX_AGE_S - 1
+    os.utime(remnant, (old, old))
+
+    fetcher = _fetcher(base_url, registry, tmp_path)
+    fetcher.fetch('alpha.dat')
+
+    assert not remnant.exists()
+
+
 def test_existing_valid_file_is_not_refetched(sample_files, tmp_path):
     base_url, registry = sample_files
     fetcher = _fetcher(base_url, registry, tmp_path)

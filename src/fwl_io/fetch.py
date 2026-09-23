@@ -89,6 +89,11 @@ _STAGING_MAX_AGE_S = 24 * 3600
 _STAMP_FILENAME = '.fwl-io.json'
 _STAMP_SCHEMA = 1
 
+#: Directories under the data root that fwl-io owns; a walk over the tree never enters
+#: these. Defined beside the names themselves so a third one cannot be added here
+#: without also being covered there.
+_RESERVED_DIRNAMES = frozenset({_LOCK_DIRNAME, _STAGING_DIRNAME})
+
 # Bounded retry for transient transport failures. Each entry is the wait in
 # seconds before the corresponding retry round, so the tuple length is the
 # number of retry rounds after the first. Every mirror is tried once per round;
@@ -190,6 +195,47 @@ def _progressbar_unavailable() -> str | None:
 def _progressbar_supported() -> bool:
     """Return whether pooch can render a download progress bar."""
     return _progressbar_unavailable() is None
+
+
+def read_stamp(directory: Path) -> dict | None:
+    """The stamp record in ``directory``, or ``None`` if there is no usable one.
+
+    Every reader of a stamp goes through here, so none of them has to
+    rediscover that the file may be absent, unreadable, not JSON, JSON that
+    is not an object, or an object written to a schema this version does
+    not know. The third is the one worth naming: a stamp is an ordinary
+    file that can be edited or truncated, and a reader that parsed ``[]``
+    and then asked it for a key would raise where it should have decided
+    the stamp says nothing.
+
+    The schema is what makes the rest of that safe over time. A stamp
+    written by a future version can be well-formed JSON in a shape whose
+    fields no longer mean what they did, and the fields this version reads
+    would then be trusted while meaning something else; an unrecognised
+    schema is treated as no stamp, so the tree is refetched and restamped
+    rather than misread.
+    """
+    try:
+        record = json.loads((directory / _STAMP_FILENAME).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get('schema') != _STAMP_SCHEMA:
+        # Worth saying out loud, because the cost is visible and the cause
+        # is not: the dataset is refetched in full, and it will be again on
+        # every run that shares this tree with the version that wrote the
+        # stamp. Someone watching a cluster job redownload the same data
+        # nightly needs the reason named.
+        log.warning(
+            'stamp in %s is schema %r, not %r, so it cannot be read and the '
+            'dataset will be fetched again',
+            directory,
+            record.get('schema'),
+            _STAMP_SCHEMA,
+        )
+        return None
+    return record
 
 
 class Fetcher:
@@ -568,46 +614,9 @@ class Fetcher:
         """
         return self._stamp_members(self.target_dir)
 
-    @staticmethod
-    def _read_stamp(directory: Path) -> dict | None:
-        """The stamp record in ``directory``, or ``None`` if there is no usable one.
-
-        Every reader of a stamp goes through here, so none of them has to
-        rediscover that the file may be absent, unreadable, not JSON, JSON that
-        is not an object, or an object written to a schema this version does
-        not know. The third is the one worth naming: a stamp is an ordinary
-        file that can be edited or truncated, and a reader that parsed ``[]``
-        and then asked it for a key would raise where it should have decided
-        the stamp says nothing.
-
-        The schema is what makes the rest of that safe over time. A stamp
-        written by a future version can be well-formed JSON in a shape whose
-        fields no longer mean what they did, and the fields this version reads
-        would then be trusted while meaning something else; an unrecognised
-        schema is treated as no stamp, so the tree is refetched and restamped
-        rather than misread.
-        """
-        try:
-            record = json.loads((directory / _STAMP_FILENAME).read_text())
-        except (OSError, ValueError):
-            return None
-        if not isinstance(record, dict):
-            return None
-        if record.get('schema') != _STAMP_SCHEMA:
-            # Worth saying out loud, because the cost is visible and the cause
-            # is not: the dataset is refetched in full, and it will be again on
-            # every run that shares this tree with the version that wrote the
-            # stamp. Someone watching a cluster job redownload the same data
-            # nightly needs the reason named.
-            log.warning(
-                'stamp in %s is schema %r, not %r, so it cannot be read and the '
-                'dataset will be fetched again',
-                directory,
-                record.get('schema'),
-                _STAMP_SCHEMA,
-            )
-            return None
-        return record
+    # A thin alias so every internal caller keeps working unchanged: the reader
+    # itself is public, in :func:`read_stamp`, since prune.py needs it too.
+    _read_stamp = staticmethod(read_stamp)
 
     def _stamp_members(self, directory: Path) -> list[str] | None:
         """Members recorded by the stamp in ``directory``, or ``None``.

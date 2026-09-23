@@ -1764,6 +1764,43 @@ def test_a_looping_parent_after_the_delete_is_reported_not_raised(tmp_path, monk
     assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
 
 
+def test_symlink_hops_matches_the_kernel_on_a_real_chain(tmp_path):
+    """_symlink_hops's hand-rolled walk is checked against the kernel's own resolution.
+
+    Builds two real chains on disk, no mocking: one through a symlinked
+    directory (``via -> real_dir``, then ``link -> via/leaf``), and one that
+    additionally walks back out and in again with ``..``. For both, the hop
+    set must name every real directory and file the kernel actually visits,
+    and the endpoint must agree with ``os.path.realpath``, the OS's own
+    resolver, not just with the function's own restated logic.
+    """
+    from fwl_io.fs_guard import _symlink_hops
+
+    real_dir = tmp_path / 'real_dir'
+    real_dir.mkdir()
+    leaf = real_dir / 'leaf'
+    leaf.write_text('x')
+    via = tmp_path / 'via'
+    via.symlink_to('real_dir', target_is_directory=True)
+    link = tmp_path / 'link'
+    link.symlink_to('via/leaf')
+
+    hops = _symlink_hops(link)
+
+    assert hops == {via, real_dir, leaf}
+    assert os.path.realpath(link) == os.path.realpath(leaf)
+
+    sibling = tmp_path / 'sibling'
+    sibling.mkdir()
+    dotdot_link = tmp_path / 'dotdot_link'
+    dotdot_link.symlink_to('sibling/../via/leaf')
+
+    dotdot_hops = _symlink_hops(dotdot_link)
+
+    assert dotdot_hops == {sibling, via, real_dir, leaf}
+    assert os.path.realpath(dotdot_link) == os.path.realpath(leaf)
+
+
 def test_a_symlink_chain_through_a_candidate_protects_it(tmp_path, monkeypatch):
     """A referenced link whose chain passes through a candidate keeps that candidate.
 
@@ -2365,6 +2402,7 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
     """A flock error other than would-block is reported as untestable, never as free."""
     import errno
 
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
@@ -2373,7 +2411,7 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
     def _no_flock(fd, op):
         raise OSError(errno.ENOLCK, 'No locks available')
 
-    monkeypatch.setattr(prune_mod.fcntl, 'flock', _no_flock)
+    monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _no_flock)
 
     assert prune_mod._lock_problem(root).startswith('cannot test lock file')
 
@@ -2400,18 +2438,19 @@ def test_an_unlock_error_does_not_escape_the_probe(tmp_path, monkeypatch):
     """Failing to drop the probe's own shared lock is harmless; the descriptor is closed anyway."""
     import errno
 
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
     (_lock_dir(root) / 'a.lock').write_text('')
-    real_flock = prune_mod.fcntl.flock
+    real_flock = fs_guard_mod.fcntl.flock
 
     def _unlock_fails(fd, op):
-        if op == prune_mod.fcntl.LOCK_UN:
+        if op == fs_guard_mod.fcntl.LOCK_UN:
             raise OSError(errno.EIO, 'I/O error')
         return real_flock(fd, op)
 
-    monkeypatch.setattr(prune_mod.fcntl, 'flock', _unlock_fails)
+    monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _unlock_fails)
 
     assert prune_mod._lock_problem(root) is None
 
@@ -2444,7 +2483,7 @@ def test_each_missing_capability_refuses_deletion(tmp_path, monkeypatch, flag, v
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
     dirs = _make_tree(root)
-    monkeypatch.setattr(f'fwl_io.prune.{flag}', value)
+    monkeypatch.setattr(f'fwl_io.fs_guard.{flag}', value)
 
     report = prune_versions(data_root=root, delete=True)
 
@@ -2465,7 +2504,7 @@ def test_a_deleting_run_decides_case_with_a_fresh_probe_file(tmp_path, monkeypat
         looked_up.append(a.name)
         return real_same(a, b)
 
-    monkeypatch.setattr('fwl_io.prune._same_entry', _recording)
+    monkeypatch.setattr('fwl_io.fs_guard._same_entry', _recording)
 
     prune_mod._fs_is_case_insensitive(root, may_write=True)
 
@@ -2645,7 +2684,7 @@ def test_the_cli_refuses_an_unsupported_platform_before_asking(tmp_path, monkeyp
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
     dirs = _make_tree(root)
-    monkeypatch.setattr('fwl_io.prune._DIR_FD_OK', False)
+    monkeypatch.setattr('fwl_io.fs_guard._DIR_FD_OK', False)
 
     def _no_prompt(prompt):
         raise AssertionError('the prompt must not be shown on an unsupported platform')
@@ -2667,7 +2706,7 @@ def test_a_dry_run_exits_1_where_existing_locks_cannot_be_checked(tmp_path, monk
     root = tmp_path / 'data'
     _make_tree(root)
     (_lock_dir(root) / 'a.lock').write_text('')
-    monkeypatch.setattr('fwl_io.prune.fcntl', None)
+    monkeypatch.setattr('fwl_io.fs_guard.fcntl', None)
 
     plan = plan_prune(data_root=root)
     code = main(['prune', '--data-root', str(root)])
