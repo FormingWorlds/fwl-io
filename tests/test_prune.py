@@ -2694,3 +2694,116 @@ def test_a_link_hop_through_an_unsearchable_directory_blocks_deletion(tmp_path, 
 
     assert report.scan_error is not None
     assert dirs['superseded'].is_dir() and not report.removed
+
+
+def test_the_delete_reports_carry_the_unwritable_lock_warning_with_its_count(tmp_path, monkeypatch):
+    """apply_prune and a deleting prune_versions both return the warning, counted per file."""
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    locks = [_lock_dir(root) / f'theirs{i}.lock' for i in range(2)]
+    for lock in locks:
+        lock.write_text('')
+        os.chmod(lock, 0o444)
+    try:
+        plan = plan_prune(data_root=root)
+        applied = apply_prune(plan, data_root=root)
+        _stamped_version(root, SUBDIR, '14000000')
+        pruned = prune_versions(data_root=root, delete=True)
+    finally:
+        for lock in locks:
+            os.chmod(lock, stat.S_IRUSR | stat.S_IWUSR)
+
+    warning = '2 lock file(s) are not writable by this user'
+    for report in (applied, pruned):
+        assert report.removed and report.ok
+        assert any(warning in w for w in report.lock_warnings)
+
+
+def test_a_dangling_link_through_a_regular_file_does_not_block(tmp_path, monkeypatch):
+    """A referenced link that runs through a regular file resolves to nothing; it blocks nothing."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    (dirs['referenced'] / 'dangling.dat').symlink_to('data.dat/member')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert report.scan_error is None
+    assert not dirs['superseded'].exists()
+
+
+def test_a_lock_directory_that_cannot_be_searched_warns(tmp_path):
+    """A lock directory this user can write but not search leaves new lock files unusable."""
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    os.chmod(lock_dir, 0o666)
+    try:
+        problem, warnings = prune_mod._lock_scan(root)
+    finally:
+        os.chmod(lock_dir, stat.S_IRWXU)
+
+    assert problem is None
+    assert any(f'{lock_dir} is not writable by this user' in w for w in warnings)
+
+
+def test_a_blocking_lock_entry_keeps_the_warnings_found_before_it(tmp_path):
+    """A lock entry that blocks does not hide the warning about the lock directory."""
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    (lock_dir / 'odd.lock').mkdir()
+    os.chmod(lock_dir, 0o555)
+    try:
+        problem, warnings = prune_mod._lock_scan(root)
+    finally:
+        os.chmod(lock_dir, stat.S_IRWXU)
+
+    assert 'is not a regular file' in problem
+    assert any(f'{lock_dir} is not writable by this user' in w for w in warnings)
+
+
+def test_a_data_root_without_locks_that_cannot_be_written_warns(tmp_path, monkeypatch):
+    """With no lock directory and a read-only data root, this user's fetches would run unlocked."""
+    _skip_if_root()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    _make_tree(root)
+    os.chmod(root, 0o555)
+    try:
+        plan = plan_prune(data_root=root)
+    finally:
+        os.chmod(root, stat.S_IRWXU)
+
+    assert plan.ok
+    assert f'cannot create {_LOCK_DIRNAME}' in plan.summary()
+
+
+def test_a_held_lock_keeps_the_warnings_found_before_it(tmp_path):
+    """A held lock in an unwritable lock directory reports both the hold and the warning."""
+    import fcntl
+
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    lock = lock_dir / 'a.lock'
+    lock.write_text('')
+    fd = os.open(lock, os.O_RDONLY)
+    os.chmod(lock_dir, 0o555)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        problem, warnings = prune_mod._lock_scan(root)
+    finally:
+        os.close(fd)
+        os.chmod(lock_dir, stat.S_IRWXU)
+
+    assert problem == 'a fetch lock is held on the data root'
+    assert any(f'{lock_dir} is not writable by this user' in w for w in warnings)

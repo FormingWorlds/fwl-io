@@ -525,7 +525,13 @@ def _lock_scan(root: Path) -> tuple[str | None, tuple[str, ...]]:
     try:
         st = os.lstat(lock_dir)
     except FileNotFoundError:
-        return None, ()
+        if os.access(root, os.W_OK | os.X_OK):
+            return None, ()
+        return None, (
+            f'{root} is not writable by this user, so a fetch by this user cannot create '
+            f'{_LOCK_DIRNAME} and runs without a lock, which prune cannot see; '
+            'do not fetch while prune runs',
+        )
     except OSError as exc:
         return f'cannot read {lock_dir}: {exc}', ()
     if stat.S_ISLNK(st.st_mode):
@@ -541,10 +547,11 @@ def _lock_scan(root: Path) -> tuple[str | None, tuple[str, ...]]:
     except OSError as exc:
         return f'cannot read {lock_dir}: {exc}', ()
     warnings: list[str] = []
-    if not os.access(lock_dir, os.W_OK):
+    if not os.access(lock_dir, os.W_OK | os.X_OK):
         warnings.append(
-            f'{lock_dir} is not writable by this user; a fetch by this user runs '
-            'without a lock, which prune cannot see; do not fetch while prune runs'
+            f'{lock_dir} is not writable by this user; a fetch by this user whose lock file '
+            'does not exist yet runs without a lock, which prune cannot see; '
+            'do not fetch while prune runs'
         )
     unwritable = 0
     for name in names:
@@ -554,21 +561,22 @@ def _lock_scan(root: Path) -> tuple[str | None, tuple[str, ...]]:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            return f'cannot test lock file {path}: {exc}', ()
+            return f'cannot test lock file {path}: {exc}', tuple(warnings)
         if not stat.S_ISREG(entry.st_mode):
-            return f'lock file {path} is not a regular file; fetch locks cannot be checked', ()
+            problem = f'lock file {path} is not a regular file; fetch locks cannot be checked'
+            return problem, tuple(warnings)
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             continue
         except OSError as exc:
-            return f'cannot test lock file {path}: {exc}', ()
+            return f'cannot test lock file {path}: {exc}', tuple(warnings)
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            return 'a fetch lock is held on the data root', ()
+            return 'a fetch lock is held on the data root', tuple(warnings)
         except OSError as exc:
-            return f'cannot test lock file {path}: {exc}', ()
+            return f'cannot test lock file {path}: {exc}', tuple(warnings)
         else:
             with contextlib.suppress(OSError):
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -623,7 +631,7 @@ def _symlink_hops(link: Path) -> set[Path]:
             hops.add(step)
             try:
                 is_link = stat.S_ISLNK(os.lstat(step).st_mode)
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 is_link = False
             if not is_link:
                 current = step
