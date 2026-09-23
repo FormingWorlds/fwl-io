@@ -35,6 +35,7 @@ fetch lock, which is not the whole of every fetch.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -79,7 +80,7 @@ GONE = 'gone'
 #: Seconds a lock probe stays valid during a delete run. A fetch that starts
 #: within this window after the last probe is not seen, the same kind of gap
 #: as the one between the last probe and a move; the probe costs one open and
-#: one flock per lock file, and lock files are never removed.
+#: one flock per lock file, and most filelock releases leave lock files behind.
 _LOCK_RECHECK_S = 1.0
 
 #: The clock the lock re-check uses; a separate name so a test can hold it still.
@@ -89,7 +90,7 @@ _clock = time.monotonic
 _RMTREE_IS_SAFE = shutil.rmtree.avoids_symlink_attacks
 
 #: Whether directory-relative open, rename and stat exist here, read once at import.
-_DIR_FD_OK = {os.open, os.rename, os.stat} <= os.supports_dir_fd
+_DIR_FD_OK = {os.open, os.rename, os.stat, os.mkdir} <= os.supports_dir_fd
 
 #: Largest stamp read; a real stamp lists at most one line per archive member.
 _MAX_STAMP_BYTES = 32 * 1024 * 1024
@@ -353,14 +354,15 @@ def _fs_is_case_insensitive(root: Path, *, may_write: bool = False) -> bool:
     """True when the filesystem holding ``root``'s entries treats case as insignificant.
 
     The probe looks inside ``root``, since ``root``'s own name lives on its
-    parent's filesystem. A directory whose name has cased letters is looked up
-    under the flipped spelling; only a directory decides, since a file under
-    the flipped name could be a hard link to it. With no such directory, a
-    probe file is created in ``root`` and removed again, but only when
-    ``may_write`` is set (a deleting run); a dry run touches nothing and
-    answers False. Any failure answers False, which only makes subdir
-    matching stricter.
+    parent's filesystem. A deleting run (``may_write``) always creates a fresh
+    probe file in ``root``, looks it up under the flipped spelling and removes
+    it again. A dry run touches nothing: it looks up a directory whose name has
+    cased letters under the flipped spelling (only a directory, since a file
+    could be a hard link) and answers False when there is none. Any failure
+    answers False, which only makes subdir matching stricter.
     """
+    if may_write:
+        return _probe_case_with_a_file(root)
     try:
         with os.scandir(root) as entries:
             name = next(
@@ -375,8 +377,11 @@ def _fs_is_case_insensitive(root: Path, *, may_write: bool = False) -> bool:
         return False
     if name is not None:
         return _same_entry(root / name, root / name.swapcase())
-    if not may_write:
-        return False
+    return False
+
+
+def _probe_case_with_a_file(root: Path) -> bool:
+    """Create a probe file in ``root``, look it up under the flipped case, remove it."""
     try:
         fd, probe_name = tempfile.mkstemp(dir=root, prefix='.fwl-io-case-probe-')
     except OSError:
@@ -518,8 +523,9 @@ def _lock_problem(root: Path) -> str | None:
     if stat.S_ISLNK(st.st_mode):
         return f'{lock_dir} is a symlink; fetch locks cannot be checked'
     if not stat.S_ISDIR(st.st_mode):
-        return None
-    if fcntl is None:
+        # A fetch then runs without a lock, so its state cannot be seen here.
+        return f'{lock_dir} is not a directory; fetch locks cannot be checked'
+    if fcntl is None or not hasattr(os, 'O_NOFOLLOW'):
         return 'fetch locks cannot be checked on this platform'
     try:
         with os.scandir(lock_dir) as entries:
@@ -543,7 +549,8 @@ def _lock_problem(root: Path) -> str | None:
         except OSError as exc:
             return f'cannot test lock file {path}: {exc}'
         else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
     return None
@@ -1157,9 +1164,11 @@ def prune_versions(
     A superseded version directory is removed by default. An orphaned one is
     removed only when ``include_orphans`` is set, because it cannot be proven
     unreferenced by manifests this environment cannot see. Deletion is refused
-    outright when the reference set is incomplete, the tree cannot be fully
-    read, a fetch lock is held, or (for an orphan-including run) the reference
-    set is empty and the override was not given.
+    outright on a platform that cannot delete safely (see
+    :func:`_delete_unsupported`), when the reference set is incomplete, the
+    tree cannot be fully read, a fetch lock is held or cannot be checked, or
+    (for an orphan-including run) the reference set is empty and the override
+    was not given.
 
     Parameters
     ----------
@@ -1231,9 +1240,10 @@ def apply_prune(
     target, and so is a directory a manifest started to use between plan and
     apply. Every removal also re-checks its own guards at the moment it runs.
 
-    Deletion is refused outright when the current reference-set state no
-    longer permits it, or when the plan lists a directory outside the data
-    root, which means it was built for another root.
+    Deletion is refused outright on a platform that cannot delete safely
+    (see :func:`_delete_unsupported`), when the current reference-set state
+    no longer permits it, or when the plan lists a directory outside this
+    data root.
 
     Parameters
     ----------

@@ -2365,3 +2365,165 @@ def test_a_cased_file_name_does_not_decide_case_handling_in_a_dry_run(tmp_path):
 
     assert _fs_is_case_insensitive(root) is False
     assert sorted(p.name for p in root.iterdir()) == ['0', 'Notes.TXT']
+
+
+def test_a_stamp_over_the_size_cap_counts_as_no_stamp(tmp_path, monkeypatch):
+    """A stamp larger than the read cap is not read, so it cannot vouch."""
+    monkeypatch.setattr('fwl_io.prune._MAX_STAMP_BYTES', 10)
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == UNRECOGNISED
+    assert dirs['superseded'].is_dir()
+
+
+def test_a_lock_path_that_is_a_file_blocks_deletion(tmp_path):
+    """A plain file where the lock directory belongs leaves fetches unlocked, so it blocks."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    root.mkdir()
+    (root / _LOCK_DIRNAME).write_bytes(b'not a directory\n')
+
+    assert 'is not a directory' in prune_mod._lock_problem(root)
+
+
+def test_an_unreadable_lock_directory_blocks_deletion(tmp_path):
+    """A lock directory that cannot be listed is reported, not skipped."""
+    import fwl_io.prune as prune_mod
+
+    _skip_if_root()
+    root = tmp_path / 'data'
+    lock_dir = _lock_dir(root)
+    (lock_dir / 'a.lock').write_text('')
+    os.chmod(lock_dir, 0)
+    try:
+        assert prune_mod._lock_problem(root).startswith(f'cannot read {lock_dir}')
+    finally:
+        os.chmod(lock_dir, stat.S_IRWXU)
+
+
+def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatch):
+    """A flock error other than would-block is reported as untestable, never as free."""
+    import errno
+
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (_lock_dir(root) / 'a.lock').write_text('')
+
+    def _no_flock(fd, op):
+        raise OSError(errno.ENOLCK, 'No locks available')
+
+    monkeypatch.setattr(prune_mod.fcntl, 'flock', _no_flock)
+
+    assert prune_mod._lock_problem(root).startswith('cannot test lock file')
+
+
+def test_a_lock_file_that_vanishes_before_it_is_opened_is_skipped(tmp_path, monkeypatch):
+    """A lock file removed between listing and opening is no longer a lock, so it is skipped."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (_lock_dir(root) / 'a.lock').write_text('')
+    real_open = prune_mod.os.open
+
+    def _gone(path, *args, **kwargs):
+        if str(path).endswith('a.lock'):
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr('fwl_io.prune.os.open', _gone)
+
+    assert prune_mod._lock_problem(root) is None
+
+
+def test_an_unlock_error_does_not_escape_the_probe(tmp_path, monkeypatch):
+    """Failing to drop the probe's own shared lock is harmless; the descriptor is closed anyway."""
+    import errno
+
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (_lock_dir(root) / 'a.lock').write_text('')
+    real_flock = prune_mod.fcntl.flock
+
+    def _unlock_fails(fd, op):
+        if op == prune_mod.fcntl.LOCK_UN:
+            raise OSError(errno.EIO, 'I/O error')
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(prune_mod.fcntl, 'flock', _unlock_fails)
+
+    assert prune_mod._lock_problem(root) is None
+
+
+def test_apply_refuses_a_target_that_became_unrecognised(tmp_path, monkeypatch):
+    """A confirmed target whose stamp disappeared before apply is kept and reported."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    (dirs['superseded'] / _STAMP_FILENAME).unlink()
+
+    result = apply_prune(plan, data_root=root)
+
+    [kept] = result.problems
+    assert (kept.state, kept.detail) == (REFUSED, 'now unrecognised; not removed')
+    assert dirs['superseded'].is_dir()
+
+
+@pytest.mark.parametrize(
+    'flag, value, missing',
+    [
+        ('_DIR_FD_OK', False, 'dir_fd'),
+        ('_RMTREE_IS_SAFE', False, 'a symlink-safe rmtree'),
+        ('fcntl', None, 'flock'),
+    ],
+)
+def test_each_missing_capability_refuses_deletion(tmp_path, monkeypatch, flag, value, missing):
+    """Each capability read at import time is enough on its own to refuse deletion."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    monkeypatch.setattr(f'fwl_io.prune.{flag}', value)
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert missing in report.apply_refusal
+    assert dirs['superseded'].is_dir()
+
+
+def test_a_deleting_run_decides_case_with_a_fresh_probe_file(tmp_path, monkeypatch):
+    """With may_write set, an existing directory name is never what decides case handling."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (root / 'Data').mkdir(parents=True)
+    looked_up = []
+    real_same = prune_mod._same_entry
+
+    def _recording(a, b):
+        looked_up.append(a.name)
+        return real_same(a, b)
+
+    monkeypatch.setattr('fwl_io.prune._same_entry', _recording)
+
+    prune_mod._fs_is_case_insensitive(root, may_write=True)
+
+    assert looked_up and all(name.startswith('.fwl-io-case-probe-') for name in looked_up)
+    assert [p.name for p in root.iterdir()] == ['Data']
+
+
+def test_locks_are_reported_uncheckable_without_no_follow_opens(tmp_path, monkeypatch):
+    """Without O_NOFOLLOW the probe does not open lock files at all and says why."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    (_lock_dir(root) / 'a.lock').write_text('')
+    monkeypatch.delattr(os, 'O_NOFOLLOW')
+
+    assert prune_mod._lock_problem(root) == 'fetch locks cannot be checked on this platform'
