@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass, field, replace
@@ -64,6 +65,7 @@ UNRECOGNISED = 'unrecognised'
 REMOVED = 'removed'
 REMOVE_FAILED = 'remove-failed'
 REFUSED = 'refused'
+GONE = 'gone'
 
 #: Printed before any deletion that includes a superseded or orphaned directory.
 SHARED_TREE_WARNING = (
@@ -110,6 +112,7 @@ class PruneReport:
     known_subdirs: frozenset[str] = frozenset()
     lock_held: bool = False
     apply_refusal: str | None = None
+    staged_remnants: tuple[Path, ...] = ()
 
     def _in_state(self, *states: str) -> tuple[PruneCandidate, ...]:
         return tuple(c for c in self.candidates if c.state in states)
@@ -230,6 +233,11 @@ class PruneReport:
         if self.apply_refusal is not None:
             closing += f'; deletion was refused at apply time ({self.apply_refusal})'
         lines.append(closing)
+        if self.staged_remnants:
+            lines.append(
+                f'{len(self.staged_remnants)} partly deleted version dir(s) left in '
+                f'{self.staged_remnants[0].parent} by an earlier prune; delete them by hand'
+            )
         return '\n'.join(lines)
 
 
@@ -379,16 +387,15 @@ def _has_matching_stamp(path: Path, rel_parent: str, *, case_insensitive: bool) 
     return subdir == rel_parent
 
 
-def _contains_nested_version_or_stamp(path: Path) -> bool:
-    """True when ``path`` may hold another version below its own top level.
+def _leaf_problem(path: Path) -> str | None:
+    """Why ``path`` is not a plain leaf version directory, or ``None`` if it is.
 
     A version directory is a leaf: nothing a manifest declares lives inside
-    one. A candidate that contains a further ``r<digits>`` directory, or a
-    stamp file below its own top level, is not a single pin but a subtree that
-    happens to also match the version-name shape, and removing it could take a
-    live, differently-versioned pin nested inside. Directory names are checked
-    before descending, and any part of the tree that cannot be read counts as
-    a match, since what it holds cannot be shown.
+    one. A candidate holding a further ``r<digits>`` entry or a stamp file below
+    its own top level is a subtree that also matches the version-name shape,
+    and removing it could take a live pin nested inside. A subdirectory on
+    another filesystem is a mount that ``rmtree`` would empty. Names are checked
+    before descending, and anything unreadable fails closed.
     """
     unreadable = False
 
@@ -396,14 +403,29 @@ def _contains_nested_version_or_stamp(path: Path) -> bool:
         nonlocal unreadable
         unreadable = True
 
+    try:
+        device = os.lstat(path).st_dev
+    except OSError:
+        return 'cannot be fully read'
     for dirpath, dirnames, filenames in os.walk(path, followlinks=False, onerror=_fail):
         current = Path(dirpath)
         if current != path and _STAMP_FILENAME in filenames:
-            return True
+            return 'contains a nested stamp'
         if any(_VERSION_DIR_PATTERN.fullmatch(d) for d in dirnames):
-            return True
-        dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
-    return unreadable
+            return 'contains a nested version'
+        keep = []
+        for name in dirnames:
+            try:
+                st = os.lstat(current / name)
+            except OSError:
+                return 'cannot be fully read'
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if st.st_dev != device:
+                return 'contains a mount point'
+            keep.append(name)
+        dirnames[:] = keep
+    return 'cannot be fully read' if unreadable else None
 
 
 def _any_lock_held(root: Path) -> bool:
@@ -433,14 +455,48 @@ def _any_lock_held(root: Path) -> bool:
     return False
 
 
+def _symlink_hops(link: Path) -> set[Path]:
+    """Every path a symlink chain passes through, plus its final target.
+
+    Each hop is spelled with its parent resolved but its own name kept, so a
+    chain that passes through a candidate on its way elsewhere still names
+    the candidate. The walk stops at 40 hops, the usual kernel limit.
+    """
+    hops: set[Path] = set()
+    current = link
+    for _ in range(40):
+        try:
+            nxt = Path(os.readlink(current))
+            if not nxt.is_absolute():
+                nxt = current.parent / nxt
+            nxt = nxt.parent.resolve() / nxt.name
+        except OSError:
+            break
+        hops.add(nxt)
+        if not nxt.is_symlink():
+            break
+        current = nxt
+    try:
+        hops.add(link.resolve())
+    except OSError:
+        pass
+    return hops
+
+
+def _enters(hop: Path, directory: Path) -> bool:
+    """True when ``hop`` is ``directory`` or lies below it, by identity, last name not followed."""
+    return any(_same_entry(a, directory) for a in (hop, *hop.parents))
+
+
 def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str | None]:
-    """Resolved targets of every symlink found inside a referenced directory.
+    """Every hop of every symlink found inside a referenced directory.
 
     Collected once so ``_remove_one`` can refuse a candidate that a current
-    pin's own files point into, rather than walking every referenced
-    directory again for each candidate. The second value is the first read
-    error met, if any: an unreadable part of a referenced directory may hold
-    a symlink into any candidate, so the caller must not delete.
+    pin's own files point into, directly or through a chain of links, rather
+    than walking every referenced directory again for each candidate. The
+    second value is the first read error met, if any: an unreadable part of a
+    referenced directory may hold a symlink into any candidate, so the caller
+    must not delete.
     """
     targets: set[Path] = set()
     error: str | None = None
@@ -458,10 +514,7 @@ def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str |
             for name in (*dirnames, *filenames):
                 candidate = current / name
                 if candidate.is_symlink():
-                    try:
-                        targets.add(candidate.resolve())
-                    except OSError:
-                        continue
+                    targets |= _symlink_hops(candidate)
     return targets, error
 
 
@@ -478,6 +531,7 @@ class _Build:
     lock_held: bool
     referenced_symlink_targets: frozenset[Path]
     case_insensitive: bool
+    staged_remnants: tuple[Path, ...]
 
     def report(self) -> PruneReport:
         """The plan as a :class:`PruneReport`, without acting on anything."""
@@ -488,6 +542,7 @@ class _Build:
             self.scan_error,
             self.known_subdirs,
             self.lock_held,
+            staged_remnants=self.staged_remnants,
         )
 
 
@@ -573,6 +628,15 @@ def _scan(
     return found, scan_error
 
 
+def _staged_remnants(root: Path) -> tuple[Path, ...]:
+    """Leftovers of removals that failed part way, which the scan never enters."""
+    staging = root / _STAGING_DIRNAME
+    try:
+        return tuple(sorted(p for p in staging.glob('prune-*') if not p.is_symlink()))
+    except OSError:
+        return ()
+
+
 def _classify(
     parent_subdir: str,
     is_referenced: bool,
@@ -621,7 +685,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         )
         if state != REFERENCED and (
             not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive)
-            or _contains_nested_version_or_stamp(path)
+            or _leaf_problem(path) is not None
         ):
             state = UNRECOGNISED
         candidates.append(
@@ -642,6 +706,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         lock_held=_any_lock_held(root),
         referenced_symlink_targets=frozenset(symlink_targets),
         case_insensitive=case_insensitive,
+        staged_remnants=_staged_remnants(root),
     )
 
 
@@ -699,7 +764,8 @@ def _remove_one(
     if not _inside(path, root):
         return _refuse(f'resolves outside {root}; not removed')
     try:
-        on_other_device = os.lstat(path).st_dev != os.stat(root).st_dev
+        before = os.lstat(path)
+        on_other_device = before.st_dev != os.stat(root).st_dev
     except OSError as exc:
         return _refuse(f'cannot be checked ({exc}); not removed')
     if on_other_device or os.path.ismount(path):
@@ -714,9 +780,10 @@ def _remove_one(
         return _refuse(f'is not spelled below {root}; not removed')
     if not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive):
         return _refuse('has no matching stamp; not removed')
-    if _contains_nested_version_or_stamp(path):
-        return _refuse('contains a nested version or stamp; not removed')
-    if any(_inside(target, path) for target in referenced_symlink_targets):
+    problem = _leaf_problem(path)
+    if problem is not None:
+        return _refuse(f'{problem}; not removed')
+    if any(_enters(target, path) for target in referenced_symlink_targets):
         return _refuse('a referenced file symlinks into this directory; not removed')
     if _any_lock_held(root):
         return _refuse('a fetch lock is held on the data root; not removed')
@@ -729,6 +796,19 @@ def _remove_one(
         os.rename(path, staged)
     except OSError as exc:
         return replace(candidate, state=REMOVE_FAILED, detail=f'could not move it aside: {exc}')
+    try:
+        moved = os.lstat(staged)
+    except OSError as exc:
+        detail = f'moved to {staged}, then could not be checked ({exc})'
+        return replace(candidate, state=REMOVE_FAILED, detail=detail)
+    if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+        # The path changed under us (a parent swapped for a symlink): put it back.
+        try:
+            os.rename(staged, path)
+        except OSError as exc:
+            detail = f'changed while checked; moved to {staged}, not put back ({exc})'
+            return replace(candidate, state=REMOVE_FAILED, detail=detail)
+        return _refuse('changed while it was checked; not removed')
     _prune_empty_parents(path.parent, root)
     try:
         shutil.rmtree(staged)
@@ -900,8 +980,17 @@ def apply_prune(
         fresh = fresh_by_dir.get(c.path)
         if fresh is None:
             fresh = next((f for f in build.candidates if _same_dir(f.path, c.path)), None)
-        if c.state not in targets or fresh is None or fresh.state not in targets:
-            results.append(fresh if fresh is not None else c)
+        if fresh is None:
+            if not os.path.lexists(c.path):
+                results.append(replace(c, state=GONE, size=0, detail='no longer on disk'))
+            elif c.state in targets:
+                detail = 'no longer a version dir; not removed'
+                results.append(replace(c, state=REFUSED, detail=detail))
+            else:
+                results.append(c)
+            continue
+        if c.state not in targets or fresh.state not in targets:
+            results.append(fresh)
             continue
         results.append(
             _remove_one(

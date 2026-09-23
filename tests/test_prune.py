@@ -25,6 +25,7 @@ from filelock import FileLock
 
 from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME
 from fwl_io.prune import (
+    GONE,
     ORPHANED,
     REFERENCED,
     REFUSED,
@@ -827,7 +828,7 @@ def test_remove_one_refuses_a_candidate_containing_a_nested_version_or_stamp(tmp
     result = _remove_one(candidate, root, referenced=set())
 
     assert result.state == REFUSED
-    assert 'nested version or stamp' in result.detail
+    assert result.detail == 'contains a nested version; not removed'
     assert version.is_dir() and nested.is_dir()
 
 
@@ -1258,6 +1259,12 @@ def test_a_failed_delete_leaves_the_remnant_in_staging_and_names_it(tmp_path, mo
     assert str(staged[0]) in failed.detail, 'the result names where the remnant is'
     assert not report.ok
 
+    monkeypatch.undo()
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    later = plan_prune(data_root=root)
+    assert later.staged_remnants == (staged[0],), 'every later plan still reports the remnant'
+    assert 'partly deleted version dir(s) left in' in later.summary()
+
 
 def test_a_failed_move_aside_leaves_the_directory_whole(tmp_path, monkeypatch):
     """When the move into staging fails, the directory stays at its path untouched."""
@@ -1432,6 +1439,8 @@ def test_remove_one_refuses_a_directory_on_another_device(tmp_path, monkeypatch)
         return os.stat_result(fields)
 
     monkeypatch.setattr('fwl_io.prune.os.lstat', _lstat)
+    # ismount reads os.lstat too; pin it so only the device comparison can refuse.
+    monkeypatch.setattr('fwl_io.prune.os.path.ismount', lambda path: False)
     candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
 
     result = _remove_one(candidate, root, referenced=set())
@@ -1441,6 +1450,156 @@ def test_remove_one_refuses_a_directory_on_another_device(tmp_path, monkeypatch)
         'is a mount point or on another filesystem; not removed',
     )
     assert (version / 'data.dat').is_file()
+
+
+def test_remove_one_refuses_a_candidate_with_a_mount_below_it(tmp_path, monkeypatch):
+    """A subdirectory on another filesystem inside a candidate blocks its removal."""
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    mounted = version / 'scratch'
+    mounted.mkdir()
+    (mounted / 'other_fs.dat').write_bytes(b'on another filesystem\n')
+    real_lstat = os.lstat
+
+    def _lstat(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        if Path(path) != mounted:
+            return st
+        fields = list(st[:10])
+        fields[2] = st.st_dev + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr('fwl_io.prune.os.lstat', _lstat)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == (REFUSED, 'contains a mount point; not removed')
+    assert (mounted / 'other_fs.dat').is_file()
+
+
+def test_a_symlinked_version_name_inside_a_candidate_makes_it_unrecognised(tmp_path, monkeypatch):
+    """A nested ``r<digits>`` entry counts even when it is a symlink the walk never follows."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (dirs['superseded'] / 'r7').symlink_to(elsewhere, target_is_directory=True)
+
+    report = prune_versions(data_root=root, delete=True)
+
+    assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == UNRECOGNISED
+    assert (dirs['superseded'] / _STAMP_FILENAME).is_file()
+
+
+def test_remove_one_puts_back_a_directory_whose_parent_was_swapped(tmp_path, monkeypatch):
+    """A parent replaced by a symlink after the checks cannot redirect the delete.
+
+    The swap happens during the last lock check, so the rename would move a
+    same-named directory from outside the data root. The moved entry is not the
+    one that was checked, so it goes back where it came from and nothing is deleted.
+    """
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    outside = tmp_path / 'user_elsewhere'
+    victim = _stamped_version(outside, '', OLD_RECID, stamp_subdir=SUBDIR)
+    parent = version.parent
+
+    def _swap(_root):
+        parent.rename(parent.with_name('moved_away'))
+        parent.symlink_to(outside, target_is_directory=True)
+        return False
+
+    monkeypatch.setattr('fwl_io.prune._any_lock_held', _swap)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == (
+        REFUSED,
+        'changed while it was checked; not removed',
+    )
+    assert (victim / 'data.dat').read_bytes() == b'version payload\n'
+    assert (parent.with_name('moved_away') / version.name / 'data.dat').is_file()
+    assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
+
+
+def test_a_symlink_chain_through_a_candidate_protects_it(tmp_path, monkeypatch):
+    """A referenced link whose chain passes through a candidate keeps that candidate.
+
+    The final target lies outside the candidate, so only the intermediate hop
+    shows that removing the candidate would break the referenced link.
+    """
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    target = tmp_path / 'outside.dat'
+    target.write_bytes(b'outside\n')
+    (dirs['superseded'] / 'hop.dat').symlink_to(target)
+    (dirs['referenced'] / 'link.dat').symlink_to(dirs['superseded'] / 'hop.dat')
+
+    report = prune_versions(data_root=root, delete=True)
+
+    [refused] = report.problems
+    assert (refused.state, refused.detail) == (
+        REFUSED,
+        'a referenced file symlinks into this directory; not removed',
+    )
+    assert (dirs['referenced'] / 'link.dat').read_bytes() == b'outside\n'
+
+
+def test_apply_marks_a_planned_directory_gone_when_it_vanished(tmp_path, monkeypatch):
+    """A planned target deleted out of band is reported gone, with no bytes to reclaim."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    shutil.rmtree(dirs['superseded'])
+
+    result = apply_prune(plan, data_root=root)
+
+    [gone] = [c for c in result.candidates if c.rel == f'{SUBDIR}/r{OLD_RECID}']
+    assert (gone.state, gone.size) == (GONE, 0)
+    assert result.reclaimable(SUPERSEDED) == 0
+    assert result.ok
+
+
+def test_apply_refuses_a_planned_target_that_is_no_longer_a_version_dir(tmp_path, monkeypatch):
+    """A planned target replaced by a plain file is refused, not left in its planned state."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    shutil.rmtree(dirs['superseded'])
+    dirs['superseded'].write_bytes(b'a user file now\n')
+
+    result = apply_prune(plan, data_root=root)
+
+    [refused] = result.problems
+    assert (refused.state, refused.detail) == (REFUSED, 'no longer a version dir; not removed')
+    assert dirs['superseded'].read_bytes() == b'a user file now\n'
+    assert not result.ok
+
+
+def test_apply_refuses_a_plan_whose_target_now_links_outside_the_root(tmp_path, monkeypatch):
+    """A planned target swapped for a symlink out of the root refuses the whole apply."""
+    _install_manifest(monkeypatch, _write_manifest(tmp_path))
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+    plan = plan_prune(data_root=root)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (elsewhere / 'keep.dat').write_bytes(b'keep\n')
+    shutil.rmtree(dirs['superseded'])
+    dirs['superseded'].symlink_to(elsewhere, target_is_directory=True)
+
+    result = apply_prune(plan, data_root=root)
+
+    assert 'outside' in result.apply_refusal
+    assert (elsewhere / 'keep.dat').is_file()
+    assert dirs['orphaned'].is_dir() and not result.removed
+    assert not result.ok
 
 
 @pytest.mark.parametrize('insensitive', [True, False])
