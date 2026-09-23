@@ -7,15 +7,17 @@ default and the wrong one for anybody who wants the tree tidy today, which is
 what this does: it finds the datasets an installed manifest declares, works
 out where each one used to live, and moves the files across.
 
-Nothing is moved on trust. Every file is hashed against the registry the
-manifest ships before anything is touched, and a dataset with a file missing
-or a file whose contents do not match is reported and left exactly where it
-is. The alternative, moving first and discovering afterwards, turns a stale
-copy into a stale copy in the place the fetcher will now believe.
+Nothing is moved on trust. Every present file is hashed against the registry
+the manifest ships before anything is touched, and only a file that matches
+moves; a present file whose contents do not match blocks the whole dataset,
+so an absent file can never mask a corrupt one. A legacy tree holding none of
+its registry's files is reported and left exactly where it is. The
+alternative, moving first and discovering afterwards, turns a stale copy into
+a stale copy in the place the fetcher will now believe.
 
-Nothing is downloaded either. A dataset whose legacy tree is incomplete stays
-incomplete here; the fetcher is what fills it, and it will do so at the
-current location once the move has happened.
+Nothing is downloaded either. A dataset moved with some registry files still
+absent stays that way at its new location; the fetcher is what fills it in,
+once the move has happened.
 
 A dataset packaged as an archive is reported rather than moved. Its registry
 pins the packed archive, and a legacy tree holds the extracted members, so
@@ -34,7 +36,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
-from fwl_io.fs_guard import _inside, _open_dir_below, _open_or_make_dir_below
+from fwl_io.fs_guard import _inside, _is_regular_file, _open_dir_below, _open_or_make_dir_below
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
@@ -46,8 +48,9 @@ _LAYOUT_RESOURCE = 'legacy_layout.toml'
 
 # What a dataset's legacy tree turned out to be. ``READY`` covers a complete
 # tree and one where every present file matches but others are absent, left
-# for the fetcher to fill in later. ``MISMATCH`` is the remaining fault;
-# ``INCOMPLETE`` stays defined for compatibility but is no longer produced.
+# for the fetcher to fill in later. ``INCOMPLETE`` is a legacy tree holding
+# none of its registry's files; ``MISMATCH`` is a present file that fails
+# its hash check.
 READY = 'ready'
 ABSENT = 'absent'
 ALREADY_CURRENT = 'already-current'
@@ -286,9 +289,12 @@ def _classify(
         return ALREADY_CURRENT, detail, ()
     if not legacy_dir.is_dir():
         return ABSENT, '', ()
-    present = [name for name in registry if (legacy_dir / name).is_file()]
+    try:
+        present = [name for name in registry if _is_regular_file(legacy_dir / name)]
+    except OSError as exc:
+        return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
     if not present:
-        return ABSENT, '', ()
+        return INCOMPLETE, f'0 of {len(registry)} file(s) present in {legacy_dir}', ()
     try:
         wrong = [name for name in present if not _hash_matches(legacy_dir / name, registry[name])]
     except OSError as exc:
@@ -312,7 +318,7 @@ def _all_match(directory: Path, registry: dict[str, str]) -> bool:
         return False
     try:
         return all(
-            (directory / name).is_file() and _hash_matches(directory / name, digest)
+            _is_regular_file(directory / name) and _hash_matches(directory / name, digest)
             for name, digest in registry.items()
         )
     except OSError:
@@ -554,10 +560,12 @@ def _prune(directory: Path, root: Path) -> None:
 def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> RelocationReport:
     """Move every legacy tree that checks out into the current layout.
 
-    A dataset is moved only when every file its registry declares is present
-    in the legacy location and matches its recorded digest. Anything else is
-    reported and left untouched, including a dataset already at its current
-    location, which is the ordinary state once a fetch has happened there.
+    Every present file in the legacy location that matches its recorded
+    digest moves; an absent file is reported for the fetcher to fill in at
+    the new location. A present file that does not match its digest, or a
+    legacy tree holding none of its registry's files, is reported and left
+    untouched, as is a dataset already at its current location, which is the
+    ordinary state once a fetch has happened there.
 
     Parameters
     ----------

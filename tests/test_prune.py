@@ -2418,18 +2418,16 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
 
 def test_a_lock_file_that_vanishes_before_it_is_opened_is_skipped(tmp_path, monkeypatch):
     """A lock file removed between listing and opening is no longer a lock, so it is skipped."""
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
     (_lock_dir(root) / 'a.lock').write_text('')
-    real_open = prune_mod.os.open
 
-    def _gone(path, *args, **kwargs):
-        if str(path).endswith('a.lock'):
-            raise FileNotFoundError(path)
-        return real_open(path, *args, **kwargs)
+    def _gone(path):
+        raise FileNotFoundError(path)
 
-    monkeypatch.setattr('fwl_io.prune.os.open', _gone)
+    monkeypatch.setattr(fs_guard_mod, '_open_lock_fd', _gone)
 
     assert prune_mod._lock_problem(root) is None
 

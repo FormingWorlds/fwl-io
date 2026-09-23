@@ -19,6 +19,7 @@ from fwl_io.relocate import (
     _LAYOUT_RESOURCE,
     ABSENT,
     ALREADY_CURRENT,
+    INCOMPLETE,
     MISMATCH,
     MOVED,
     READY,
@@ -211,6 +212,27 @@ def test_nothing_on_disk_is_reported_absent_rather_than_missing(tmp_path, monkey
     assert not report.faults, 'never having had the old layout is not a fault'
     assert report.moved == () and report.ready == ()
     assert list(root.iterdir()) == [], 'a relocation must not create the tree it inspects'
+
+
+def test_a_legacy_dir_holding_none_of_the_registry_is_a_fault(tmp_path, monkeypatch):
+    """A legacy directory that exists but has none of the dataset's files is flagged, not ignored.
+
+    This is not the same as never having had a legacy copy: something is there,
+    and a reader needs to know it did not match rather than have it silently
+    counted as nothing to do.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'unrelated_file.txt').write_bytes(b'not a registry file\n')
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [INCOMPLETE]
+    assert report.faults, 'a legacy directory present with none of its files is a fault'
+    assert '0 of 2 file(s) present' in report.entries[0].detail
+    assert (root / LEGACY / 'unrelated_file.txt').is_file()
+    assert not (root / TARGET).exists()
 
 
 def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):

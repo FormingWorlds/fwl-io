@@ -27,11 +27,11 @@ hash them against.
 from __future__ import annotations
 
 import logging
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from fwl_io.fetch import Fetcher, create_fetcher
+from fwl_io.fs_guard import _is_regular_file
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -214,26 +214,6 @@ class CheckReport:
         # here is the overstatement this module exists to avoid.
         count = len(self.presence_only)
         return f'all data present, {count} dataset(s) by presence only'
-
-
-def _is_regular_file(path: Path) -> bool:
-    """True when ``path`` is a plain file; False when a component of it is absent.
-
-    Raises
-    ------
-    OSError
-        When ``path`` cannot be stat'd for any other reason, most often a
-        permission error on a directory above it. ``Path.stat()`` always
-        raises for that rather than swallowing the error, unlike
-        ``Path.is_file()``, whose own error handling has changed between
-        Python versions; going through ``stat()`` here keeps "absent" and
-        "present but unreadable" told apart the same way on every version.
-    """
-    try:
-        st = path.stat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return stat.S_ISREG(st.st_mode)
 
 
 def _file_state(fetcher: Fetcher, name: str) -> str:
