@@ -18,7 +18,7 @@ import json
 import os
 import shutil
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from filelock import FileLock
@@ -35,6 +35,7 @@ from fwl_io.prune import (
     UNRECOGNISED,
     PruneCandidate,
     _fs_is_case_insensitive,
+    _hop_identities,
     _prune_empty_parents,
     _remove_one,
     _shadows_known_subdir,
@@ -835,7 +836,7 @@ def test_remove_one_refuses_a_candidate_containing_a_nested_version_or_stamp(tmp
 def test_remove_one_refuses_a_candidate_a_referenced_symlink_points_into(tmp_path):
     """A file a current pin symlinks into is protected even outside its own directory.
 
-    ``referenced_symlink_targets`` is threaded in explicitly here rather than
+    ``referenced_link_ids`` is threaded in explicitly here rather than
     built from a real referenced tree, isolating the guard from the discovery
     step that normally computes it.
     """
@@ -851,7 +852,7 @@ def test_remove_one_refuses_a_candidate_a_referenced_symlink_points_into(tmp_pat
         candidate,
         root,
         referenced=set(),
-        referenced_symlink_targets=frozenset({target.resolve()}),
+        referenced_link_ids=_hop_identities({target.resolve()}),
     )
 
     assert result.state == REFUSED
@@ -898,7 +899,7 @@ def test_remove_one_refuses_a_candidate_reached_via_a_differently_cased_symlink_
         candidate,
         root,
         referenced=set(),
-        referenced_symlink_targets=frozenset({mismatched_target.resolve()}),
+        referenced_link_ids=_hop_identities({mismatched_target.resolve()}),
     )
 
     assert result.state == REFUSED
@@ -1493,12 +1494,18 @@ def test_a_symlinked_version_name_inside_a_candidate_makes_it_unrecognised(tmp_p
     assert (dirs['superseded'] / _STAMP_FILENAME).is_file()
 
 
-def test_a_parent_swapped_after_the_checks_cannot_redirect_the_delete(tmp_path, monkeypatch):
-    """A parent replaced by a symlink during the last lock check changes nothing outside.
+def _swap_parent_for_link(parent, outside):
+    """Move ``parent`` aside to ``moved_away`` and put a symlink to ``outside`` in its place."""
+    parent.rename(parent.with_name('moved_away'))
+    parent.symlink_to(outside, target_is_directory=True)
 
-    The parent is held open from before the checks, so the move takes the
-    checked directory from where it now sits and never the same-named
-    directory the symlink points at.
+
+def test_a_parent_swapped_during_the_checks_is_not_removed(tmp_path, monkeypatch):
+    """A parent replaced by a symlink during the last lock check stops the removal.
+
+    The re-check right before the move finds that the path no longer names
+    the directory the checks started from, so neither the checked directory
+    nor the same-named directory the symlink points at is touched.
     """
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
@@ -1507,8 +1514,7 @@ def test_a_parent_swapped_after_the_checks_cannot_redirect_the_delete(tmp_path, 
     parent = version.parent
 
     def _swap(_root):
-        parent.rename(parent.with_name('moved_away'))
-        parent.symlink_to(outside, target_is_directory=True)
+        _swap_parent_for_link(parent, outside)
         return False
 
     monkeypatch.setattr('fwl_io.prune._any_lock_held', _swap)
@@ -1516,41 +1522,119 @@ def test_a_parent_swapped_after_the_checks_cannot_redirect_the_delete(tmp_path, 
 
     result = _remove_one(candidate, root, referenced=set())
 
-    assert result.state == 'removed'
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
     assert (victim / 'data.dat').read_bytes() == b'version payload\n'
-    assert not (parent.with_name('moved_away') / version.name).exists()
+    assert (parent.with_name('moved_away') / version.name / 'data.dat').is_file()
 
 
-def test_a_parent_swapped_before_the_handle_is_opened_is_refused(tmp_path, monkeypatch):
-    """A parent that is a symlink when the handle is opened stops the removal outright."""
+def test_a_parent_moved_after_its_handle_opened_never_deletes_an_unchecked_dir(
+    tmp_path, monkeypatch
+):
+    """A parent moved out of the root once its handle is open cannot get its contents deleted.
+
+    The checks then read a stamped decoy through the symlink left in its
+    place, while the held handle reaches an unstamped user directory in the
+    moved parent. The re-check before the move sees the mismatch and skips it.
+    """
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
-    outside = tmp_path / 'user_elsewhere'
-    victim = _stamped_version(outside, '', OLD_RECID, stamp_subdir=SUBDIR)
+    decoy = _stamped_version(tmp_path / 'decoy', '', OLD_RECID, stamp_subdir=SUBDIR)
+    user_home = tmp_path / 'user_home'
+    user_home.mkdir()
     parent = version.parent
-    real_inside = prune_mod._inside
+    real_open = prune_mod._open_dir_below
+    swapped = []
 
-    def _inside_then_swap(path, root_):
-        answer = real_inside(path, root_)
-        if path == version and not parent.is_symlink():
-            parent.rename(parent.with_name('moved_away'))
-            parent.symlink_to(outside, target_is_directory=True)
-        return answer
+    def _open_then_move(root_, parts):
+        fd = real_open(root_, parts)
+        if parts == tuple(PurePosixPath(SUBDIR).parts) and not swapped:
+            swapped.append(True)
+            parent.rename(user_home / 'project')
+            moved = user_home / 'project' / version.name
+            shutil.rmtree(moved)
+            moved.mkdir()
+            (moved / 'thesis.tex').write_bytes(b'my own work\n')
+            parent.symlink_to(decoy.parent, target_is_directory=True)
+        return fd
 
-    monkeypatch.setattr('fwl_io.prune._inside', _inside_then_swap)
+    monkeypatch.setattr('fwl_io.prune._open_dir_below', _open_then_move)
     candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
 
     result = _remove_one(candidate, root, referenced=set())
 
-    assert result.state == REFUSED
-    assert 'cannot be opened without symlinks' in result.detail
-    assert (victim / 'data.dat').read_bytes() == b'version payload\n'
+    assert swapped, 'the injected move ran'
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
+    assert (user_home / 'project' / version.name / 'thesis.tex').read_bytes() == b'my own work\n'
+    assert (decoy / 'data.dat').is_file()
 
 
-def test_an_entry_swapped_in_under_the_same_name_is_put_back(tmp_path, monkeypatch):
-    """A different directory that takes the candidate's name after the checks is not deleted."""
+def test_a_parent_moved_out_of_the_root_behind_a_link_is_not_removed(tmp_path, monkeypatch):
+    """A candidate whose parent left the root, reachable through a link, stays where it went.
+
+    The path still names the checked directory through the link, so only the
+    comparison of the held parent with a fresh no-follow open catches this.
+    """
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    parent = version.parent
+    outside = tmp_path / 'user_home' / 'project'
+    outside.parent.mkdir()
+
+    def _move_out(_root):
+        parent.rename(outside)
+        parent.symlink_to(outside, target_is_directory=True)
+        return False
+
+    monkeypatch.setattr('fwl_io.prune._any_lock_held', _move_out)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
+    assert (outside / version.name / 'data.dat').is_file()
+
+
+def test_a_parent_replaced_between_the_two_last_reads_is_not_removed(tmp_path, monkeypatch):
+    """The held parent is compared with a fresh open, not assumed from the path alone.
+
+    Between the last read of the path and the fresh open of its parent, the
+    parent is moved out of the root and a new real directory with the
+    candidate in it takes its place, so only the handle comparison differs.
+    """
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    parent = version.parent
+    outside = tmp_path / 'user_home' / 'project'
+    outside.parent.mkdir()
+    parts = tuple(PurePosixPath(SUBDIR).parts)
+    real_open = prune_mod._open_dir_below
+    opens = []
+
+    def _open_after_swap(root_, parts_):
+        if parts_ == parts:
+            opens.append(parts_)
+            if len(opens) == 2:
+                parent.rename(outside)
+                parent.mkdir()
+                (outside / version.name).rename(version)
+        return real_open(root_, parts_)
+
+    monkeypatch.setattr('fwl_io.prune._open_dir_below', _open_after_swap)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert len(opens) == 2, 'the handle and the fresh open'
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
+    assert (version / 'data.dat').is_file()
+
+
+def test_an_entry_swapped_in_under_the_same_name_is_not_removed(tmp_path, monkeypatch):
+    """A different directory that takes the candidate's name during the checks is kept."""
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
     aside = version.with_name('aside')
@@ -1566,9 +1650,67 @@ def test_an_entry_swapped_in_under_the_same_name_is_put_back(tmp_path, monkeypat
 
     result = _remove_one(candidate, root, referenced=set())
 
-    assert (result.state, result.detail) == (REFUSED, 'changed while it was checked; not removed')
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
     assert (version / 'newcomer.dat').read_bytes() == b'new\n'
     assert (aside / 'data.dat').is_file()
+    assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
+
+
+def test_an_entry_swapped_in_at_the_move_itself_is_put_back(tmp_path, monkeypatch):
+    """A different directory that takes the name after the last re-check is moved back."""
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    aside = version.with_name('aside')
+    real_rename = prune_mod.os.rename
+    calls = []
+
+    def _swap_then_rename(src, dst, **kwargs):
+        if not calls:
+            real_rename(version, aside)
+            version.mkdir()
+            (version / 'newcomer.dat').write_bytes(b'new\n')
+        calls.append(src)
+        return real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr('fwl_io.prune.os.rename', _swap_then_rename)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert len(calls) == 2, 'moved aside, then put back'
+    assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
+    assert (version / 'newcomer.dat').read_bytes() == b'new\n'
+    assert (aside / 'data.dat').is_file()
+    assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
+
+
+def test_a_looping_parent_after_the_delete_is_reported_not_raised(tmp_path, monkeypatch):
+    """A parent that turns into a symlink loop only stops the tidy-up of empty parents.
+
+    The candidate is already deleted from staging when the loop is met, so
+    nothing is left there, the result says what was kept, and nothing raises.
+    """
+    import fwl_io.prune as prune_mod
+
+    root = tmp_path / 'data'
+    version = _stamped_version(root, SUBDIR, OLD_RECID)
+    parent = version.parent
+    real_rmtree = prune_mod.shutil.rmtree
+
+    def _rmtree_then_loop(path, *args, **kwargs):
+        real_rmtree(path, *args, **kwargs)
+        parent.rmdir()
+        parent.symlink_to(parent.name)
+
+    monkeypatch.setattr('fwl_io.prune.shutil.rmtree', _rmtree_then_loop)
+    candidate = PruneCandidate(path=version, rel=f'{SUBDIR}/r{OLD_RECID}', state=SUPERSEDED)
+
+    result = _remove_one(candidate, root, referenced=set())
+
+    assert result.state == 'removed'
+    assert result.detail.startswith('empty parent directories kept')
     assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
 
 

@@ -27,6 +27,9 @@ process cannot see, so it is never deleted without an explicit opt-in.
 
 The default is a dry run: the plan is printed and nothing is touched. Deletion
 needs an explicit request and, unless suppressed, an interactive confirmation.
+
+A run assumes that no other process renames or replaces directories under the
+data root while it deletes; fwl-io's own writers are kept out by the fetch lock.
 """
 
 from __future__ import annotations
@@ -505,9 +508,26 @@ def _symlink_hops(link: Path) -> set[Path]:
     return hops
 
 
-def _enters(hop: Path, directory: Path) -> bool:
-    """True when ``hop`` is ``directory`` or lies below it, by identity, last name not followed."""
-    return any(_same_entry(a, directory) for a in (hop, *hop.parents))
+def _hop_identities(hops: set[Path]) -> frozenset[tuple[int, int]]:
+    """Device and inode of every hop and of every ancestor of one, symlinks not followed.
+
+    A candidate is passed through by a link exactly when its own identity is
+    in this set, so each candidate costs one lookup instead of a walk over
+    every hop. Ancestors shared between hops are read once.
+    """
+    ids: set[tuple[int, int]] = set()
+    seen: set[Path] = set()
+    for hop in hops:
+        for entry in (hop, *hop.parents):
+            if entry in seen:
+                break
+            seen.add(entry)
+            try:
+                st = os.lstat(entry)
+            except OSError:
+                continue
+            ids.add((st.st_dev, st.st_ino))
+    return frozenset(ids)
 
 
 def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str | None]:
@@ -553,7 +573,7 @@ class _Build:
     resolve_error: str | None
     scan_error: str | None
     lock_held: bool
-    referenced_symlink_targets: frozenset[Path]
+    referenced_link_ids: frozenset[tuple[int, int]]
     case_insensitive: bool
     staged_remnants: tuple[Path, ...]
 
@@ -728,7 +748,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         resolve_error=resolve_error,
         scan_error=scan_error,
         lock_held=_any_lock_held(root),
-        referenced_symlink_targets=frozenset(symlink_targets),
+        referenced_link_ids=_hop_identities(symlink_targets),
         case_insensitive=case_insensitive,
         staged_remnants=_staged_remnants(root),
     )
@@ -774,23 +794,17 @@ def _remove_one(
     candidate: PruneCandidate,
     root: Path,
     referenced: set[Path],
-    referenced_symlink_targets: frozenset[Path] = frozenset(),
+    referenced_link_ids: frozenset[tuple[int, int]] = frozenset(),
     *,
     case_insensitive: bool = False,
 ) -> PruneCandidate:
     """Delete one version directory, re-checking every guard at the last moment.
 
-    The containment, symlink, filesystem, not-referenced, stamp, leaf and
-    fetch-lock checks are repeated here rather than trusted from the plan, so
-    the guarantee that this only ever removes an unreferenced, stamped, leaf
-    version directory inside the data root belongs to the code that does the
-    removing.
-
-    The directory is first renamed into the staging directory under the data
-    root, which is atomic, and only then deleted. A reader never sees it half
-    deleted at its own path, and a deletion that fails part way leaves the
-    remnant in staging, named in the result, rather than a stampless tree
-    at the old path that no later prune could recognise.
+    This refuses a symlink or a path outside the data root, opens the
+    candidate's parent from the root without following any symlink, and hands
+    over to :func:`_remove_checked`, which repeats every guard and does the
+    move and the deletion. ``referenced_link_ids`` holds the identities from
+    :func:`_hop_identities` for the links inside referenced versions.
     """
     path = candidate.path
 
@@ -816,7 +830,7 @@ def _remove_one(
             rel,
             parent_fd,
             referenced,
-            referenced_symlink_targets,
+            referenced_link_ids,
             case_insensitive=case_insensitive,
         )
     finally:
@@ -829,18 +843,25 @@ def _remove_checked(
     rel: Path,
     parent_fd: int,
     referenced: set[Path],
-    referenced_symlink_targets: frozenset[Path],
+    referenced_link_ids: frozenset[tuple[int, int]],
     *,
     case_insensitive: bool,
 ) -> PruneCandidate:
-    """The checks and the move of :func:`_remove_one`, with the parent held open.
+    """Repeat every guard on one candidate, then move it into staging and delete it.
 
-    The entry is identified by device and inode through ``parent_fd``, a
-    handle reached from the data root without following any symlink, and it
-    is moved and deleted through handles only. A parent directory swapped for
-    a symlink after the handle was opened therefore cannot redirect the move
-    out of the tree, and an entry swapped in the parent itself is caught by
-    its identity after the move and put back.
+    The containment, filesystem, not-referenced, stamp, leaf, link and
+    fetch-lock checks run here rather than being trusted from the plan. Right
+    before the move, the candidate and its parent are checked once more to be
+    the entries the checks read, and the moved entry is compared by device
+    and inode after the move and put back if it differs. The move into the
+    staging directory is atomic, so a deletion that fails part way leaves its
+    remnant in staging, named in the result, and never a stampless tree at
+    the old path.
+
+    This assumes that no other process renames or replaces directories under
+    the data root during a run; fwl-io's own writers are kept out by the fetch
+    lock. The re-checks narrow, but cannot close, the window such a process
+    would have.
     """
     path = candidate.path
     name = path.name
@@ -869,7 +890,7 @@ def _remove_checked(
     problem = _leaf_problem(path)
     if problem is not None:
         return _refuse(f'{problem}; not removed')
-    if any(_enters(hop, path) for hop in referenced_symlink_targets):
+    if (before.st_dev, before.st_ino) in referenced_link_ids:
         return _refuse('a referenced file symlinks into this directory; not removed')
     if _any_lock_held(root):
         return _refuse('a fetch lock is held on the data root; not removed')
@@ -889,6 +910,8 @@ def _remove_checked(
     except OSError as exc:
         return _refuse(f'{staging} is not a usable plain directory ({exc}); not removed')
     try:
+        if not _unchanged(path, before, parent_fd, root, rel.parent.parts):
+            return _refuse('changed during prune; not removed')
         try:
             os.rename(name, staged_name, src_dir_fd=parent_fd, dst_dir_fd=staging_fd)
         except OSError as exc:
@@ -902,9 +925,8 @@ def _remove_checked(
             try:
                 os.rename(staged_name, name, src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
             except OSError as exc:
-                return _failed(f'changed while checked; moved to {staged}, not put back ({exc})')
-            return _refuse('changed while it was checked; not removed')
-        _prune_empty_parents(path.parent, root)
+                return _failed(f'changed during prune; moved to {staged}, not put back ({exc})')
+            return _refuse('changed during prune; not removed')
         try:
             shutil.rmtree(staged_name, dir_fd=staging_fd)
         except OSError as exc:
@@ -919,26 +941,59 @@ def _remove_checked(
     finally:
         os.close(staging_fd)
     log.info('removed unreferenced version directory %s', path)
-    return replace(candidate, state=REMOVED, detail='')
+    untidy = _prune_empty_parents(path.parent, root)
+    detail = f'empty parent directories kept ({untidy})' if untidy else ''
+    return replace(candidate, state=REMOVED, detail=detail)
 
 
-def _prune_empty_parents(directory: Path, root: Path) -> None:
+def _unchanged(
+    path: Path, before: os.stat_result, parent_fd: int, root: Path, parent_parts: tuple[str, ...]
+) -> bool:
+    """True when ``path`` and its held parent are still the entries the checks read.
+
+    ``path`` must still name the entry ``before`` describes, and a fresh
+    no-follow open of the parent from the root must reach the directory
+    ``parent_fd`` holds. Anything that cannot be read answers False.
+    """
+    try:
+        now = os.lstat(path)
+        fresh_fd = _open_dir_below(root, parent_parts)
+    except OSError:
+        return False
+    try:
+        held, fresh = os.fstat(parent_fd), os.fstat(fresh_fd)
+    except OSError:
+        return False
+    finally:
+        os.close(fresh_fd)
+    return (now.st_dev, now.st_ino) == (before.st_dev, before.st_ino) and (
+        held.st_dev,
+        held.st_ino,
+    ) == (fresh.st_dev, fresh.st_ino)
+
+
+def _prune_empty_parents(directory: Path, root: Path) -> str | None:
     """Remove now-empty parent directories up to, but never including, the root.
 
     Only ever removes a directory with nothing left in it, so a sibling version
     directory under the same subdir keeps the subdir standing, and the walk
     stops at the data root. A symlinked parent is left alone rather than
-    followed out of the tree.
+    followed out of the tree. Returns why the walk stopped early when a parent
+    could not be resolved (a symlink loop), else ``None``; it never raises.
     """
-    root = root.resolve()
-    while directory.resolve() != root and directory.resolve().is_relative_to(root):
-        try:
-            if directory.is_symlink() or any(directory.iterdir()):
-                return
-            directory.rmdir()
-        except OSError:
-            return
-        directory = directory.parent
+    try:
+        root = root.resolve()
+        while directory.resolve() != root and directory.resolve().is_relative_to(root):
+            try:
+                if directory.is_symlink() or any(directory.iterdir()):
+                    return None
+                directory.rmdir()
+            except OSError:
+                return None
+            directory = directory.parent
+    except (OSError, RuntimeError) as exc:
+        return f'{directory} cannot be resolved: {exc}'
+    return None
 
 
 def prune_versions(
@@ -995,7 +1050,7 @@ def prune_versions(
             c,
             root,
             build.referenced,
-            build.referenced_symlink_targets,
+            build.referenced_link_ids,
             case_insensitive=build.case_insensitive,
         )
         if c.state in targets
@@ -1096,7 +1151,7 @@ def apply_prune(
                 fresh,
                 root,
                 build.referenced,
-                build.referenced_symlink_targets,
+                build.referenced_link_ids,
                 case_insensitive=build.case_insensitive,
             )
         )
