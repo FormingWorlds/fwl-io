@@ -16,7 +16,7 @@ Queries the Zenodo record of every dataset in the manifest and rewrites the regi
 fwl-io list
 ```
 
-Lists every dataset from all installed manifests with its key and consumers. When a manifest gives a dataset a human-readable `name` that differs from its key, that label is printed on the next line below the key. Datasets without a committed registry are flagged `[NO REGISTRY]`. Providers whose manifest fails to load are reported on stderr and the exit status is 1.
+Lists every dataset from all installed manifests with its key and consumers. When a manifest gives a dataset a human-readable `name` that differs from its key, that label is printed on the next line below the key. Datasets without a committed registry are flagged `[NO REGISTRY]`. Providers whose manifest fails to load are reported on stderr as `FAILED TO LOAD`, and providers left out because they conflict with another installed manifest as `NOT USED`; either sets the exit status to 1.
 
 ## fwl-io fetch
 
@@ -36,7 +36,7 @@ fwl-io check <model> [--data-root PATH]
 
 Reports whether every dataset that lists `<model>` in its `required_by` is present and matches its registry, without downloading anything. Each file is reported in one of five states: `ok` (present, checksum matches), `missing`, `mismatch` (present, contents differ), `unreadable` (present, could not be read to be checked), or `present`. The last means the file is there and nothing was available to verify it against, which is the case for the members of an archive dataset: the registry pins the checksum of the archive, not of the files extracted from it, so such a dataset is reported `presence only`. That is not counted as a fault, since presence is all that is checkable there, but it is never reported as verification.
 
-Two kinds of failure are reported apart from the datasets, because they call for different repairs. `MANIFEST UNREADABLE` means an installed package's manifest could not be read at all, so nothing it declares was inspected. `NOT CHECKED` means the manifest was fine but one dataset could not be resolved, most often because its registry has not been generated yet; run `fwl-io sync` for it. Either is on its own enough to fail the check.
+Two kinds of failure are reported apart from the datasets, because they call for different repairs. `MANIFEST NOT USED` means an installed package's manifest was left out, so nothing it declares was inspected. A manifest that could not be read is always reported, since its datasets are unknown. A manifest that conflicts with another installed manifest is reported only when the conflict drops a dataset `<model>` reads, the same condition under which `fwl-io fetch <model>` fails; `fwl-io list` reports every conflict. `NOT CHECKED` means the manifest was fine but one dataset could not be resolved, most often because its registry has not been generated yet; run `fwl-io sync` for it. Either is on its own enough to fail the check.
 
 The report goes to stdout whatever the verdict, so a caller running this to find out what is wrong gets the detail and not only the exit status. Exit is 1 on any missing, corrupt or unreadable file, any unreadable manifest, any unresolvable dataset, or a model no manifest declares. The closing line says `all data present and verified` only when every file was compared against a digest; a sound tree holding a presence-only dataset closes with `all data present, N dataset(s) by presence only` instead, and still exits 0.
 
@@ -58,7 +58,9 @@ Two kinds of dataset cannot be verified at all and are refused rather than moved
 
 A dataset already at its current location is not a fault, and a copy still sitting at the old location beside it is named rather than deleted. Nothing here removes data: the only directories it removes are ones it has just emptied itself.
 
-Exit is 1 when a legacy tree was found and could not be moved, when an installed manifest could not be read, since that manifest may be the one declaring the dataset a tree still holds, or when the shipped table of old locations could not be read, since without it no dataset has an old location to look at and a run that reported nothing would read like a tidy tree. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
+A manifest that could not be included is reported apart from the datasets, as either `MANIFEST FAILED TO LOAD` or `MANIFEST NOT USED`, the same split `fwl-io check` and `fwl-io list` report. The first means the manifest could not be read at all; the second means it read fine but was dropped for conflicting with another installed manifest. Either way, any dataset that manifest would have declared is left out of the plan and cannot be relocated.
+
+Exit is 1 when a legacy tree was found and could not be moved, when an installed manifest failed to load or was dropped as a conflict, since that manifest may be the one declaring the dataset a tree still holds, or when the shipped table of old locations could not be read, since without it no dataset has an old location to look at and a run that reported nothing would read like a tidy tree. A tree that was already tidy exits 0. `--dry-run` reports the same plan without moving anything. The equivalent Python entry points are `fwl_io.relocate_all` and `fwl_io.plan_relocations`.
 
 ## fwl-io mirror
 

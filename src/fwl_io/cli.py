@@ -25,9 +25,10 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
-    from fwl_io.manifest import _discover
+    from fwl_io.manifest import _discover_all
 
-    found, errors = _discover()
+    discovery = _discover_all()
+    found, errors = discovery.found, discovery.errors
     for provider, datasets in sorted(found.items()):
         print(f'[{provider}]')
         for ds in datasets:
@@ -43,7 +44,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
             if label and label != ds.key:
                 print(f'    {label}')
     for provider, message in sorted(errors.items()):
-        print(f'[{provider}] FAILED TO LOAD: {message}', file=sys.stderr)
+        verdict = 'NOT USED' if provider in discovery.conflict_models else 'FAILED TO LOAD'
+        print(f'[{provider}] {verdict}: {message}', file=sys.stderr)
     return 1 if errors else 0
 
 
