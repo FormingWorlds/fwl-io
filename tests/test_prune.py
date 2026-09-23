@@ -1516,7 +1516,7 @@ def test_a_parent_swapped_during_the_checks_is_not_removed(tmp_path, monkeypatch
     victim = _stamped_version(outside, '', OLD_RECID, stamp_subdir=SUBDIR)
     parent = version.parent
 
-    def _swap(_root):
+    def _swap(_root, **_kwargs):
         _swap_parent_for_link(parent, outside)
         return None
 
@@ -1585,7 +1585,7 @@ def test_a_parent_moved_out_of_the_root_behind_a_link_is_not_removed(tmp_path, m
     outside = tmp_path / 'user_home' / 'project'
     outside.parent.mkdir()
 
-    def _move_out(_root):
+    def _move_out(_root, **_kwargs):
         parent.rename(outside)
         parent.symlink_to(outside, target_is_directory=True)
         return None
@@ -1645,7 +1645,7 @@ def test_an_entry_swapped_in_under_the_same_name_is_not_removed(tmp_path, monkey
     aside = version.with_name('aside')
     real_rename = prune_mod.os.rename
 
-    def _swap_entry(_root):
+    def _swap_entry(_root, **_kwargs):
         real_rename(version, aside)
         version.mkdir()
         (version / 'newcomer.dat').write_bytes(b'new\n')
@@ -1671,7 +1671,7 @@ def test_a_candidate_deleted_during_the_checks_is_reported_changed(tmp_path, mon
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
 
-    def _delete(_root):
+    def _delete(_root, **_kwargs):
         shutil.rmtree(version)
         return None
 
@@ -2144,8 +2144,11 @@ def test_the_probe_sees_a_lock_held_by_the_fetcher_itself(tmp_path):
         data_root=root,
     )
     with fetcher._fetch_lock('a.dat', fetcher.target_dir / 'a.dat'):
-        assert prune_mod._lock_problem(root) == 'a fetch lock is held on the data root'
-    assert prune_mod._lock_problem(root) is None
+        assert (
+            prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+            == 'a fetch lock is held on the data root'
+        )
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_a_read_only_unheld_lock_file_does_not_block(tmp_path, monkeypatch):
@@ -2159,7 +2162,7 @@ def test_a_read_only_unheld_lock_file_does_not_block(tmp_path, monkeypatch):
     lock.write_text('')
     os.chmod(lock, 0o444)
     try:
-        assert prune_mod._lock_problem(root) is None
+        assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
         report = prune_versions(data_root=root, delete=True)
         assert not dirs['superseded'].exists()
         assert report.ok
@@ -2380,7 +2383,7 @@ def test_a_lock_path_that_is_a_file_blocks_deletion(tmp_path):
     root.mkdir()
     (root / _LOCK_DIRNAME).write_bytes(b'not a directory\n')
 
-    assert 'is not a directory' in prune_mod._lock_problem(root)
+    assert 'is not a directory' in prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
 
 
 def test_an_unreadable_lock_directory_blocks_deletion(tmp_path):
@@ -2393,7 +2396,9 @@ def test_an_unreadable_lock_directory_blocks_deletion(tmp_path):
     (lock_dir / 'a.lock').write_text('')
     os.chmod(lock_dir, 0)
     try:
-        assert prune_mod._lock_problem(root).startswith(f'cannot read {lock_dir}')
+        assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME).startswith(
+            f'cannot read {lock_dir}'
+        )
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2413,7 +2418,9 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
 
     monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _no_flock)
 
-    assert prune_mod._lock_problem(root).startswith('cannot test lock file')
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME).startswith(
+        'cannot test lock file'
+    )
 
 
 def test_a_lock_file_that_vanishes_before_it_is_opened_is_skipped(tmp_path, monkeypatch):
@@ -2429,7 +2436,7 @@ def test_a_lock_file_that_vanishes_before_it_is_opened_is_skipped(tmp_path, monk
 
     monkeypatch.setattr(fs_guard_mod, '_open_lock_fd', _gone)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_an_unlock_error_does_not_escape_the_probe(tmp_path, monkeypatch):
@@ -2450,7 +2457,7 @@ def test_an_unlock_error_does_not_escape_the_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _unlock_fails)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_apply_refuses_a_target_that_became_unrecognised(tmp_path, monkeypatch):
@@ -2518,7 +2525,10 @@ def test_locks_are_reported_uncheckable_without_no_follow_opens(tmp_path, monkey
     (_lock_dir(root) / 'a.lock').write_text('')
     monkeypatch.delattr(os, 'O_NOFOLLOW')
 
-    assert prune_mod._lock_problem(root) == 'fetch locks cannot be checked on this platform'
+    assert (
+        prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+        == 'fetch locks cannot be checked on this platform'
+    )
 
 
 # Round 6: probe before every removal, lock entries the fetcher cannot use.
@@ -2603,7 +2613,7 @@ def test_a_lock_entry_that_is_not_a_regular_file_blocks_unopened(tmp_path, monke
 
     monkeypatch.setattr('fwl_io.prune.os.open', _recording_open)
 
-    problem = prune_mod._lock_problem(root)
+    problem = prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
     report = prune_versions(data_root=root, delete=True)
 
     assert problem == f'lock file {entry} is not a regular file; fetch locks cannot be checked'
@@ -2652,7 +2662,10 @@ def test_an_unwritable_lock_file_that_is_held_still_blocks(tmp_path, monkeypatch
     fd = os.open(lock, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert prune_mod._lock_problem(root) == 'a fetch lock is held on the data root'
+        assert (
+            prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+            == 'a fetch lock is held on the data root'
+        )
     finally:
         os.close(fd)
         os.chmod(lock, stat.S_IRUSR | stat.S_IWUSR)
@@ -2781,7 +2794,7 @@ def test_a_lock_directory_that_cannot_be_searched_warns(tmp_path):
     lock_dir = _lock_dir(root)
     os.chmod(lock_dir, 0o666)
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2799,7 +2812,7 @@ def test_a_blocking_lock_entry_keeps_the_warnings_found_before_it(tmp_path):
     (lock_dir / 'odd.lock').mkdir()
     os.chmod(lock_dir, 0o555)
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2838,7 +2851,7 @@ def test_a_held_lock_keeps_the_warnings_found_before_it(tmp_path):
     os.chmod(lock_dir, 0o555)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.close(fd)
         os.chmod(lock_dir, stat.S_IRWXU)
@@ -2862,7 +2875,7 @@ def test_an_unwritable_lock_file_warning_survives_a_later_blocking_entry(tmp_pat
     os.chmod(theirs, 0o444)
     (lock_dir / 'zzzz.lock').mkdir()
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(theirs, stat.S_IRUSR | stat.S_IWUSR)
 
@@ -2886,9 +2899,9 @@ def test_the_probe_before_each_removal_skips_the_warning_checks(tmp_path, monkey
 
     monkeypatch.setattr('fwl_io.prune.os.access', _counting)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
     assert calls == []
-    assert prune_mod._lock_scan(root)[0] is None
+    assert prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)[0] is None
     assert calls, 'the full scan used for the report still checks access'
 
 
@@ -2907,7 +2920,7 @@ def test_an_unwritable_lock_directory_warning_names_what_is_missing(tmp_path):
     ):
         os.chmod(lock_dir, mode)
         try:
-            seen[word] = prune_mod._lock_scan(root)[1]
+            seen[word] = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)[1]
         finally:
             os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2948,5 +2961,5 @@ def test_a_failing_close_does_not_escape_the_lock_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr('fwl_io.prune.os.close', _close_fails)
 
-    assert prune_mod._lock_scan(root) == (None, ())
+    assert prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME) == (None, ())
     assert closed

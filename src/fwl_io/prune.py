@@ -44,7 +44,13 @@ import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
-from fwl_io.fetch import _RESERVED_DIRNAMES, _STAGING_DIRNAME, _STAMP_FILENAME, read_stamp
+from fwl_io.fetch import (
+    _LOCK_DIRNAME,
+    _RESERVED_DIRNAMES,
+    _STAGING_DIRNAME,
+    _STAMP_FILENAME,
+    read_stamp,
+)
 from fwl_io.fs_guard import (
     _delete_unsupported,
     _dir_size,
@@ -533,7 +539,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
-    lock_problem, lock_warnings = _lock_scan(root)
+    lock_problem, lock_warnings = _lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     symlink_targets: set[Path] = set()
     if for_delete:
         symlink_targets, symlink_error = _referenced_symlink_targets(referenced)
@@ -684,7 +690,7 @@ def _remove_checked(
         return _refuse(f'{problem}; not removed')
     if (before.st_dev, before.st_ino) in referenced_link_ids:
         return _refuse('a referenced file symlinks into this directory; not removed')
-    lock_problem = _lock_problem(root)
+    lock_problem = _lock_problem(root, lock_dirname=_LOCK_DIRNAME)
     if lock_problem is not None:
         return _refuse(f'{lock_problem}; not removed')
     staging = root / _STAGING_DIRNAME

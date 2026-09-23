@@ -25,8 +25,6 @@ try:
 except ImportError:  # Windows: no flock, so locks cannot be probed and deletion is refused
     fcntl = None
 
-from fwl_io.fetch import _LOCK_DIRNAME
-
 log = logging.getLogger('fwl.' + __name__)
 
 #: Whether this Python's rmtree resists symlink swaps, read once at import.
@@ -214,7 +212,9 @@ def _missing_access(path: Path) -> str | None:
     return 'searchable' if writable else 'writable'
 
 
-def _lock_scan(root: Path, *, with_warnings: bool = True) -> tuple[str | None, tuple[str, ...]]:
+def _lock_scan(
+    root: Path, *, lock_dirname: str, with_warnings: bool = True
+) -> tuple[str | None, tuple[str, ...]]:
     """Probe every fetch lock under ``root``: why deletion must wait, and warnings.
 
     A lock file name is an opaque hash of the path it guards, so the whole
@@ -237,7 +237,7 @@ def _lock_scan(root: Path, *, with_warnings: bool = True) -> tuple[str | None, t
         ``(problem, warnings)``: the reason deletion must wait, or ``None``,
         and the warning lines for the report.
     """
-    lock_dir = root / _LOCK_DIRNAME
+    lock_dir = root / lock_dirname
     warnings: list[str] = []
     unwritable = 0
 
@@ -255,7 +255,7 @@ def _lock_scan(root: Path, *, with_warnings: bool = True) -> tuple[str | None, t
         if with_warnings and not os.access(root, os.W_OK | os.X_OK):
             warnings.append(
                 f'{root} is not writable by this user, so a fetch by this user cannot create '
-                f'{_LOCK_DIRNAME} and {_UNLOCKED_FETCH}'
+                f'{lock_dirname} and {_UNLOCKED_FETCH}'
             )
         return _result(None)
     except OSError as exc:
@@ -321,9 +321,9 @@ def _try_lock_shared(fd: int) -> None:
     fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
 
 
-def _lock_problem(root: Path) -> str | None:
+def _lock_problem(root: Path, *, lock_dirname: str) -> str | None:
     """Why deletion must wait for a fetch lock, or ``None``; the reason only, no warnings."""
-    return _lock_scan(root, with_warnings=False)[0]
+    return _lock_scan(root, lock_dirname=lock_dirname, with_warnings=False)[0]
 
 
 #: Symlinks followed while tracing one link before giving up, the usual kernel limit.
