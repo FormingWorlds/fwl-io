@@ -26,14 +26,15 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
-from fwl_io.fs_guard import _inside
+from fwl_io.fs_guard import _inside, _open_dir_below, _open_or_make_dir_below
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
@@ -390,6 +391,33 @@ def _version_dir(ds: Dataset) -> str:
     return f'{ds.subdir}/r{zenodo_record_id(ds.zenodo)}'
 
 
+def _move_below_root(
+    root: Path, src_parent: tuple[str, ...], dst_parent: tuple[str, ...], filename: str
+) -> None:
+    """Move ``filename`` from ``root/src_parent`` to ``root/dst_parent``.
+
+    Both parents are opened as directory handles from ``root``, following no
+    symlink below it; the destination's parent is created the same no-follow
+    way if it does not exist yet. The source entry is re-checked to still be
+    a plain file, not a symlink, in the same call that moves it, so a symlink
+    swapped into either tree after the plan's containment check is refused
+    rather than moved through or renamed.
+    """
+    src_fd = _open_dir_below(root, src_parent)
+    try:
+        dst_fd = _open_or_make_dir_below(root, dst_parent)
+        try:
+            st = os.stat(filename, dir_fd=src_fd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                rel = '/'.join((*src_parent, filename))
+                raise OSError(f'{rel} is not a plain file; not moved')
+            os.replace(filename, filename, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+        finally:
+            os.close(dst_fd)
+    finally:
+        os.close(src_fd)
+
+
 def _move_one(entry: Relocation, root: Path) -> Relocation:
     """Move one verified legacy tree, leaving nothing half-moved behind."""
     assert entry.legacy_dir is not None and entry.target_dir is not None
@@ -405,13 +433,27 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
             target_dir=entry.target_dir,
             detail=f'{outside} resolves outside the data root {root}',
         )
+    try:
+        legacy_rel = entry.legacy_dir.relative_to(root).parts
+        target_rel = entry.target_dir.relative_to(root).parts
+    except ValueError as exc:
+        return Relocation(
+            entry.key,
+            UNRESOLVABLE,
+            legacy_dir=entry.legacy_dir,
+            target_dir=entry.target_dir,
+            detail=str(exc),
+        )
     done: list[str] = []
     try:
-        entry.target_dir.mkdir(parents=True, exist_ok=True)
         for name in entry.files:
-            destination = entry.target_dir / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(entry.legacy_dir / name, destination)
+            name_parts = PurePosixPath(name).parts
+            _move_below_root(
+                root,
+                legacy_rel + name_parts[:-1],
+                target_rel + name_parts[:-1],
+                name_parts[-1],
+            )
             done.append(name)
     except OSError as exc:
         # Put back what was moved, so a failure part way leaves the tree as it

@@ -438,10 +438,10 @@ def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, mo
     real_replace = module.os.replace
     calls = []
 
-    def failing_replace(src, dst):
+    def failing_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
         calls.append((str(src), str(dst)))
         if len(calls) == 1:
-            return real_replace(src, dst)
+            return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
         raise OSError(28, 'No space left on device')
 
     monkeypatch.setattr(module.os, 'replace', failing_replace)
@@ -459,6 +459,49 @@ def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, mo
     assert 'split between' in result.detail
     assert result.faulty
     assert len(calls) == 3, 'one move succeeded, one failed, one rollback was attempted'
+
+
+def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
+    """A symlink swapped into legacy_dir between the containment check and the move is refused.
+
+    Simulates the legacy directory being replaced by a symlink out of the
+    data root in the window between ``_move_one``'s containment check and the
+    directory-fd open that actually performs the move: the move must refuse
+    rather than follow the swapped-in symlink, and nothing may land in, or be
+    read from, the symlink's target.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import MOVED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    real_open = module._open_dir_below
+    swapped = []
+
+    def _swap_then_open(root_, parts):
+        if not swapped and parts == tuple(LEGACY.split('/')):
+            swapped.append(True)
+            for entry in list(legacy.iterdir()):
+                entry.unlink()
+            legacy.rmdir()
+            legacy.symlink_to(outside, target_is_directory=True)
+        return real_open(root_, parts)
+
+    monkeypatch.setattr(module, '_open_dir_below', _swap_then_open)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state != MOVED
+    assert not any((outside / name).exists() for name in CONTENTS)
+    assert not (root / TARGET).exists() or not any(
+        (root / TARGET / name).exists() for name in CONTENTS
+    )
 
 
 def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monkeypatch):
