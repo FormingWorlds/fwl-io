@@ -1196,7 +1196,7 @@ def test_downloader_drops_progress_when_pooch_binding_missing(tmp_path, monkeypa
     assert fetcher._downloader(f'doi:{ZENODO}/').progressbar is False
 
 
-def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path):
+def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path, capsys):
     """A download with ``progress=True`` completes through the installed tqdm.
 
     The other progress tests substitute pooch's tqdm binding; this one draws the
@@ -1209,6 +1209,7 @@ def test_fetch_with_progress_runs_through_real_tqdm(sample_files, tmp_path):
     assert fetcher._downloader(base_url).progressbar is True
     path = fetcher.fetch('alpha.dat')
     assert path.read_bytes() == b'0.1 0.2 0.3\n'
+    assert '100%' in capsys.readouterr().err
 
 
 def test_real_server_503_then_200_is_retried_and_served(tmp_path, monkeypatch):

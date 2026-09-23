@@ -1535,3 +1535,28 @@ def test_fetch_for_drops_progress_without_stderr(tmp_path, monkeypatch, caplog):
 
     assert seen['progress'] is False
     assert 'fwl-io[progress]' not in caplog.text
+
+
+def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(tmp_path, monkeypatch, caplog):
+    """Missing tqdm is still named when stderr is also gone; logging never falls back to stdout."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.setattr('pooch.downloaders.tqdm', None)
+    monkeypatch.setattr('sys.stderr', None)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' in caplog.text
+
+
+def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(tmp_path, monkeypatch, caplog):
+    """Without pooch's private tqdm binding the bar is dropped, but tqdm is not named."""
+    seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
+    monkeypatch.delattr('pooch.downloaders.tqdm', raising=False)
+
+    with caplog.at_level('WARNING'):
+        fetch_for('mymodel', data_root=tmp_path / 'data', progress=True)
+
+    assert seen['progress'] is False
+    assert 'fwl-io[progress]' not in caplog.text

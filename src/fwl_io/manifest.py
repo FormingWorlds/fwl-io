@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
@@ -613,14 +612,14 @@ def fetch_for(
         there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
         continues.
     """
-    from fwl_io.fetch import _progressbar_supported, create_fetcher
+    from fwl_io.fetch import _progressbar_unavailable, create_fetcher
 
-    if progress and not _progressbar_supported():
-        # Never fail a fetch over a cosmetic bar. With a stderr present, the
-        # only reason the bar is unsupported is a missing tqdm.
-        if sys.stderr is not None:
+    if progress:
+        # Never fail a fetch over a cosmetic bar; name the fix only when it is tqdm.
+        reason = _progressbar_unavailable()
+        if reason == 'tqdm':
             log.warning(_TQDM_HINT)
-        progress = False
+        progress = reason is None
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}

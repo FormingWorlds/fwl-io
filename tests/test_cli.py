@@ -539,6 +539,19 @@ def test_fetch_progress_dropped_without_stderr_even_with_tqdm(monkeypatch, capsy
 
 
 @pytest.mark.unit
+def test_fetch_progress_hint_not_printed_when_pooch_binding_missing(monkeypatch):
+    """Without pooch's private tqdm binding, ``--progress`` drops the bar without blaming tqdm."""
+    monkeypatch.delattr('pooch.downloaders.tqdm', raising=False)
+    fake_err = _FakeStderr(True)
+    monkeypatch.setattr('sys.stderr', fake_err)
+    seen = _capture_fetch_progress(monkeypatch)
+
+    assert main(['fetch', 'demo', '--progress']) == 0
+    assert seen['progress'] is False
+    assert 'pip install' not in fake_err.getvalue()
+
+
+@pytest.mark.unit
 def test_fetch_progress_auto_survives_stderr_with_raising_isatty(monkeypatch):
     """Auto mode resolves to no bar when ``stderr.isatty`` raises any exception.
 

@@ -50,14 +50,15 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 
 def _resolve_progress(requested: bool | None) -> bool:
-    """Resolve the fetch progress-bar setting, degrading if tqdm is absent.
+    """Resolve the fetch progress-bar setting, degrading if no bar can be drawn.
 
     ``requested`` is the parsed ``--progress`` / ``--no-progress`` flag; ``None``
-    means auto, on when stderr is a terminal. When a bar is wanted but tqdm is
-    not installed, return ``False`` so the download still runs without one. The
-    note naming the fix prints only when ``--progress`` was asked for explicitly,
-    so an auto-mode fetch on a terminal degrades without a message, and never when
-    there is no stderr, since ``print`` would then fall back to stdout. Auto mode
+    means auto, on when stderr is a terminal. When a bar is wanted but cannot be
+    drawn, return ``False`` so the download still runs without one. The note
+    naming the fix prints only when tqdm is the missing piece and ``--progress``
+    was asked for explicitly, so an auto-mode fetch on a terminal degrades
+    without a message, and never when there is no stderr, since ``print`` would
+    then fall back to stdout. Auto mode
     treats a missing, non-callable, or raising ``stderr.isatty`` as "not a
     terminal" so resolving the default never aborts the fetch.
     """
@@ -71,10 +72,11 @@ def _resolve_progress(requested: bool | None) -> bool:
         on = requested
     if not on:
         return False
-    from fwl_io.fetch import _progressbar_supported
+    from fwl_io.fetch import _progressbar_unavailable
 
-    if not _progressbar_supported():
-        if requested and sys.stderr is not None:
+    reason = _progressbar_unavailable()
+    if reason is not None:
+        if requested and reason == 'tqdm' and sys.stderr is not None:
             from fwl_io.manifest import _TQDM_HINT
 
             print(_TQDM_HINT, file=sys.stderr)
