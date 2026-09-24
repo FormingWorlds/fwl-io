@@ -1305,6 +1305,7 @@ def test_a_symlinked_directory_inside_a_registry_name_is_refused_at_plan_time(
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
     assert OPEN_REASON in report.entries[0].detail
+    assert f'{legacy / "sub"} is a symlink' in report.entries[0].detail
     assert (legacy / 'x.dat').is_file() and (root / 'realsub' / 'y.dat').is_file()
     assert not (root / TARGET).exists()
 
@@ -1322,6 +1323,7 @@ def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(tmp_path, mo
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
     assert OPEN_REASON in report.entries[0].detail
+    assert f'{root / "star"} is a symlink' in report.entries[0].detail
     assert (root / LEGACY / 'notes.txt').is_file()
     assert list((root / 'bigdisk_star').iterdir()) == []
 
@@ -1941,8 +1943,117 @@ def test_a_file_at_the_destination_stops_the_move_and_loses_nothing(tmp_path):
     assert not (root / TARGET / 'BHAC15_tracks.dat').exists(), 'the first move was put back'
 
 
-def test_a_name_list_is_sorted_whatever_order_it_arrives_in():
-    """The helper that joins names sorts them, so a set's iteration order never shows."""
-    from fwl_io.relocate import _list
+def _real_target(root, shape):
+    """An intact target whose files live behind a symlinked directory, with no legacy tree."""
+    elsewhere = root / 'elsewhere'
+    if shape == 'A':
+        (elsewhere / 'r').mkdir(parents=True)
+        for name, body in SUBTREE.items():
+            path = elsewhere / 'r' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        (root / TARGET).parent.mkdir(parents=True)
+        (root / TARGET).symlink_to(elsewhere / 'r', target_is_directory=True)
+    elif shape == 'C':
+        leaf = elsewhere / 'tracks' / 'baraffe_2015' / f'r{RECID}'
+        for name, body in SUBTREE.items():
+            (leaf / name).parent.mkdir(parents=True, exist_ok=True)
+            (leaf / name).write_bytes(body)
+        (root / 'star').symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (elsewhere / 'sub').mkdir(parents=True)
+        (elsewhere / 'sub' / 'a.dat').write_bytes(SUBTREE['sub/a.dat'])
+        (root / TARGET).mkdir(parents=True)
+        (root / TARGET / 'b.dat').write_bytes(SUBTREE['b.dat'])
+        (root / TARGET / 'sub').symlink_to(elsewhere / 'sub', target_is_directory=True)
 
-    assert _list(['b.dat', 'a.dat', 'c.dat']) == 'a.dat, b.dat, c.dat'
+
+@pytest.mark.parametrize('shape', ['A', 'C', 'N'])
+def test_an_intact_target_behind_a_symlinked_directory_stays_current_with_no_legacy(
+    tmp_path, monkeypatch, shape
+):
+    """With no legacy tree nothing moves, so an intact target on a second volume stays current."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    _real_target(root, shape)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ALREADY_CURRENT]
+    assert report.ok and report.redundant == ()
+
+
+def _link_legacy_dir(root):
+    """(a) The legacy directory is a symlink to the intact target directory."""
+    (root / LEGACY).parent.mkdir(parents=True)
+    (root / LEGACY).symlink_to(root / TARGET, target_is_directory=True)
+
+
+def _link_legacy_ancestor(root):
+    """(b) A legacy ancestor is a symlink to a directory whose leaf links to the target."""
+    (root / 'elsewhere').mkdir()
+    (root / 'elsewhere' / 'Baraffe').symlink_to(root / TARGET, target_is_directory=True)
+    (root / 'stellar_evolution_tracks').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+
+def _link_legacy_subdir(root):
+    """(c) A plain legacy directory whose ``sub`` is a symlink to the target's ``sub``."""
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / LEGACY / 'sub').symlink_to(root / TARGET / 'sub', target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    'link', [_link_legacy_dir, _link_legacy_ancestor, _link_legacy_subdir], ids=['a', 'b', 'c']
+)
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_legacy_copy_that_leads_back_to_the_target_is_never_called_redundant(
+    tmp_path, monkeypatch, link, dry_run
+):
+    """Deleting a legacy copy that is a symlink into the target would delete the target itself."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    for name, body in SUBTREE.items():
+        (root / TARGET / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / TARGET / name).write_bytes(body)
+    link(root)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    [entry] = report.entries
+    assert entry.state == UNRESOLVABLE, entry.detail
+    assert report.redundant == ()
+    assert 'redundant' not in entry.detail
+    assert all((root / TARGET / n).read_bytes() == b for n, b in SUBTREE.items())
+
+
+def test_a_name_behind_a_symlinked_target_directory_is_not_counted_absent(tmp_path, monkeypatch):
+    """A file not verified because its directory is a symlink is named, not left to be fetched."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / 'elsewhere').mkdir()
+    (root / 'elsewhere' / 'a.dat').write_bytes(SUBTREE['sub/a.dat'])
+    (root / TARGET).mkdir(parents=True)
+    (root / TARGET / 'sub').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == READY
+    assert 'sub/a.dat at ' in entry.detail
+    assert ' is behind a symlinked directory, not verified' in entry.detail
+    assert 'absent' not in entry.detail
+
+
+def test_a_registry_name_with_a_nul_byte_is_refused_not_reported_absent(tmp_path, monkeypatch):
+    """A name that cannot be a path is a registry fault, whether or not a legacy tree exists."""
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text('a\0b.dat sha256:aa\n')
+    root = tmp_path / 'data'
+    root.mkdir()
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'NUL byte' in report.entries[0].detail

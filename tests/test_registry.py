@@ -32,7 +32,9 @@ def test_nested_names_allowed(tmp_path):
     assert load_registry(path) == {'sub/nested.dat': 'sha256:aaa'}
 
 
-@pytest.mark.parametrize('name', ['../escape.dat', '/etc/passwd', 'a/../../b.dat', 'a\\b.dat'])
+@pytest.mark.parametrize(
+    'name', ['../escape.dat', '/etc/passwd', 'a/../../b.dat', 'a\\b.dat', 'a\0b.dat']
+)
 def test_traversal_names_rejected_on_load(tmp_path, name):
     path = tmp_path / 'reg.txt'
     path.write_text(f'{name} sha256:aaa\n')
@@ -40,7 +42,7 @@ def test_traversal_names_rejected_on_load(tmp_path, name):
         load_registry(path)
 
 
-@pytest.mark.parametrize('name', ['../escape.dat', '/abs.dat', 'a b.dat'])
+@pytest.mark.parametrize('name', ['../escape.dat', '/abs.dat', 'a b.dat', 'a\0b.dat'])
 def test_traversal_names_rejected_on_write(tmp_path, name):
     with pytest.raises(ValueError):
         write_registry(tmp_path / 'reg.txt', {name: 'sha256:aaa'})

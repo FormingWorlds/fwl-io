@@ -315,8 +315,10 @@ def _classify(
         never masks a corrupt one, and so does a legacy file that would replace
         a different entry at the target, which is never overwritten.
     """
+    if legacy_present and legacy_dir.is_symlink():
+        return UNRESOLVABLE, f'{legacy_dir} is a symlink, not a plain directory; not moved', ()
     try:
-        intact, other = _held(target_dir, registry, root)
+        intact, other, skipped = _held(target_dir, registry, root, strict=legacy_present)
     except (OSError, ValueError):
         if legacy_present:
             raise
@@ -324,6 +326,16 @@ def _classify(
     if intact and len(intact) == len(registry):
         detail = f'already at {target_dir}'
         if legacy_present:
+            linked = [n for n in registry if _way(root, legacy_dir / n) == _LINKED]
+            if linked:
+                # A symlinked directory on the legacy side can lead back to the
+                # target, so deleting the "redundant" copy would delete the target.
+                return (
+                    UNRESOLVABLE,
+                    f'{_list(linked)} in {legacy_dir} {_agree(linked, "is", "are")} behind a '
+                    'symlinked directory, which may lead back to the target; left alone',
+                    (),
+                )
             # Both copies are intact, so the legacy one is redundant rather
             # than needed. Naming it is as far as this goes: deleting data the
             # user has not asked to lose is not this command's business.
@@ -331,8 +343,6 @@ def _classify(
         return ALREADY_CURRENT, detail, ()
     if not legacy_present:
         return ABSENT, '', ()
-    if legacy_dir.is_symlink():
-        return UNRESOLVABLE, f'{legacy_dir} is a symlink, not a plain directory; not moved', ()
     try:
         present, linked = [], []
         for name in registry:
@@ -351,11 +361,16 @@ def _classify(
             (),
         )
     differ = []
+    if skipped:
+        differ.append(
+            f'{_list(skipped)} at {target_dir} {_agree(skipped, "is", "are")} behind a '
+            'symlinked directory, not verified'
+        )
     if other:
-        differ = [
+        differ.append(
             f'{_list(other)} at {target_dir} {_agree(other, "differs", "differ")} '
             f'from the registry, left alone{_REPAIR}'
-        ]
+        )
     if present:
         try:
             wrong = [n for n in present if not _hash_matches(legacy_dir / n, registry[n])]
@@ -393,7 +408,7 @@ def _classify(
         # A partly moved tree seen again: what is left is the fetcher's to fill in.
         held = f'{len(intact)} of {len(registry)} file(s) already at {target_dir}'
         return ABSENT, '; '.join([held, f'nothing in {legacy_dir} to move', *differ]), ()
-    absent = sorted(set(registry) - set(present) - intact - other)
+    absent = sorted(set(registry) - set(present) - intact - other - skipped)
     notes = []
     if absent:
         notes.append(
@@ -406,11 +421,15 @@ def _classify(
     return READY, '; '.join(notes), moving
 
 
-def _plain_way(root: Path, path: Path) -> bool:
-    """True when every directory of ``path`` below ``root`` is a plain directory.
+_PLAIN, _ABSENT, _LINKED = 'plain', 'absent', 'linked'
 
-    A component that is absent, a symlink or not a directory means no file at
-    ``path`` can be shown to be the registry file, so it is not held.
+
+def _way(root: Path, path: Path) -> str:
+    """How ``path`` is reached below ``root``: ``plain``, ``absent`` or ``linked``.
+
+    ``plain`` means every directory on the way is a plain directory. ``absent``
+    means one does not exist. ``linked`` means one is a symlink or is not a
+    directory, so what lies behind it is not necessarily this tree's own.
 
     Raises
     ------
@@ -422,20 +441,23 @@ def _plain_way(root: Path, path: Path) -> bool:
         walked = walked / part
         try:
             if not stat.S_ISDIR(os.lstat(walked).st_mode):
-                return False
+                return _LINKED
         except FileNotFoundError:
-            return False
-    return True
+            return _ABSENT
+    return _PLAIN
 
 
-def _held(directory: Path, registry: dict[str, str], root: Path) -> tuple[set[str], set[str]]:
-    """Registry names ``directory`` holds as an intact file, and as any other entry.
+def _held(
+    directory: Path, registry: dict[str, str], root: Path, strict: bool = True
+) -> tuple[set[str], set[str], set[str]]:
+    """Registry names ``directory`` holds as an intact file, as any other entry, or not verified.
 
     Intact is a regular file, not a symlink, whose digest matches, reached
     through plain directories below ``root``. A differing file, a symlink, a
     dangling symlink or a directory under a registry name is the other kind: a
     move would replace it. A file behind a symlinked or non-directory parent is
-    neither, because the move refuses that path itself.
+    skipped, because the move refuses that path itself; ``strict=False`` looks
+    at the file alone, for a target nothing is moved into.
 
     Raises
     ------
@@ -443,18 +465,23 @@ def _held(directory: Path, registry: dict[str, str], root: Path) -> tuple[set[st
         When an entry cannot be examined, for example because a directory on
         the way cannot be searched.
     """
-    intact, other = set(), set()
+    intact, other, skipped = set(), set(), set()
+    ways: dict[Path, str] = {}
     for name, digest in registry.items():
         path = directory / name
-        if not _plain_way(root, path):
-            continue
+        if strict:
+            if path.parent not in ways:
+                ways[path.parent] = _way(root, path)
+            if ways[path.parent] == _LINKED:
+                skipped.add(name)
+                continue
         try:
             mode = os.lstat(path).st_mode
         except (FileNotFoundError, NotADirectoryError):
             continue
         ok = stat.S_ISREG(mode) and _hash_matches(path, digest)
         (intact if ok else other).add(name)
-    return intact, other
+    return intact, other, skipped
 
 
 def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path) -> str | None:
@@ -469,13 +496,36 @@ def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: P
         return unsupported
     legacy_rel = legacy_dir.relative_to(root).parts
     target_rel = target_dir.relative_to(root).parts
-    try:
-        for parent in {PurePosixPath(name).parts[:-1] for name in names}:
+    for parent in sorted({PurePosixPath(name).parts[:-1] for name in names}):
+        try:
             os.close(_open_dir_below(root, legacy_rel + parent))
+        except OSError as exc:
+            return f'{legacy_dir} cannot be safely opened: {_why(root, legacy_rel + parent, exc)}'
+        try:
             _probe_dir_below(root, target_rel + parent)
-    except OSError as exc:
-        return f'{legacy_dir} or {target_dir} cannot be safely opened: {exc}'
+        except OSError as exc:
+            return f'{target_dir} cannot be safely opened: {_why(root, target_rel + parent, exc)}'
     return None
+
+
+def _why(root: Path, parts: tuple[str, ...], exc: OSError) -> str:
+    """Name the symlink or file that stopped an open, or fall back to the error text.
+
+    The no-follow open reports a symlink as "Not a directory", which sends a
+    reader looking for a file that is not there.
+    """
+    walked = root
+    for part in parts:
+        walked = walked / part
+        try:
+            mode = os.lstat(walked).st_mode
+        except OSError:
+            break
+        if stat.S_ISLNK(mode):
+            return f'{walked} is a symlink'
+        if not stat.S_ISDIR(mode):
+            return f'{walked} is not a directory'
+    return str(exc)
 
 
 def _assess(
