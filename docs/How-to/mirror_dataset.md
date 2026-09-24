@@ -24,7 +24,9 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
 ## When a run fails
 
-DataverseNL sometimes answers an API call with its bot-check page (an HTML page titled "Oh noes!") or a 502, 503 or 504 gateway error. The mirror repeats such a call up to 5 times, waiting 30, 60, 120 and 240 s in between. Before it sends a file again, it lists the draft and skips a file that arrived; a different file of the same name stops the run. When the calls keep failing, or any other error occurs, the run deletes the draft it created, with the same retries, and the error names the call and the last response. If that deletion also fails, the log names the draft to delete by hand.
+DataverseNL sometimes answers an API call with its bot-check page (an HTML page titled "Oh noes!"), a 502, 503 or 504 gateway error, or not at all. The mirror repeats a file upload, the publish and the draft deletion up to 5 times, waiting 30, 60, 120 and 240 s in between. Before it sends a file again, it lists the draft and skips a file that arrived; a different file of the same name stops the run. Before it publishes, it checks that the draft holds exactly the Zenodo files, with the same sizes and checksums.
+
+The dataset creation is not repeated, since a repeat could create a second draft: when it fails, look in the collection for a draft the run did not report. When a later step fails, the run deletes the draft it created, with the same retries, and the error names the call and the last response. If that deletion also fails, the log names the draft to delete by hand. If no publish reply gets through, the dataset may be public already, so the run keeps it and logs its DOI. Check its state by hand.
 
 ## Publishing a reviewed draft
 

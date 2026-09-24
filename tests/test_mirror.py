@@ -1361,7 +1361,8 @@ def test_bot_check_page_on_add_is_retried_with_the_file_reopened(
     assert len(_adds(calls, 'a.dat')) == 3
     assert all(b'AAA\n' in c['body'] for c in _adds(calls, 'a.dat'))
     assert sleeps == [30.0, 60.0]
-    assert sum(c['path'].endswith('/versions/:draft/files') for c in calls) == 2
+    # One listing before each resend, one for the file-set check.
+    assert sum(c['path'].endswith('/versions/:draft/files') for c in calls) == 3
     assert not any(c['method'] == 'DELETE' for c in calls)
 
 
@@ -1385,7 +1386,7 @@ def test_a_different_file_of_the_same_name_in_the_draft_stops_the_upload(
     _DataverseHandler.draft_files = [
         {'filename': 'a.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
     ]
-    with pytest.raises(DataverseError, match='different file named a.dat'):
+    with pytest.raises(DataverseError, match='holds a file named a.dat that is not the same file'):
         _mirror(http_server, dataverse_server)
     assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 1
     assert _DataverseHandler.deleted
@@ -1415,7 +1416,7 @@ def test_retries_run_out_with_a_message_naming_the_bot_check_page(
     from fwl_io.mirror import DataverseRetryableError
 
     _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 5}
-    with pytest.raises(DataverseRetryableError, match='all 5 attempts.*bot-check page'):
+    with pytest.raises(DataverseRetryableError, match='sent 5 time.*in 5 attempts.*bot-check page'):
         _mirror(http_server, dataverse_server)
     assert sleeps == [30.0, 60.0, 120.0, 240.0]
     assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 5
@@ -1488,3 +1489,159 @@ def test_an_html_body_without_the_bot_check_marker_is_not_retried(sleeps):
         requests.request = orig
     assert not isinstance(info.value, DataverseRetryableError)
     assert sleeps == []
+
+
+@pytest.mark.unit
+def test_bot_check_detection_ignores_header_case_and_needs_html():
+    """An upper-case text/html header is detected; the marker in a JSON body is not."""
+    import requests
+
+    from fwl_io.mirror import DataverseRetryableError
+
+    page = _fake_response(403, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'TEXT/HTML; charset=UTF-8'
+    json_body = _fake_response(200, b'{"status": "OK", "message": "Oh noes!"}')
+    json_body.headers['Content-Type'] = 'application/json'
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    try:
+        requests.request = lambda *args, **kwargs: page
+        with pytest.raises(DataverseRetryableError, match='bot-check page'):
+            client._request('GET', '/api/x')
+        requests.request = lambda *args, **kwargs: json_body
+        assert client._request('GET', '/api/x') == {'status': 'OK', 'message': 'Oh noes!'}
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('kind', 'expected'),
+    [('SHA-256', True), ('SHA-512', True), ('SHA-1', True), ('MD5', True), ('CRC32C', False)],
+)
+def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
+    """A listed file matches only with its size and a checksum of a known type."""
+    from fwl_io.mirror import _same_file
+
+    path = tmp_path / 'a.dat'
+    path.write_bytes(b'AAAA')
+    algorithm = {'SHA-256': 'sha256', 'SHA-512': 'sha512', 'SHA-1': 'sha1'}.get(kind, 'md5')
+    value = hashlib.new(algorithm, b'AAAA').hexdigest()
+    entry = {'filesize': 4, 'checksum': {'type': kind, 'value': value}}
+    assert _same_file(entry, path) is expected
+    other = {
+        'filesize': 4,
+        'checksum': {'type': kind, 'value': hashlib.new(algorithm, b'ZZZZ').hexdigest()},
+    }
+    assert _same_file(other, path) is False
+
+
+@pytest.mark.unit
+def test_a_timeout_is_retried(sleeps):
+    """A read timeout may hide a request that went through, so it is retried."""
+    import requests
+
+    replies = [requests.Timeout('read timed out'), _fake_response(404, b'{"status": "ERROR"}')]
+
+    def fake(*args, **kwargs):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = fake
+    try:
+        client.delete_draft('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert sleeps == [30.0]
+    assert replies == []
+
+
+def test_a_bot_check_page_on_the_listing_counts_as_an_attempt(
+    http_server, dataverse_server, sleeps
+):
+    """A challenged listing uses an attempt; the upload is sent again once the listing works."""
+    _DataverseHandler.script = {
+        ('POST', '/add'): ['challenge', 'challenge'],
+        ('GET', '/versions/:draft/files'): ['challenge'],
+    }
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 3
+    assert sleeps == [30.0, 60.0, 120.0]
+
+
+def test_the_final_error_counts_the_calls_actually_sent(http_server, dataverse_server, sleeps):
+    """A challenged listing uses an attempt, so 5 attempts sent the upload 4 times."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {
+        ('POST', '/add'): ['challenge'] * 4,
+        ('GET', '/versions/:draft/files'): ['challenge'],
+    }
+    with pytest.raises(DataverseRetryableError, match=r'sent 4 time\(s\) in 5 attempts'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 4
+
+
+def test_create_is_not_retried(http_server, dataverse_server, sleeps):
+    """A bot-check page on create stops at once: a repeat could mint a second draft."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('POST', '/datasets'): ['challenge']}
+    with pytest.raises(DataverseRetryableError, match='bot-check page'):
+        _mirror(http_server, dataverse_server)
+    creates = [c for c in _DataverseHandler.calls if c['path'].endswith('/datasets')]
+    assert len(creates) == 1
+    assert sleeps == []
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+
+
+def test_a_failed_deletion_check_is_reported_not_counted_as_deleted(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """Only a 404 means deleted; another error on the check leaves the draft to delete by hand."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script = {
+        ('DELETE', '/api/datasets/:persistentId'): ['challenge'],
+        ('GET', '/api/datasets/:persistentId'): [500],
+    }
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    assert 'could not roll back' in caplog.text
+    assert not _DataverseHandler.deleted
+
+
+def test_publish_refuses_an_already_published_dataset(dataverse_server, sleeps):
+    """A published dataset is reported, not published again or passed as success."""
+    dv_url, calls = dataverse_server
+    _DataverseHandler.released = True
+    client = DataverseClient(dv_url, 'tok')
+    with pytest.raises(DataverseError, match='already published'):
+        client.publish('doi:10.34894/DEMO01')
+    assert not any(c['path'].endswith('/actions/:publish') for c in calls)
+
+
+def test_an_unconfirmed_publish_keeps_the_dataset(http_server, dataverse_server, sleeps, caplog):
+    """When no publish reply gets through, the dataset may be public, so it is not deleted."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('POST', '/actions/:publish'): ['challenge'] * 5}
+    with pytest.raises(DataverseRetryableError, match='publish of doi:10.34894/DEMO01'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+    assert 'not confirmed' in caplog.text
+
+
+def test_an_extra_file_in_the_draft_stops_the_mirror(http_server, dataverse_server, sleeps):
+    """A draft that holds a file Zenodo does not (e.g. a renamed second upload) is rolled back."""
+    _DataverseHandler.draft_files = [
+        {'filename': 'a-1.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
+    ]
+    with pytest.raises(DataverseError, match=r"not expected \['a-1.dat'\]"):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
+    assert _DataverseHandler.deleted

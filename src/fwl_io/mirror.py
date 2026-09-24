@@ -153,6 +153,22 @@ def zenodo_record_to_citation(
     return {'datasetVersion': {'metadataBlocks': {'citation': {'fields': fields}}}}
 
 
+_ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
+
+
+def _same_file(entry: dict, path: Path) -> bool:
+    """Return whether a Dataverse file entry has the size and checksum of ``path``.
+
+    An entry without a checksum of a known type does not count as the same file.
+    """
+    checksum = entry.get('checksum') or {}
+    algorithm = _ALGORITHMS.get(checksum.get('type'))
+    if algorithm is None or entry.get('filesize') != path.stat().st_size:
+        return False
+    with path.open('rb') as handle:
+        return hashlib.file_digest(handle, algorithm).hexdigest() == checksum.get('value')
+
+
 class DataverseClient:
     """Thin client over the Dataverse native API for the mirror operations."""
 
@@ -189,9 +205,10 @@ class DataverseClient:
         ------
         DataverseRetryableError
             If the response is the DataverseNL bot-check page (text/html with
-            its "Oh noes!" marker) or a 502, 503 or 504 gateway error.
+            its "Oh noes!" marker), a 502, 503 or 504 gateway error, or the
+            connection fails or times out.
         DataverseError
-            If the HTTP transport fails, the response status is 400 or
+            If another transport error occurs, the response status is 400 or
             higher, or a non-empty successful body fails to parse as JSON or
             parses to something other than a JSON object.
         """
@@ -203,12 +220,12 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            # The request may have reached Dataverse, like a gateway error.
+            raise DataverseRetryableError(f'Dataverse {method} {path} failed: {exc}') from exc
         except requests.RequestException as exc:
-            # A transport failure (connection error, timeout, DNS) is a failed
-            # native-API request too; surface it as a DataverseError so every
-            # Dataverse-side failure is one error type for callers to catch.
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
-        if 'text/html' in response.headers.get('Content-Type', '') and any(
+        if 'text/html' in response.headers.get('Content-Type', '').lower() and any(
             marker in response.text for marker in _CHALLENGE_MARKERS
         ):
             raise DataverseRetryableError(
@@ -262,15 +279,18 @@ class DataverseClient:
             If every attempt hit the bot-check page or a gateway error; the
             message names the call and the last response.
         """
+        sent = 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 if attempt > 1 and done is not None and done():
-                    return
+                    return None
+                sent += 1
                 return call()
             except DataverseRetryableError as exc:
                 if attempt == MAX_ATTEMPTS:
                     raise DataverseRetryableError(
-                        f'{what} failed on all {MAX_ATTEMPTS} attempts; last: {exc}',
+                        f'{what} failed: sent {sent} time(s) in {MAX_ATTEMPTS} attempts; '
+                        f'last: {exc}',
                         exc.status_code,
                     ) from exc
                 delay = min(BACKOFF_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
@@ -284,18 +304,15 @@ class DataverseClient:
                 )
                 _sleep(delay)
 
-    def _draft_file(self, persistent_id: str, name: str) -> dict | None:
-        """Return the draft's metadata for the file called ``name``, or None."""
+    def _draft_files(self, persistent_id: str) -> dict:
+        """Return the draft's file metadata keyed by file name."""
         body = self._request(
             'GET',
             '/api/datasets/:persistentId/versions/:draft/files',
             params={'persistentId': persistent_id},
         )
-        for entry in body.get('data', []):
-            data_file = entry.get('dataFile', {})
-            if data_file.get('filename') == name:
-                return data_file
-        return None
+        files = [entry.get('dataFile') or {} for entry in body.get('data') or []]
+        return {f.get('filename'): f for f in files}
 
     def _file_arrived(self, persistent_id: str, path: Path) -> bool:
         """Return whether ``path`` is already in the draft, byte for byte.
@@ -305,18 +322,13 @@ class DataverseClient:
         DataverseError
             If the draft holds a different file of the same name.
         """
-        entry = self._draft_file(persistent_id, path.name)
+        entry = self._draft_files(persistent_id).get(path.name)
         if entry is None:
             return False
-        checksum = entry.get('checksum') or {}
-        algorithm = {'MD5': 'md5', 'SHA-1': 'sha1'}.get(checksum.get('type'))
-        same = entry.get('filesize') == path.stat().st_size
-        if same and algorithm is not None:
-            with path.open('rb') as handle:
-                same = hashlib.file_digest(handle, algorithm).hexdigest() == checksum.get('value')
-        if not same:
+        if not _same_file(entry, path):
             raise DataverseError(
-                f'draft {persistent_id} already holds a different file named {path.name}'
+                f'draft {persistent_id} holds a file named {path.name} that is not the same '
+                'file (size or checksum differs, or the checksum type is unknown)'
             )
         log.info(
             '%s arrived in %s despite the failed response; not sending it again',
@@ -324,6 +336,25 @@ class DataverseClient:
             persistent_id,
         )
         return True
+
+    def check_draft(self, persistent_id: str, files: dict[str, Path]) -> None:
+        """Check that the draft holds exactly ``files``, each with its size and checksum.
+
+        Raises
+        ------
+        DataverseError
+            If a file is missing or differs, or the draft holds another file.
+        """
+        listed = self._retry(
+            lambda: self._draft_files(persistent_id), f'file listing of {persistent_id}'
+        )
+        wrong = sorted(n for n, p in files.items() if not _same_file(listed.get(n, {}), p))
+        extra = sorted(set(listed) - set(files))
+        if wrong or extra:
+            raise DataverseError(
+                f'draft {persistent_id} does not match the Zenodo files: '
+                f'missing or different {wrong}, not expected {extra}'
+            )
 
     def _released(self, persistent_id: str) -> bool:
         """Return whether the dataset's latest version is published."""
@@ -374,7 +405,15 @@ class DataverseClient:
         )
 
     def publish(self, persistent_id: str, *, version_type: str = 'major') -> None:
-        """Publish a dataset, making its files publicly downloadable."""
+        """Publish a dataset, making its files publicly downloadable.
+
+        Raises
+        ------
+        DataverseError
+            If the dataset is already published before the call.
+        """
+        if self._retry(lambda: self._released(persistent_id), f'state check of {persistent_id}'):
+            raise DataverseError(f'{persistent_id} is already published')
         self._retry(
             lambda: self._post(
                 '/api/datasets/:persistentId/actions/:publish',
@@ -558,14 +597,21 @@ def mirror_to_dataverse(
         log.info('created Dataverse dataset %s', persistent_id)
         # From here the draft exists with a real DOI: on any failure before
         # publish, delete it so a failed run leaves no orphaned deposit behind.
+        publishing = False
         try:
             for name in sorted(files):
                 client.add_file(persistent_id, files[name])
                 log.info('uploaded %s', name)
+            client.check_draft(persistent_id, files)
             if publish:
+                publishing = True
                 client.publish(persistent_id)
                 log.info('published %s', persistent_id)
-        except Exception:
+        except Exception as exc:
+            if publishing and isinstance(exc, DataverseRetryableError):
+                # The dataset may be published already, so it is not deleted.
+                log.error('publish of %s not confirmed; check its state by hand', persistent_id)
+                raise
             try:
                 client.delete_draft(persistent_id)
                 log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)
