@@ -62,17 +62,25 @@ _sleep = time.sleep
 class DataverseError(RuntimeError):
     """A Dataverse native-API request failed."""
 
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None, body=None):
         super().__init__(message)
         self.status_code = status_code
+        self.body = body
 
 
 class DataverseRetryableError(DataverseError):
-    """A Dataverse call hit the bot-check page, a gateway error, a 429 or a lost connection."""
+    """A Dataverse call hit the bot-check page, a gateway error, a 429 or a lost connection.
 
-    def __init__(self, message: str, status_code: int | None = None, retry_after=None):
+    ``unprocessed`` is True when the reply shows that Dataverse did not process
+    the request (the bot-check page or a 429), so a resend cannot repeat it.
+    """
+
+    def __init__(
+        self, message: str, status_code: int | None = None, retry_after=None, unprocessed=False
+    ):
         super().__init__(message, status_code)
         self.retry_after = retry_after
+        self.unprocessed = unprocessed
 
 
 def _cert_failure(exc: BaseException) -> bool:
@@ -92,6 +100,10 @@ def _cert_failure(exc: BaseException) -> bool:
 
 class DataversePublishUnconfirmed(DataverseError):
     """A publish request was sent, but whether it took effect is not known."""
+
+
+class DataverseAlreadyPublished(DataverseError):
+    """The dataset was already published before the publish request."""
 
 
 def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
@@ -180,6 +192,11 @@ def zenodo_record_to_citation(
 _ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
 
 
+def _draft_path(directory_label, filename) -> str:
+    """Return the path of a draft file; the mirror uploads every file with no folder label."""
+    return '/'.join(filter(None, (directory_label, filename)))
+
+
 def _same_file(entry: dict, path: Path) -> bool:
     """Return whether a Dataverse file entry has the size and checksum of ``path``.
 
@@ -247,8 +264,6 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
-        except requests.exceptions.ProxyError as exc:
-            raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
         except (
             requests.ConnectionError,
             requests.Timeout,
@@ -267,6 +282,7 @@ class DataverseClient:
                 f'Dataverse {method} {path} returned its bot-check page '
                 f'({response.status_code}, text/html, "Oh noes!") instead of an API response',
                 response.status_code,
+                unprocessed=True,
             )
         if response.status_code in _RETRY_STATUSES:
             wait = response.headers.get('Retry-After', '') if response.status_code == 429 else ''
@@ -274,11 +290,17 @@ class DataverseClient:
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
                 response.status_code,
                 float(wait) if wait.isdecimal() else None,
+                unprocessed=response.status_code == 429,
             )
         if not response.ok:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
             raise DataverseError(
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
                 response.status_code,
+                body,
             )
         if not response.content:
             # A 2xx with an empty body (routine for a DELETE) is a success
@@ -348,16 +370,24 @@ class DataverseClient:
                 _sleep(delay)
 
     def _draft_files(self, persistent_id: str) -> dict:
-        """Return the draft's file metadata keyed by path (folder label, file name)."""
+        """Return the draft's file metadata keyed by path (folder label, file name).
+
+        Raises
+        ------
+        DataverseError
+            If the draft lists a path more than once.
+        """
         body = self._request(
             'GET',
             '/api/datasets/:persistentId/versions/:draft/files',
             params={'persistentId': persistent_id},
         )
         files = [entry.get('dataFile') or {} for entry in body.get('data') or []]
-        return {
-            '/'.join(filter(None, (f.get('directoryLabel'), f.get('filename')))): f for f in files
-        }
+        keys = [_draft_path(f.get('directoryLabel'), f.get('filename')) for f in files]
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        if dupes:
+            raise DataverseError(f'draft {persistent_id} lists {dupes} more than once')
+        return dict(zip(keys, files, strict=True))
 
     def _file_arrived(self, persistent_id: str, path: Path) -> bool:
         """Return whether ``path`` is already in the draft, byte for byte.
@@ -367,7 +397,7 @@ class DataverseClient:
         DataverseError
             If the draft holds a different file of the same name.
         """
-        entry = self._draft_files(persistent_id).get(path.name)
+        entry = self._draft_files(persistent_id).get(_draft_path(None, path.name))
         if entry is None:
             return False
         if not _same_file(entry, path):
@@ -412,13 +442,17 @@ class DataverseClient:
         return version.get('versionState') == 'RELEASED'
 
     def _deleted(self, persistent_id: str) -> bool:
-        """Return whether the dataset is gone (404)."""
+        """Return whether the dataset is gone: a 404 with a Dataverse JSON error body.
+
+        A 404 page from a proxy or the bot-check page does not count.
+        """
         try:
             self._request(
                 'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
             )
         except DataverseError as exc:
-            if exc.status_code == 404:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            if exc.status_code == 404 and body.get('status') == 'ERROR':
                 return True
             raise
         return False
@@ -455,44 +489,95 @@ class DataverseClient:
     def publish(self, persistent_id: str, *, version_type: str = 'major') -> None:
         """Publish a dataset, making its files publicly downloadable.
 
+        The request is sent again only after a reply that shows Dataverse did
+        not process it (the bot-check page or a 429). After any other outcome,
+        including a 2xx, the dataset state is polled until it is RELEASED.
+
         Raises
         ------
+        DataverseAlreadyPublished
+            If the dataset is already published before the call.
         DataverseError
-            If the dataset is already published before the call, or Dataverse
-            rejects the publish request.
+            If Dataverse rejects the publish request with a 4xx status.
         DataversePublishUnconfirmed
-            If a publish request got any reply other than a 4xx, or none; its
-            effect is then unknown.
+            If the dataset is not RELEASED after the wait, or every attempt got
+            the bot-check page or a 429; its state is then unknown.
         """
         if self._retry(lambda: self._released(persistent_id), f'state check of {persistent_id}'):
-            raise DataverseError(f'{persistent_id} is already published')
-        sent, unclear = [], []
-
-        def post():
-            sent.append(True)
+            raise DataverseAlreadyPublished(f'{persistent_id} is already published')
+        what = f'publish of {persistent_id}'
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                self._post(
+                if attempt > 1 and self._released(persistent_id):
+                    return
+            except DataverseError:
+                pass
+            try:
+                reply = self._post(
                     '/api/datasets/:persistentId/actions/:publish',
                     params={'persistentId': persistent_id, 'type': version_type},
                 )
+            except DataverseRetryableError as exc:
+                if not exc.unprocessed:
+                    return self._await_release(persistent_id, attempt, exc)
+                if attempt == MAX_ATTEMPTS:
+                    raise DataversePublishUnconfirmed(
+                        f'{what} not confirmed: sent {attempt} time(s), each answered with '
+                        f'the bot-check page or a 429; last: {exc}',
+                        exc.status_code,
+                    ) from exc
+                delay = (
+                    BACKOFF_S * 2 ** (attempt - 1) if exc.retry_after is None else exc.retry_after
+                )
+                delay = min(delay, BACKOFF_CAP_S)
+                log.warning(
+                    '%s (attempt %d of %d): %s; retrying in %.0f s',
+                    what,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    exc,
+                    delay,
+                )
+                _sleep(delay)
             except Exception as exc:
-                # Only a 4xx shows the request had no effect.
-                if not 400 <= (getattr(exc, 'status_code', None) or 0) < 500:
-                    unclear.append(True)
-                raise
+                if isinstance(exc, DataverseError) and 400 <= (exc.status_code or 0) < 500:
+                    raise
+                return self._await_release(persistent_id, attempt, exc)
+            else:
+                return self._await_release(persistent_id, attempt, f'accepted ({reply})')
 
-        try:
-            self._retry(
-                post, f'publish of {persistent_id}', done=lambda: self._released(persistent_id)
-            )
-        except Exception as exc:
-            if unclear:
-                raise DataversePublishUnconfirmed(
-                    f'publish of {persistent_id} not confirmed (request sent {len(sent)} '
-                    f'time(s)); last error: {exc}',
-                    getattr(exc, 'status_code', None),
-                ) from exc
-            raise
+    def _await_release(self, persistent_id: str, sent: int, outcome) -> None:
+        """Poll the dataset state after a publish request until it is RELEASED.
+
+        Raises
+        ------
+        DataversePublishUnconfirmed
+            If the dataset is not RELEASED after MAX_ATTEMPTS checks.
+        """
+        waited, last = 0.0, 'not RELEASED'
+        for check in range(1, MAX_ATTEMPTS + 1):
+            if check > 1:
+                delay = min(BACKOFF_S * 2 ** (check - 2), BACKOFF_CAP_S)
+                log.warning(
+                    'publish of %s not RELEASED yet (check %d of %d); checking again in %.0f s',
+                    persistent_id,
+                    check - 1,
+                    MAX_ATTEMPTS,
+                    delay,
+                )
+                _sleep(delay)
+                waited += delay
+            try:
+                if self._released(persistent_id):
+                    return
+            except Exception as exc:  # noqa: BLE001 -- a failed check is not RELEASED
+                log.warning('state check of %s failed: %s', persistent_id, exc)
+                last = exc
+        raise DataversePublishUnconfirmed(
+            f'publish of {persistent_id} not confirmed (request sent {sent} time(s)); '
+            f'not RELEASED after {waited:.0f} s; reply: {outcome}; last state check: {last}',
+            getattr(outcome, 'status_code', None),
+        ) from (outcome if isinstance(outcome, BaseException) else None)
 
     def delete_draft(self, persistent_id: str) -> None:
         """Delete an unpublished draft dataset (used to roll back a failed mirror)."""
@@ -671,7 +756,7 @@ def mirror_to_dataverse(
 
         client = DataverseClient(dataverse_url, token)
         persistent_id = client.create_dataset(collection, metadata)
-        log.info('created Dataverse dataset %s', persistent_id)
+        log.warning('created Dataverse dataset %s', persistent_id)
         # From here the draft exists with a real DOI: on a failure, delete it so a
         # failed run leaves no orphaned deposit, unless a publish may have happened.
         try:
@@ -682,9 +767,9 @@ def mirror_to_dataverse(
             if publish:
                 client.publish(persistent_id)
                 log.info('published %s', persistent_id)
-        except DataversePublishUnconfirmed:
+        except (DataversePublishUnconfirmed, DataverseAlreadyPublished) as exc:
             # The dataset may be published already, so it is not deleted.
-            log.error('publish of %s not confirmed; check its state by hand', persistent_id)
+            log.error('%s; %s is kept, check its state by hand', exc, persistent_id)
             raise
         except Exception:
             try:
@@ -696,6 +781,12 @@ def mirror_to_dataverse(
                     persistent_id,
                     cleanup_exc,
                 )
+            raise
+        except BaseException:
+            log.error(
+                'mirror of %s interrupted; the dataset is kept, check its state by hand',
+                persistent_id,
+            )
             raise
         return persistent_id
 
