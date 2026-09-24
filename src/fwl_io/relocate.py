@@ -281,14 +281,29 @@ def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
     return None
 
 
+def _list(names: list[str] | set[str]) -> str:
+    """The names, sorted and comma separated."""
+    return ', '.join(sorted(names))
+
+
+def _agree(names: list[str] | set[str], one: str, many: str) -> str:
+    """``one`` for a single name, ``many`` for several."""
+    return one if len(names) == 1 else many
+
+
 def _classify(
-    legacy_dir: Path, target_dir: Path, registry: dict[str, str], legacy_present: bool
+    legacy_dir: Path,
+    target_dir: Path,
+    registry: dict[str, str],
+    legacy_present: bool,
+    root: Path,
 ) -> tuple[str, str, tuple[str, ...]]:
     """Decide what the two trees on disk allow, without touching either.
 
     With no legacy directory the answer is ``ALREADY_CURRENT`` or ``ABSENT``
     whatever state the target is in: nothing can be moved, so a target this
-    user cannot read is not a fault of this command.
+    user cannot read, or a registry digest that cannot be used, is not a fault
+    of this command.
 
     Returns
     -------
@@ -301,8 +316,8 @@ def _classify(
         a different entry at the target, which is never overwritten.
     """
     try:
-        intact, other = _held(target_dir, registry)
-    except OSError:
+        intact, other = _held(target_dir, registry, root)
+    except (OSError, ValueError):
         if legacy_present:
             raise
         return ABSENT, '', ()
@@ -337,8 +352,10 @@ def _classify(
         )
     differ = []
     if other:
-        names = ', '.join(sorted(other))
-        differ = [f'{names} at {target_dir} differ from the registry, left alone{_REPAIR}']
+        differ = [
+            f'{_list(other)} at {target_dir} {_agree(other, "differs", "differ")} '
+            f'from the registry, left alone{_REPAIR}'
+        ]
     if present:
         try:
             wrong = [n for n in present if not _hash_matches(legacy_dir / n, registry[n])]
@@ -346,15 +363,23 @@ def _classify(
             return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
         if wrong:
             held = [n for n in wrong if n in intact]
-            note = f'; {", ".join(held)} is a copy the target already holds intact' if held else ''
-            detail = f'{len(wrong)} file(s) differ from the registry in {legacy_dir}{note}'
+            note = (
+                f'; {_list(held)} {_agree(held, "is a copy", "are copies")} '
+                'the target already holds intact'
+                if held
+                else ''
+            )
+            detail = (
+                f'{len(wrong)} file(s) differ from the registry in {legacy_dir}: '
+                f'{_list(wrong)}{note}'
+            )
             return MISMATCH, detail, ()
         clash = sorted(set(present) & other)
         if clash:
             return (
                 MISMATCH,
-                f'{", ".join(clash)} at {target_dir} is not the registry file; '
-                f'not overwritten{_REPAIR}',
+                f'{_list(clash)} at {target_dir} {_agree(clash, "is", "are")} not the '
+                f'registry {_agree(clash, "file", "files")}; not overwritten{_REPAIR}',
                 (),
             )
     elif not intact:
@@ -381,12 +406,36 @@ def _classify(
     return READY, '; '.join(notes), moving
 
 
-def _held(directory: Path, registry: dict[str, str]) -> tuple[set[str], set[str]]:
+def _plain_way(root: Path, path: Path) -> bool:
+    """True when every directory of ``path`` below ``root`` is a plain directory.
+
+    A component that is absent, a symlink or not a directory means no file at
+    ``path`` can be shown to be the registry file, so it is not held.
+
+    Raises
+    ------
+    OSError
+        When a component cannot be examined for a reason other than absence.
+    """
+    walked = root
+    for part in path.relative_to(root).parts[:-1]:
+        walked = walked / part
+        try:
+            if not stat.S_ISDIR(os.lstat(walked).st_mode):
+                return False
+        except FileNotFoundError:
+            return False
+    return True
+
+
+def _held(directory: Path, registry: dict[str, str], root: Path) -> tuple[set[str], set[str]]:
     """Registry names ``directory`` holds as an intact file, and as any other entry.
 
-    Intact is a regular file, not a symlink, whose digest matches. A differing
-    file, a symlink, a dangling symlink or a directory under a registry name is
-    the other kind: a move would replace it.
+    Intact is a regular file, not a symlink, whose digest matches, reached
+    through plain directories below ``root``. A differing file, a symlink, a
+    dangling symlink or a directory under a registry name is the other kind: a
+    move would replace it. A file behind a symlinked or non-directory parent is
+    neither, because the move refuses that path itself.
 
     Raises
     ------
@@ -397,6 +446,8 @@ def _held(directory: Path, registry: dict[str, str]) -> tuple[set[str], set[str]
     intact, other = set(), set()
     for name, digest in registry.items():
         path = directory / name
+        if not _plain_way(root, path):
+            continue
         try:
             mode = os.lstat(path).st_mode
         except (FileNotFoundError, NotADirectoryError):
@@ -444,7 +495,7 @@ def _assess(
         # A symlink is how this happens in a real tree: every joined
         # path looks clean and only resolving one shows it leaves.
         return UNRESOLVABLE, f'{outside} resolves outside the data root {root}', ()
-    state, detail, files = _classify(legacy_dir, target_dir, registry, legacy_present)
+    state, detail, files = _classify(legacy_dir, target_dir, registry, legacy_present, root)
     if state == READY:
         refusal = _refusal(legacy_dir, target_dir, files, root)
         if refusal is not None:

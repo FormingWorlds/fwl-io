@@ -2479,6 +2479,7 @@ def test_apply_refuses_a_target_that_became_unrecognised(tmp_path, monkeypatch):
     'flag, value, missing',
     [
         ('_DIR_FD_OK', False, 'dir_fd'),
+        ('_NOFOLLOW_STAT_OK', False, 'a no-follow stat'),
         ('_RMTREE_IS_SAFE', False, 'a symlink-safe rmtree'),
         ('fcntl', None, 'flock'),
     ],

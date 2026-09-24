@@ -33,6 +33,9 @@ _RMTREE_IS_SAFE = shutil.rmtree.avoids_symlink_attacks
 #: Whether directory-relative open, rename and stat exist here, read once at import.
 _DIR_FD_OK = {os.open, os.rename, os.stat, os.mkdir} <= os.supports_dir_fd
 
+#: Whether ``os.stat`` can leave a final symlink unfollowed, read once at import.
+_NOFOLLOW_STAT_OK = os.stat in os.supports_follow_symlinks
+
 
 def _is_plain_dir(path: Path) -> bool:
     """True when ``path`` is a directory and not a symlink; False when it cannot be read."""
@@ -555,8 +558,9 @@ def _platform_gap(*, operation: str, needs_locks: bool) -> str | None:
 
     Both deletion and relocation move directories through handles opened
     without following symlinks, which needs ``O_DIRECTORY``, ``O_NOFOLLOW`` and
-    directory-relative open, stat, mkdir and rename (``os.replace`` shares
-    rename's ``dir_fd`` support but is not listed by ``os.supports_dir_fd``).
+    directory-relative open, stat, mkdir and rename, and a stat that does not
+    follow a final symlink (``os.replace`` shares rename's ``dir_fd`` support
+    but is not listed by ``os.supports_dir_fd``).
     Deletion also needs a symlink-safe ``shutil.rmtree`` and flock for the
     fetch-lock probe (``needs_locks``); a move uses neither. Checked by feature,
     not by platform name.
@@ -564,6 +568,8 @@ def _platform_gap(*, operation: str, needs_locks: bool) -> str | None:
     missing = [name for name in ('O_DIRECTORY', 'O_NOFOLLOW') if not hasattr(os, name)]
     if not _DIR_FD_OK:
         missing.append('dir_fd')
+    if not _NOFOLLOW_STAT_OK:
+        missing.append('a no-follow stat')
     if needs_locks and not _RMTREE_IS_SAFE:
         missing.append('a symlink-safe rmtree')
     if needs_locks and fcntl is None:

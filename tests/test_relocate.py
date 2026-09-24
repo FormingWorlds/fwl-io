@@ -350,7 +350,7 @@ def test_the_leaf_symlink_check_refuses_on_its_own(tmp_path):
     link = tmp_path / 'link'
     link.symlink_to(real, target_is_directory=True)
 
-    state, detail, files = _classify(link, tmp_path / 'target', _digests(), True)
+    state, detail, files = _classify(link, tmp_path / 'target', _digests(), True, tmp_path)
 
     assert state == UNRESOLVABLE
     assert LEAF_REASON in detail
@@ -1514,7 +1514,7 @@ def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_call
     assert later.ok and not later.faults
     for entry in (plan, first, second):
         assert 'BHAC15_tracks.dat at' in entry.detail
-        assert 'differ from the registry' in entry.detail
+        assert 'differs from the registry' in entry.detail
         assert 'fwl-io check <model>", then "fwl-io fetch <model>' in entry.detail
     assert '0 absent' not in plan.detail and 'absent' not in plan.detail
     assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
@@ -1763,3 +1763,186 @@ def test_relocation_does_not_need_the_capabilities_only_deletion_uses(tmp_path, 
     assert [e.state for e in report.entries] == [MOVED]
     refusal = guard._delete_unsupported()
     assert refusal is not None and 'flock' in refusal and 'rmtree' in refusal
+
+
+SUBTREE = {'sub/a.dat': b'aaa\n', 'b.dat': b'bbbb\n'}
+
+
+def _nested_legacy(root):
+    for name, body in SUBTREE.items():
+        path = root / LEGACY / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+
+
+def _link_target_dir(root):
+    """Tree A: the target directory is a symlink to the legacy directory."""
+    (root / TARGET).parent.mkdir(parents=True)
+    (root / TARGET).symlink_to(root / LEGACY, target_is_directory=True)
+
+
+def _link_target_ancestor(root):
+    """Tree C: ``star`` is a symlink, and the leaf directory below it links to legacy."""
+    leaf = root / 'elsewhere' / 'tracks' / 'baraffe_2015' / f'r{RECID}'
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(root / LEGACY, target_is_directory=True)
+    (root / 'star').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+
+def _link_target_subdir(root):
+    """Tree N: ``target/sub`` is a symlink to ``legacy/sub``, below a plain target."""
+    (root / TARGET).mkdir(parents=True)
+    (root / TARGET / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / TARGET / 'sub').symlink_to(root / LEGACY / 'sub', target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    'link',
+    [_link_target_dir, _link_target_ancestor, _link_target_subdir],
+    ids=['A', 'C', 'N'],
+)
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_directory_on_the_target_path_is_never_counted_as_held(
+    tmp_path, monkeypatch, link, dry_run
+):
+    """The target files reached through a symlinked directory are the legacy files themselves.
+
+    Each tree resolves to the legacy copies, which hash correctly, so counting
+    them as held reports the dataset as current and the only real copy as
+    redundant; deleting it would then break the target.
+    """
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    _nested_legacy(root)
+    link(root)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    [entry] = report.entries
+    assert entry.state == UNRESOLVABLE, entry.detail
+    assert report.redundant == ()
+    assert 'redundant' not in entry.detail
+    assert all((root / LEGACY / n).is_file() for n in SUBTREE), 'the real copy is untouched'
+
+
+@pytest.mark.parametrize('present', [False, True], ids=['target-empty', 'target-files'])
+def test_an_unusable_digest_with_no_legacy_directory_is_absent(tmp_path, monkeypatch, present):
+    """With nothing to move, a registry digest nobody can hash is not this command's fault.
+
+    ``fetch`` and ``check`` report the registry; failing here on the target
+    files would contradict the rule that no legacy directory means no fault.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text(
+        'notes.txt blake9:abc\nBHAC15_tracks.dat blake9:abc\n'
+    )
+    root = tmp_path / 'data'
+    if present:
+        _populate(root / TARGET)
+    root.mkdir(exist_ok=True)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ABSENT]
+    assert report.ok
+
+
+def test_every_differing_file_is_named_in_sorted_order_and_the_verb_agrees(tmp_path, monkeypatch):
+    """Two files in a detail are listed sorted with a plural verb, one with a singular verb."""
+    import shutil
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+
+    def detail(legacy=(), target=(), bad_legacy=(), bad_target=()):
+        shutil.rmtree(root, ignore_errors=True)
+        _populate(root / LEGACY, names=legacy, corrupt=bad_legacy)
+        if target:
+            _populate(root / TARGET, names=target, corrupt=bad_target)
+        return relocate_all(data_root=root, dry_run=True).entries[0].detail
+
+    both = tuple(CONTENTS)
+    registry = tmp_path / f'{KEY}.registry.txt'
+    registry.write_text(''.join(reversed(registry.read_text().splitlines(keepends=True))))
+    corrupt_legacy = detail(legacy=both, bad_legacy=both)
+    assert '2 file(s) differ from the registry in ' in corrupt_legacy
+    assert corrupt_legacy.endswith(': BHAC15_tracks.dat, notes.txt')
+
+    clash = detail(legacy=both, target=both, bad_target=both)
+    assert 'BHAC15_tracks.dat, notes.txt at ' in clash
+    assert ' are not the registry files' in clash
+
+    third = {**CONTENTS, 'third.txt': b'3\n'}
+    _install_manifest(monkeypatch, tmp_path, contents=third)
+    shutil.rmtree(root, ignore_errors=True)
+    _populate(root / TARGET)
+    for name in both:
+        (root / LEGACY).mkdir(parents=True, exist_ok=True)
+        (root / LEGACY / name).write_bytes(b'not the recorded contents\n')
+    held = relocate_all(data_root=root, dry_run=True).entries[0].detail
+    assert 'BHAC15_tracks.dat, notes.txt are copies the target already holds intact' in held
+
+    one = detail(legacy=['notes.txt'], target=['notes.txt'], bad_target=['notes.txt'])
+    assert 'notes.txt at ' in one and ' is not the registry file;' in one
+    one = detail(legacy=['notes.txt'], target=['notes.txt'], bad_legacy=['notes.txt'])
+    assert 'notes.txt is a copy the target already holds intact' in one
+
+
+def test_a_leftover_directory_beside_two_differing_target_files_names_both(tmp_path, monkeypatch):
+    """Differing target files are listed sorted, with a plural verb, beside a legacy leftover."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+    _populate(root / TARGET, corrupt=list(CONTENTS))
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == INCOMPLETE
+    assert 'BHAC15_tracks.dat, notes.txt at ' in entry.detail
+    assert ' differ from the registry, left alone' in entry.detail
+
+
+def test_a_platform_without_a_no_follow_stat_refuses_that_dataset(tmp_path, monkeypatch):
+    """The move stats without following a final symlink, so a platform lacking it is refused."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr('fwl_io.fs_guard._NOFOLLOW_STAT_OK', False)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'a no-follow stat' in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+def test_a_file_at_the_destination_stops_the_move_and_loses_nothing(tmp_path):
+    """A regular file already at a destination name is not replaced, and the move is undone."""
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    entry = Relocation(
+        KEY,
+        READY,
+        legacy_dir=root / LEGACY,
+        target_dir=root / TARGET,
+        files=tuple(sorted(CONTENTS)),
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert 'already exists at the destination' in result.detail
+    assert (root / TARGET / 'notes.txt').read_bytes() == b'not the recorded contents\n'
+    assert all((root / LEGACY / n).read_bytes() == CONTENTS[n] for n in CONTENTS)
+    assert not (root / TARGET / 'BHAC15_tracks.dat').exists(), 'the first move was put back'
+
+
+def test_a_name_list_is_sorted_whatever_order_it_arrives_in():
+    """The helper that joins names sorts them, so a set's iteration order never shows."""
+    from fwl_io.relocate import _list
+
+    assert _list(['b.dat', 'a.dat', 'c.dat']) == 'a.dat, b.dat, c.dat'
