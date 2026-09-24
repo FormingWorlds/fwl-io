@@ -522,17 +522,10 @@ def _probe_dir_below(root: Path, parts: tuple[str, ...]) -> None:
         cannot be opened. A component that is absent ends the walk: the move
         creates it.
     """
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in parts:
-            try:
-                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            except FileNotFoundError:
-                return
-            os.close(fd)
-            fd = nxt
-    finally:
-        os.close(fd)
+        os.close(_open_dir_below(root, parts))
+    except FileNotFoundError:
+        pass
 
 
 def _open_or_make_dir_below(root: Path, parts: tuple[str, ...]) -> int:

@@ -325,6 +325,11 @@ def _classify(
             'not plain files; not moved',
             (),
         )
+    differ = (
+        [f'{len(other)} file(s) at {target_dir} differ from the registry and were left alone']
+        if other
+        else []
+    )
     if present:
         try:
             wrong = [n for n in present if not _hash_matches(legacy_dir / n, registry[n])]
@@ -341,17 +346,17 @@ def _classify(
                 (),
             )
     elif not intact or other:
-        return INCOMPLETE, f'0 of {len(registry)} file(s) present in {legacy_dir}', ()
+        return (
+            INCOMPLETE,
+            '; '.join([f'0 of {len(registry)} file(s) present in {legacy_dir}', *differ]),
+            (),
+        )
     moving = tuple(sorted(set(present) - intact))
     if not moving:
         # A partly moved tree seen again: what is left is the fetcher's to fill in.
-        return (
-            ABSENT,
-            f'{len(intact)} of {len(registry)} file(s) already at {target_dir}; '
-            f'nothing in {legacy_dir} to move',
-            (),
-        )
-    absent = sorted(set(registry) - set(present) - intact)
+        held = f'{len(intact)} of {len(registry)} file(s) already at {target_dir}'
+        return ABSENT, '; '.join([held, f'nothing in {legacy_dir} to move', *differ]), ()
+    absent = sorted(set(registry) - set(present) - intact - other)
     notes = []
     if absent:
         notes.append(
@@ -360,6 +365,7 @@ def _classify(
         )
     if len(moving) < len(present):
         notes.append(f'{len(present) - len(moving)} already at {target_dir}, so that copy stays')
+    notes.extend(differ)
     return READY, '; '.join(notes), moving
 
 
@@ -373,9 +379,12 @@ def _held(directory: Path, registry: dict[str, str]) -> tuple[set[str], set[str]
     intact, other = set(), set()
     for name, digest in registry.items():
         path = directory / name
-        if os.path.lexists(path):
-            ok = _is_regular_file(path) and _hash_matches(path, digest)
-            (intact if ok else other).add(name)
+        try:
+            os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        ok = _is_regular_file(path) and _hash_matches(path, digest)
+        (intact if ok else other).add(name)
     return intact, other
 
 
@@ -392,8 +401,7 @@ def _refusal(legacy_dir: Path, target_dir: Path, files: tuple[str, ...], root: P
     legacy_rel = legacy_dir.relative_to(root).parts
     target_rel = target_dir.relative_to(root).parts
     try:
-        for name in files:
-            parent = PurePosixPath(name).parts[:-1]
+        for parent in {PurePosixPath(name).parts[:-1] for name in files}:
             os.close(_open_dir_below(root, legacy_rel + parent))
             _probe_dir_below(root, target_rel + parent)
     except OSError as exc:
@@ -469,7 +477,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 state, detail, files = _assess(
                     ds, registry, legacy_dir, target_dir, root, legacy_present
                 )
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 state, detail, files = (
                     UNRESOLVABLE,
                     f'cannot read {legacy_dir} or {target_dir}: {exc}',

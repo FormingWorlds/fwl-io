@@ -1487,3 +1487,63 @@ def test_files_names_the_verified_subset_for_a_ready_dataset(tmp_path, monkeypat
 
     assert entry.state == READY
     assert entry.files == ('notes.txt',)
+
+
+def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_called_absent(
+    tmp_path, monkeypatch
+):
+    """A corrupt file at the target is reported as such, on the run that moves and on the next.
+
+    The legacy tree holds only the other file, so nothing is overwritten and
+    the move goes ahead; the detail must not call the corrupt file absent.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['notes.txt'])
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    plan = relocate_all(data_root=root, dry_run=True).entries[0]
+    first = relocate_all(data_root=root).entries[0]
+    second = relocate_all(data_root=root).entries[0]
+
+    assert (plan.state, first.state, second.state) == (READY, MOVED, INCOMPLETE)
+    for entry in (plan, first, second):
+        assert '1 file(s) at' in entry.detail and 'differ from the registry' in entry.detail
+    assert '0 absent' not in plan.detail and 'absent' not in plan.detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+def test_an_unsearchable_target_directory_is_refused_not_read_as_empty(tmp_path, monkeypatch):
+    """A target directory this user cannot search is reported, not treated as holding nothing."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    (root / TARGET).chmod(0o644)
+    try:
+        report = relocate_all(data_root=root, dry_run=True)
+    finally:
+        (root / TARGET).chmod(0o755)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'cannot read' in report.entries[0].detail
+
+
+def test_a_digest_algorithm_nobody_supports_refuses_that_dataset_and_does_not_raise(
+    tmp_path, monkeypatch
+):
+    """A registry line with an unknown hash algorithm is reported for its dataset, not raised."""
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text(
+        'notes.txt blake9:abc\nBHAC15_tracks.dat blake9:abc\n'
+    )
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'cannot read' in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file()
