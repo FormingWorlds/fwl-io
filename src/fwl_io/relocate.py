@@ -11,7 +11,7 @@ Nothing is moved on trust. Every present file is hashed against the registry
 the manifest ships before anything is touched, and only a file that matches
 moves; a present file whose contents do not match blocks the whole dataset,
 so an absent file can never mask a corrupt one. A file already at the new
-location is never replaced: an intact one is skipped and a differing one blocks
+location is not replaced: an intact one is skipped and a differing one blocks
 the dataset. A legacy tree holding none of its registry's files is reported and
 left exactly where it is. The alternative, moving first and discovering
 afterwards, turns a stale copy into a stale copy in the place the fetcher will
@@ -44,12 +44,12 @@ from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
 from fwl_io.fs_guard import (
-    _delete_unsupported,
     _inside,
     _is_directory,
     _is_regular_file,
     _open_dir_below,
     _open_or_make_dir_below,
+    _platform_gap,
     _probe_dir_below,
 )
 from fwl_io.paths import resolve_data_root
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 log = logging.getLogger('fwl.' + __name__)
 
 _LAYOUT_RESOURCE = 'legacy_layout.toml'
+_REPAIR = '; repair with "fwl-io check <model>", then "fwl-io fetch <model>"'
 
 # A dataset's legacy tree. ``READY``: every present file matches, absent ones
 # are left to the fetcher. ``INCOMPLETE``: none of its registry's files.
@@ -281,9 +282,13 @@ def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
 
 
 def _classify(
-    legacy_dir: Path, target_dir: Path, registry: dict[str, str]
+    legacy_dir: Path, target_dir: Path, registry: dict[str, str], legacy_present: bool
 ) -> tuple[str, str, tuple[str, ...]]:
     """Decide what the two trees on disk allow, without touching either.
+
+    With no legacy directory the answer is ``ALREADY_CURRENT`` or ``ABSENT``
+    whatever state the target is in: nothing can be moved, so a target this
+    user cannot read is not a fault of this command.
 
     Returns
     -------
@@ -295,16 +300,21 @@ def _classify(
         never masks a corrupt one, and so does a legacy file that would replace
         a different entry at the target, which is never overwritten.
     """
-    intact, other = _held(target_dir, registry)
+    try:
+        intact, other = _held(target_dir, registry)
+    except OSError:
+        if legacy_present:
+            raise
+        return ABSENT, '', ()
     if intact and len(intact) == len(registry):
         detail = f'already at {target_dir}'
-        if _is_directory(legacy_dir):
+        if legacy_present:
             # Both copies are intact, so the legacy one is redundant rather
             # than needed. Naming it is as far as this goes: deleting data the
             # user has not asked to lose is not this command's business.
             detail += f'; the copy at {legacy_dir} is now redundant and was left alone'
         return ALREADY_CURRENT, detail, ()
-    if not _is_directory(legacy_dir):
+    if not legacy_present:
         return ABSENT, '', ()
     if legacy_dir.is_symlink():
         return UNRESOLVABLE, f'{legacy_dir} is a symlink, not a plain directory; not moved', ()
@@ -325,27 +335,26 @@ def _classify(
             'not plain files; not moved',
             (),
         )
-    differ = (
-        [
-            f'{", ".join(sorted(other))} at {target_dir} differ from the registry and were left '
-            'alone; repair with "fwl-io check <model>", then "fwl-io fetch <model>"'
-        ]
-        if other
-        else []
-    )
+    differ = []
+    if other:
+        names = ', '.join(sorted(other))
+        differ = [f'{names} at {target_dir} differ from the registry, left alone{_REPAIR}']
     if present:
         try:
             wrong = [n for n in present if not _hash_matches(legacy_dir / n, registry[n])]
         except OSError as exc:
             return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
         if wrong:
-            return MISMATCH, f'{len(wrong)} file(s) differ from the registry in {legacy_dir}', ()
-        clash = set(present) & other
+            held = [n for n in wrong if n in intact]
+            note = f'; {", ".join(held)} is a copy the target already holds intact' if held else ''
+            detail = f'{len(wrong)} file(s) differ from the registry in {legacy_dir}{note}'
+            return MISMATCH, detail, ()
+        clash = sorted(set(present) & other)
         if clash:
             return (
                 MISMATCH,
-                f'{len(clash)} file(s) already at {target_dir} are not the registry file; '
-                'not overwritten',
+                f'{", ".join(clash)} at {target_dir} is not the registry file; '
+                f'not overwritten{_REPAIR}',
                 (),
             )
     elif not intact:
@@ -375,36 +384,42 @@ def _classify(
 def _held(directory: Path, registry: dict[str, str]) -> tuple[set[str], set[str]]:
     """Registry names ``directory`` holds as an intact file, and as any other entry.
 
-    Intact is a plain file whose digest matches. A differing file, a dangling
-    symlink or a directory under a registry name is the other kind: a move
-    would replace it.
+    Intact is a regular file, not a symlink, whose digest matches. A differing
+    file, a symlink, a dangling symlink or a directory under a registry name is
+    the other kind: a move would replace it.
+
+    Raises
+    ------
+    OSError
+        When an entry cannot be examined, for example because a directory on
+        the way cannot be searched.
     """
     intact, other = set(), set()
     for name, digest in registry.items():
         path = directory / name
         try:
-            os.lstat(path)
+            mode = os.lstat(path).st_mode
         except (FileNotFoundError, NotADirectoryError):
             continue
-        ok = _is_regular_file(path) and _hash_matches(path, digest)
+        ok = stat.S_ISREG(mode) and _hash_matches(path, digest)
         (intact if ok else other).add(name)
     return intact, other
 
 
-def _refusal(legacy_dir: Path, target_dir: Path, files: tuple[str, ...], root: Path) -> str | None:
+def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path) -> str | None:
     """Why moving these files would be refused, or ``None``, from the opens the move makes.
 
     A symlink anywhere on the way, on either side, is refused by the move
     itself, so the plan must refuse it too or a dry run promises a move the
     real run cannot make. Only the part of the target that exists is opened.
     """
-    unsupported = _delete_unsupported(operation='relocation')
+    unsupported = _platform_gap(operation='relocation', needs_locks=False)
     if unsupported is not None:
         return unsupported
     legacy_rel = legacy_dir.relative_to(root).parts
     target_rel = target_dir.relative_to(root).parts
     try:
-        for parent in {PurePosixPath(name).parts[:-1] for name in files}:
+        for parent in {PurePosixPath(name).parts[:-1] for name in names}:
             os.close(_open_dir_below(root, legacy_rel + parent))
             _probe_dir_below(root, target_rel + parent)
     except OSError as exc:
@@ -424,12 +439,12 @@ def _assess(
     unmovable = _unmovable(ds, registry) if legacy_present else None
     if unmovable is not None:
         return UNRESOLVABLE, unmovable, ()
-    outside = _escaping(legacy_dir, target_dir, tuple(registry), root)
+    outside = _escaping(legacy_dir, target_dir, tuple(registry), root) if legacy_present else None
     if outside is not None:
         # A symlink is how this happens in a real tree: every joined
         # path looks clean and only resolving one shows it leaves.
         return UNRESOLVABLE, f'{outside} resolves outside the data root {root}', ()
-    state, detail, files = _classify(legacy_dir, target_dir, registry)
+    state, detail, files = _classify(legacy_dir, target_dir, registry, legacy_present)
     if state == READY:
         refusal = _refusal(legacy_dir, target_dir, files, root)
         if refusal is not None:
@@ -528,7 +543,8 @@ def _move_below_root(
     rename or replace entries under the data root while a run is in progress,
     the same assumption this module states for the rest of a run. The
     destination is checked to hold nothing under that name, so a file already
-    there is never replaced.
+    there is not replaced; a file created there between that check and the
+    move is, the same window as for the source entry above.
     """
     src_fd = _open_dir_below(root, src_parent)
     try:

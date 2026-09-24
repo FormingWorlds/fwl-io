@@ -350,7 +350,7 @@ def test_the_leaf_symlink_check_refuses_on_its_own(tmp_path):
     link = tmp_path / 'link'
     link.symlink_to(real, target_is_directory=True)
 
-    state, detail, files = _classify(link, tmp_path / 'target', _digests())
+    state, detail, files = _classify(link, tmp_path / 'target', _digests(), True)
 
     assert state == UNRESOLVABLE
     assert LEAF_REASON in detail
@@ -1567,3 +1567,199 @@ def test_the_target_probe_walks_what_exists_and_needs_the_root(tmp_path):
         _probe_dir_below(tmp_path, ('b', 'x'))
     with pytest.raises(FileNotFoundError):
         _probe_dir_below(tmp_path / 'no-such-root', ('a',))
+
+
+def _unreadable_target(kind, target):
+    """Make the target directory or one of its files unreadable; return the undo."""
+    if kind == 'file':
+        path = target / 'notes.txt'
+        path.chmod(0)
+        return lambda: path.chmod(0o644)
+    mode = 0 if kind == 'dir-000' else 0o644
+    target.chmod(mode)
+    return lambda: target.chmod(0o755)
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+@pytest.mark.parametrize('kind', ['dir-000', 'dir-644', 'file'])
+def test_an_unreadable_target_is_no_fault_when_there_is_no_legacy_directory(
+    tmp_path, monkeypatch, kind
+):
+    """A tree with nothing at the old location is tidy, whatever the target's permissions.
+
+    On a shared data root another user's private dataset directory must not
+    make ``fwl-io relocate`` exit 1 on a machine that never had the old
+    layout. With an old directory present the same target is still refused,
+    because a move cannot be judged safe without reading it.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET)
+    undo = _unreadable_target(kind, root / TARGET)
+    try:
+        tidy = relocate_all(data_root=root)
+        (root / LEGACY).mkdir(parents=True)
+        _populate(root / LEGACY, names=['notes.txt'])
+        blocked = relocate_all(data_root=root, dry_run=True)
+    finally:
+        undo()
+
+    assert [e.state for e in tidy.entries] == [ABSENT]
+    assert tidy.ok and not tidy.faults
+    assert [e.state for e in blocked.entries] == [UNRESOLVABLE]
+    assert not blocked.ok
+    assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_a_target_outside_the_root_is_no_fault_when_there_is_no_legacy_directory(
+    tmp_path, monkeypatch
+):
+    """Nothing can move without an old directory, so a target that escapes the root is moot."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    root.mkdir()
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (root / 'star').symlink_to(elsewhere, target_is_directory=True)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ABSENT]
+    assert report.ok
+
+
+def test_a_target_symlink_into_the_legacy_tree_is_not_counted_as_intact(tmp_path, monkeypatch):
+    """A symlink at the target is an entry a move would replace, never a verified file.
+
+    The links point at the legacy copies, which hash correctly, so following
+    them reports the dataset as already current and the old copy as
+    redundant; deleting it would then break the target.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / TARGET).mkdir(parents=True)
+    for name in CONTENTS:
+        (root / TARGET / name).symlink_to(root / LEGACY / name)
+
+    report = relocate_all(data_root=root)
+
+    entry = report.entries[0]
+    assert entry.state == MISMATCH
+    assert 'BHAC15_tracks.dat, notes.txt' in entry.detail
+    assert 'fwl-io check <model>' in entry.detail
+    assert report.redundant == ()
+    assert all((root / TARGET / n).is_symlink() for n in CONTENTS), 'nothing was replaced'
+    assert all((root / LEGACY / n).is_file() for n in CONTENTS)
+
+
+def test_a_target_symlink_to_a_matching_file_elsewhere_blocks_that_file_only(tmp_path, monkeypatch):
+    """A symlink to an in-root file with the right contents still blocks the dataset.
+
+    Skipping it as intact would leave the legacy copy orphaned while the
+    report says that copy stays.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / TARGET).mkdir(parents=True)
+    (root / 'elsewhere.dat').write_bytes(CONTENTS['notes.txt'])
+    (root / TARGET / 'notes.txt').symlink_to(root / 'elsewhere.dat')
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == MISMATCH
+    assert entry.detail.startswith('notes.txt at')
+    assert entry.files == ()
+
+
+def test_a_clash_names_the_blocking_target_file_and_the_repair(tmp_path, monkeypatch):
+    """The refusal to overwrite says which target file blocks and how to repair it."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == MISMATCH
+    assert entry.detail.startswith('notes.txt at ')
+    assert 'not overwritten' in entry.detail
+    assert 'repair with "fwl-io check <model>", then "fwl-io fetch <model>"' in entry.detail
+
+
+def test_a_corrupt_legacy_copy_of_a_file_the_target_holds_is_named_as_such(tmp_path, monkeypatch):
+    """A bad old copy of a file already intact at the target still blocks, and says why.
+
+    Moving the good files past it would leave a stale duplicate behind, so the
+    block stays; the detail says the bad file is only a copy.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, corrupt=['notes.txt'])
+    _populate(root / TARGET, names=['notes.txt'])
+
+    entry = relocate_all(data_root=root).entries[0]
+
+    assert entry.state == MISMATCH
+    assert 'notes.txt is a copy the target already holds intact' in entry.detail
+    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file(), 'nothing moved'
+
+
+def _open_fds():
+    return len(os.listdir('/dev/fd'))
+
+
+@pytest.mark.parametrize('failing', ['open', 'mkdir'])
+def test_the_directory_helpers_close_their_handle_on_any_exception(monkeypatch, tmp_path, failing):
+    """A NotImplementedError from a dir_fd primitive must not leak the open directory handle."""
+    import fwl_io.fs_guard as guard
+
+    (tmp_path / 'a').mkdir()
+    real_open = os.open
+    calls = []
+
+    def _open_fails_second(path, flags, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 2:
+            raise NotImplementedError('dir_fd unavailable')
+        return real_open(path, flags, *args, **kwargs)
+
+    def _mkdir_unsupported(*args, **kwargs):
+        raise NotImplementedError('dir_fd unavailable')
+
+    if failing == 'open':
+        monkeypatch.setattr(guard.os, 'open', _open_fails_second)
+        helper, parts = guard._open_dir_below, ('a',)
+    else:
+        monkeypatch.setattr(guard.os, 'mkdir', _mkdir_unsupported)
+        helper, parts = guard._open_or_make_dir_below, ('new',)
+    before = _open_fds()
+
+    for _ in range(5):
+        calls.clear()
+        with pytest.raises(NotImplementedError):
+            helper(tmp_path, parts)
+
+    assert _open_fds() == before
+
+
+def test_relocation_does_not_need_the_capabilities_only_deletion_uses(tmp_path, monkeypatch):
+    """A platform without flock or a symlink-safe rmtree can still relocate, not delete.
+
+    A move opens directories with no-follow handles and renames within them;
+    it never removes a tree or probes a fetch lock.
+    """
+    import fwl_io.fs_guard as guard
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr(guard, '_RMTREE_IS_SAFE', False)
+    monkeypatch.setattr(guard, 'fcntl', None)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MOVED]
+    refusal = guard._delete_unsupported()
+    assert refusal is not None and 'flock' in refusal and 'rmtree' in refusal

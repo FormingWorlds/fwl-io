@@ -506,7 +506,7 @@ def _open_dir_below(root: Path, parts: tuple[str, ...]) -> int:
             nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = nxt
-    except OSError:
+    except BaseException:
         os.close(fd)
         raise
     return fd
@@ -523,10 +523,8 @@ def _probe_dir_below(root: Path, parts: tuple[str, ...]) -> None:
         is absent ends the walk: the move creates it.
     """
     os.close(os.open(root, os.O_RDONLY | os.O_DIRECTORY))
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.close(_open_dir_below(root, parts))
-    except FileNotFoundError:
-        pass
 
 
 def _open_or_make_dir_below(root: Path, parts: tuple[str, ...]) -> int:
@@ -546,29 +544,35 @@ def _open_or_make_dir_below(root: Path, parts: tuple[str, ...]) -> int:
             nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = nxt
-    except OSError:
+    except BaseException:
         os.close(fd)
         raise
     return fd
 
 
-def _delete_unsupported(*, operation: str = 'deletion') -> str | None:
-    """Why this platform cannot delete or move safely, or ``None`` when it can.
+def _platform_gap(*, operation: str, needs_locks: bool) -> str | None:
+    """Why this platform cannot do ``operation`` safely, or ``None`` when it can.
 
-    Safe deletion and safe relocation both move directories through handles
-    opened without following symlinks and probe fetch locks with flock; a
-    platform without these (such as Windows) is refused up front rather than
-    failing part way. Checked by feature, not by platform name. ``operation``
-    names the caller's own action in the message, so a relocation refused
-    this way does not read as a deletion.
+    Both deletion and relocation move directories through handles opened
+    without following symlinks, which needs ``O_DIRECTORY``, ``O_NOFOLLOW`` and
+    directory-relative open, stat, mkdir and rename (``os.replace`` shares
+    rename's ``dir_fd`` support but is not listed by ``os.supports_dir_fd``).
+    Deletion also needs a symlink-safe ``shutil.rmtree`` and flock for the
+    fetch-lock probe (``needs_locks``); a move uses neither. Checked by feature,
+    not by platform name.
     """
     missing = [name for name in ('O_DIRECTORY', 'O_NOFOLLOW') if not hasattr(os, name)]
     if not _DIR_FD_OK:
         missing.append('dir_fd')
-    if not _RMTREE_IS_SAFE:
+    if needs_locks and not _RMTREE_IS_SAFE:
         missing.append('a symlink-safe rmtree')
-    if fcntl is None:
+    if needs_locks and fcntl is None:
         missing.append('flock')
     if missing:
         return f'{operation} is not supported on this platform (missing {", ".join(missing)})'
     return None
+
+
+def _delete_unsupported() -> str | None:
+    """Why this platform cannot delete safely, or ``None`` when it can."""
+    return _platform_gap(operation='deletion', needs_locks=True)
