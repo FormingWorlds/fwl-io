@@ -9,6 +9,7 @@ asserted without touching a real Dataverse installation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,6 +62,13 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     fail_on_publish: bool = False  # set by a test to force a publish failure
     fail_on_delete: bool = False  # set by a test to force a rollback failure
     omit_persistent_id: bool = False  # set by a test to drop the create response id
+    # (method, path suffix) -> replies served before the normal one: 'challenge' or a status
+    script: dict = {}
+    # (method, path suffix) -> replies served after the normal handling ran
+    script_after: dict = {}
+    draft_files: list = []  # files the fake draft holds, as the listing reports them
+    released: bool = False
+    deleted: bool = False
 
     def log_message(self, *args):  # noqa: D102 -- silence request logging
         pass
@@ -81,6 +89,34 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         )
         return parsed
 
+    def _scripted(self, method, path, table):
+        for (m, suffix), replies in table.items():
+            if m == method and path.endswith(suffix) and replies:
+                reply = replies.pop(0)
+                if reply == 'challenge':
+                    page = b'<!doctype html><html><head><title>Oh noes!</title>'
+                    page += b'<link href="/.within.website/x/xess/xess.min.css"></head></html>'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(page)
+                else:
+                    self._reply(reply, {'status': 'ERROR', 'message': 'gateway'})
+                return True
+        return False
+
+    def do_GET(self):  # noqa: N802 -- BaseHTTPRequestHandler API
+        parsed = self._record('GET')
+        if self._scripted('GET', parsed.path, self.script):
+            return
+        if parsed.path.endswith('/versions/:draft/files'):
+            self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]})
+        elif self.deleted:
+            self._reply(404, {'status': 'ERROR', 'message': 'not found'})
+        else:
+            state = 'RELEASED' if self.released else 'DRAFT'
+            self._reply(200, {'status': 'OK', 'data': {'latestVersion': {'versionState': state}}})
+
     def _reply(self, status, payload):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
@@ -89,6 +125,18 @@ class _DataverseHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 -- BaseHTTPRequestHandler API
         parsed = self._record('POST')
+        if self._scripted('POST', parsed.path, self.script):
+            return
+        if parsed.path.endswith('/add') and self._scripted('POST', '/add', self.script_after):
+            # The upload reached the draft, but the response was lost.
+            self.draft_files.append(self._uploaded_file())
+            return
+        if parsed.path.endswith('/actions/:publish') and self.script_after.get(
+            ('POST', '/actions/:publish')
+        ):
+            _DataverseHandler.released = True
+            self._scripted('POST', '/actions/:publish', self.script_after)
+            return
         if parsed.path.endswith('/datasets'):
             if self.fail_on_create:
                 # Mimic a real Dataverse citation-validation rejection (e.g. an
@@ -104,21 +152,36 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             if self.fail_on_add:
                 self._reply(400, {'status': 'ERROR', 'message': 'bad field'})
             else:
+                self.draft_files.append(self._uploaded_file())
                 self._reply(200, {'status': 'OK', 'data': {'files': [{'label': 'ok'}]}})
         elif parsed.path.endswith('/actions/:publish'):
             if self.fail_on_publish:
                 self._reply(400, {'status': 'ERROR', 'message': 'publish rejected'})
                 return
+            _DataverseHandler.released = True
             self._reply(200, {'status': 'OK', 'data': {'id': 7}})
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _uploaded_file(self):
+        body = self.calls[-1]['body']
+        name = body.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
+        payload = body.split(b'\r\n\r\n', 1)[1].rsplit(b'\r\n--', 1)[0]
+        checksum = {'type': 'MD5', 'value': hashlib.md5(payload).hexdigest()}
+        return {'filename': name, 'filesize': len(payload), 'checksum': checksum}
+
     def do_DELETE(self):  # noqa: N802 -- BaseHTTPRequestHandler API
-        self._record('DELETE')
+        parsed = self._record('DELETE')
+        if self._scripted('DELETE', parsed.path, self.script):
+            return
+        if self._scripted('DELETE', parsed.path, self.script_after):
+            _DataverseHandler.deleted = True
+            return
         if self.fail_on_delete:
             self._reply(500, {'status': 'ERROR', 'message': 'delete failed'})
         else:
+            _DataverseHandler.deleted = True
             self._reply(200, {'status': 'OK', 'data': {'message': 'deleted'}})
 
 
@@ -131,6 +194,11 @@ def dataverse_server():
     _DataverseHandler.fail_on_publish = False
     _DataverseHandler.fail_on_delete = False
     _DataverseHandler.omit_persistent_id = False
+    _DataverseHandler.script = {}
+    _DataverseHandler.script_after = {}
+    _DataverseHandler.draft_files = []
+    _DataverseHandler.released = False
+    _DataverseHandler.deleted = False
     server = ThreadingHTTPServer(('127.0.0.1', 0), _DataverseHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -341,6 +409,7 @@ def test_dataverse_error_on_failed_request():
         ok = False
         status_code = 403
         text = 'Forbidden'
+        headers = {'Content-Type': 'text/plain'}
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
@@ -1265,3 +1334,157 @@ def test_cli_mirror_publish_surfaces_a_dataverse_error(monkeypatch, capsys):
     rc = main(['mirror-publish', 'doi:10.34894/DEMO01'])
     assert rc == 1
     assert 'already published' in capsys.readouterr().err
+
+
+@pytest.fixture()
+def sleeps(monkeypatch):
+    """Record the retry waits instead of sleeping."""
+    import fwl_io.mirror as mirror
+
+    waits = []
+    monkeypatch.setattr(mirror, '_sleep', waits.append)
+    return waits
+
+
+def _adds(calls, name=None):
+    adds = [c for c in calls if c['method'] == 'POST' and c['path'].endswith('/add')]
+    return [c for c in adds if name is None or f'filename="{name}"'.encode() in c['body']]
+
+
+def test_bot_check_page_on_add_is_retried_with_the_file_reopened(
+    http_server, dataverse_server, sleeps
+):
+    """Two bot-check pages on an upload: listed, waited, then sent again in full."""
+    _DataverseHandler.script = {('POST', '/add'): ['challenge', 'challenge']}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 3
+    assert all(b'AAA\n' in c['body'] for c in _adds(calls, 'a.dat'))
+    assert sleeps == [30.0, 60.0]
+    assert sum(c['path'].endswith('/versions/:draft/files') for c in calls) == 2
+    assert not any(c['method'] == 'DELETE' for c in calls)
+
+
+def test_an_upload_that_arrived_behind_a_bot_check_page_is_not_sent_again(
+    http_server, dataverse_server, sleeps
+):
+    """The file reached the draft but the reply was the bot-check page: no second upload."""
+    _DataverseHandler.script_after = {('POST', '/add'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 1
+    assert [f['filename'] for f in _DataverseHandler.draft_files] == ['a.dat', 'b.dat']
+    assert sleeps == [30.0]
+
+
+def test_a_different_file_of_the_same_name_in_the_draft_stops_the_upload(
+    http_server, dataverse_server, sleeps
+):
+    """A listed file with the same name but other bytes is an error, never overwritten."""
+    _DataverseHandler.script = {('POST', '/add'): ['challenge']}
+    _DataverseHandler.draft_files = [
+        {'filename': 'a.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
+    ]
+    with pytest.raises(DataverseError, match='different file named a.dat'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 1
+    assert _DataverseHandler.deleted
+
+
+def test_a_gateway_error_is_retried_but_a_rejection_is_not(http_server, dataverse_server, sleeps):
+    """A 504 on upload is repeated; a 400 fails at once and rolls the draft back."""
+    _DataverseHandler.script = {('POST', '/add'): [504]}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 2
+    assert sleeps == [30.0]
+
+    sleeps.clear()
+    _DataverseHandler.calls.clear()
+    _DataverseHandler.fail_on_add = True
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls)) == 1
+    assert sleeps == []
+
+
+def test_retries_run_out_with_a_message_naming_the_bot_check_page(
+    http_server, dataverse_server, sleeps
+):
+    """Five bot-check pages in a row stop the mirror, name the page, and roll back."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 5}
+    with pytest.raises(DataverseRetryableError, match='all 5 attempts.*bot-check page'):
+        _mirror(http_server, dataverse_server)
+    assert sleeps == [30.0, 60.0, 120.0, 240.0]
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 5
+    assert _DataverseHandler.deleted
+
+
+def test_backoff_is_capped(http_server, dataverse_server, sleeps, monkeypatch):
+    """The wait doubles from 30 s and stops growing at 300 s."""
+    import fwl_io.mirror as mirror
+
+    monkeypatch.setattr(mirror, 'MAX_ATTEMPTS', 7)
+    _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 6}
+    result, _calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert sleeps == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0]
+
+
+def test_the_rollback_delete_is_retried(http_server, dataverse_server, sleeps, caplog):
+    """A bot-check page on the rollback does not leave an orphan draft."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script = {('DELETE', '/api/datasets/:persistentId'): ['challenge']}
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    deletes = [c for c in _DataverseHandler.calls if c['method'] == 'DELETE']
+    assert len(deletes) == 2
+    assert _DataverseHandler.deleted
+    assert 'could not roll back' not in caplog.text
+
+
+def test_a_rollback_that_went_through_is_not_repeated(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """The draft was deleted behind a bot-check page: the 404 ends the retry."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script_after = {('DELETE', '/api/datasets/:persistentId'): ['challenge']}
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    deletes = [c for c in _DataverseHandler.calls if c['method'] == 'DELETE']
+    assert len(deletes) == 1
+    assert sleeps == [30.0]
+    assert 'could not roll back' not in caplog.text
+
+
+def test_a_publish_that_went_through_is_not_repeated(http_server, dataverse_server, sleeps):
+    """The dataset was published behind a bot-check page: no second publish."""
+    _DataverseHandler.script_after = {('POST', '/actions/:publish'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server, publish=True)
+    assert result == 'doi:10.34894/DEMO01'
+    publishes = [c for c in calls if c['path'].endswith('/actions/:publish')]
+    assert len(publishes) == 1
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+def test_an_html_body_without_the_bot_check_marker_is_not_retried(sleeps):
+    """Only the bot-check page is retryable; another HTML body is a plain failure."""
+    import requests
+
+    from fwl_io.mirror import DataverseRetryableError
+
+    response = _fake_response(200, b'<html><body>maintenance</body></html>')
+    response.headers['Content-Type'] = 'text/html'
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: response
+    try:
+        with pytest.raises(DataverseError, match='non-JSON body') as info:
+            client.publish('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert not isinstance(info.value, DataverseRetryableError)
+    assert sleeps == []

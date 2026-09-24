@@ -22,6 +22,10 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
     Commit that change in a pull request, like any other data change.
 
+## When a run fails
+
+DataverseNL sometimes answers an API call with its bot-check page (an HTML page titled "Oh noes!") or a 502, 503 or 504 gateway error. The mirror repeats such a call up to 5 times, waiting 30, 60, 120 and 240 s in between. Before it sends a file again, it lists the draft and skips a file that arrived; a different file of the same name stops the run. When the calls keep failing, or any other error occurs, the run deletes the draft it created, with the same retries, and the error names the call and the last response. If that deletion also fails, the log names the draft to delete by hand.
+
 ## Publishing a reviewed draft
 
 A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published.

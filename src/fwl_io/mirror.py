@@ -26,8 +26,10 @@ review and to point at a mock server in tests.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 import requests
@@ -46,8 +48,26 @@ log = logging.getLogger('fwl.' + __name__)
 _NO_INGEST_PARAM = 'noVarDetect'
 
 
+# Retry of a native-API call that DataverseNL answers with its bot-check page
+# or a gateway error: 30, 60, 120, 240 s between 5 attempts, at most 450 s of waiting.
+MAX_ATTEMPTS = 5
+BACKOFF_S = 30.0
+BACKOFF_CAP_S = 300.0
+_RETRY_STATUSES = (502, 503, 504)
+_CHALLENGE_MARKERS = ('Oh noes!', '/.within.website/')
+_sleep = time.sleep
+
+
 class DataverseError(RuntimeError):
     """A Dataverse native-API request failed."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DataverseRetryableError(DataverseError):
+    """A Dataverse call hit the bot-check page or a gateway error; it may succeed if repeated."""
 
 
 def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
@@ -167,6 +187,9 @@ class DataverseClient:
 
         Raises
         ------
+        DataverseRetryableError
+            If the response is the DataverseNL bot-check page (text/html with
+            its "Oh noes!" marker) or a 502, 503 or 504 gateway error.
         DataverseError
             If the HTTP transport fails, the response status is 400 or
             higher, or a non-empty successful body fails to parse as JSON or
@@ -185,9 +208,23 @@ class DataverseClient:
             # native-API request too; surface it as a DataverseError so every
             # Dataverse-side failure is one error type for callers to catch.
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
+        if 'text/html' in response.headers.get('Content-Type', '') and any(
+            marker in response.text for marker in _CHALLENGE_MARKERS
+        ):
+            raise DataverseRetryableError(
+                f'Dataverse {method} {path} returned its bot-check page '
+                f'({response.status_code}, text/html, "Oh noes!") instead of an API response',
+                response.status_code,
+            )
+        if response.status_code in _RETRY_STATUSES:
+            raise DataverseRetryableError(
+                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
+                response.status_code,
+            )
         if not response.ok:
             raise DataverseError(
-                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}'
+                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
+                response.status_code,
             )
         if not response.content:
             # A 2xx with an empty body (routine for a DELETE) is a success
@@ -210,6 +247,103 @@ class DataverseClient:
     def _post(self, path: str, **kwargs) -> dict:
         return self._request('POST', path, **kwargs)
 
+    def _retry(self, call, what: str, done=None):
+        """Run ``call`` up to MAX_ATTEMPTS times while it raises DataverseRetryableError.
+
+        Before each repeat, ``done()`` (when given) tells whether the earlier
+        attempt took effect on the server after all; the call is then not
+        repeated. The waits are 30, 60, 120 and 240 s: at most 450 s of sleep,
+        plus up to MAX_ATTEMPTS request timeouts, for one call that never
+        succeeds. The mirror workflow has no job timeout below GitHub's 6 h.
+
+        Raises
+        ------
+        DataverseRetryableError
+            If every attempt hit the bot-check page or a gateway error; the
+            message names the call and the last response.
+        """
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1 and done is not None and done():
+                    return
+                return call()
+            except DataverseRetryableError as exc:
+                if attempt == MAX_ATTEMPTS:
+                    raise DataverseRetryableError(
+                        f'{what} failed on all {MAX_ATTEMPTS} attempts; last: {exc}',
+                        exc.status_code,
+                    ) from exc
+                delay = min(BACKOFF_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
+                log.warning(
+                    '%s (attempt %d of %d): %s; retrying in %.0f s',
+                    what,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    exc,
+                    delay,
+                )
+                _sleep(delay)
+
+    def _draft_file(self, persistent_id: str, name: str) -> dict | None:
+        """Return the draft's metadata for the file called ``name``, or None."""
+        body = self._request(
+            'GET',
+            '/api/datasets/:persistentId/versions/:draft/files',
+            params={'persistentId': persistent_id},
+        )
+        for entry in body.get('data', []):
+            data_file = entry.get('dataFile', {})
+            if data_file.get('filename') == name:
+                return data_file
+        return None
+
+    def _file_arrived(self, persistent_id: str, path: Path) -> bool:
+        """Return whether ``path`` is already in the draft, byte for byte.
+
+        Raises
+        ------
+        DataverseError
+            If the draft holds a different file of the same name.
+        """
+        entry = self._draft_file(persistent_id, path.name)
+        if entry is None:
+            return False
+        checksum = entry.get('checksum') or {}
+        algorithm = {'MD5': 'md5', 'SHA-1': 'sha1'}.get(checksum.get('type'))
+        same = entry.get('filesize') == path.stat().st_size
+        if same and algorithm is not None:
+            with path.open('rb') as handle:
+                same = hashlib.file_digest(handle, algorithm).hexdigest() == checksum.get('value')
+        if not same:
+            raise DataverseError(
+                f'draft {persistent_id} already holds a different file named {path.name}'
+            )
+        log.info(
+            '%s arrived in %s despite the failed response; not sending it again',
+            path.name,
+            persistent_id,
+        )
+        return True
+
+    def _released(self, persistent_id: str) -> bool:
+        """Return whether the dataset's latest version is published."""
+        body = self._request(
+            'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
+        )
+        return body.get('data', {}).get('latestVersion', {}).get('versionState') == 'RELEASED'
+
+    def _deleted(self, persistent_id: str) -> bool:
+        """Return whether the dataset is gone (404)."""
+        try:
+            self._request(
+                'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
+            )
+        except DataverseError as exc:
+            if exc.status_code == 404:
+                return True
+            raise
+        return False
+
     def create_dataset(self, collection: str, metadata: dict) -> str:
         """Create a draft dataset in ``collection``; return its persistent id."""
         body = self._post(f'/api/dataverses/{collection}/datasets', json=metadata)
@@ -224,26 +358,42 @@ class DataverseClient:
         params = {'persistentId': persistent_id}
         if no_ingest:
             params[_NO_INGEST_PARAM] = 'true'
-        with path.open('rb') as handle:
-            self._post(
-                '/api/datasets/:persistentId/add',
-                params=params,
-                files={'file': (path.name, handle, 'application/octet-stream')},
-            )
+
+        def send():
+            with path.open('rb') as handle:
+                self._post(
+                    '/api/datasets/:persistentId/add',
+                    params=params,
+                    files={'file': (path.name, handle, 'application/octet-stream')},
+                )
+
+        self._retry(
+            send,
+            f'upload of {path.name} to {persistent_id}',
+            done=lambda: self._file_arrived(persistent_id, path),
+        )
 
     def publish(self, persistent_id: str, *, version_type: str = 'major') -> None:
         """Publish a dataset, making its files publicly downloadable."""
-        self._post(
-            '/api/datasets/:persistentId/actions/:publish',
-            params={'persistentId': persistent_id, 'type': version_type},
+        self._retry(
+            lambda: self._post(
+                '/api/datasets/:persistentId/actions/:publish',
+                params={'persistentId': persistent_id, 'type': version_type},
+            ),
+            f'publish of {persistent_id}',
+            done=lambda: self._released(persistent_id),
         )
 
     def delete_draft(self, persistent_id: str) -> None:
         """Delete an unpublished draft dataset (used to roll back a failed mirror)."""
-        self._request(
-            'DELETE',
-            '/api/datasets/:persistentId',
-            params={'persistentId': persistent_id},
+        self._retry(
+            lambda: self._request(
+                'DELETE',
+                '/api/datasets/:persistentId',
+                params={'persistentId': persistent_id},
+            ),
+            f'deletion of draft {persistent_id}',
+            done=lambda: self._deleted(persistent_id),
         )
 
 
