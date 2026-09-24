@@ -539,7 +539,7 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
-    lock_problem, lock_warnings = _lock_scan(root, lock_dirname=_LOCK_DIRNAME)
+    lock_problem, lock_warnings = _lock_scan(root, lock_dirname=_LOCK_DIRNAME, operation='prune')
     symlink_targets: set[Path] = set()
     if for_delete:
         symlink_targets, symlink_error = _referenced_symlink_targets(referenced)

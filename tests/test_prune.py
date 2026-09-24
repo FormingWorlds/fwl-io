@@ -2646,6 +2646,7 @@ def test_an_unwritable_unheld_lock_file_warns_in_both_runs(tmp_path, monkeypatch
     warning = '1 lock file(s) are not writable by this user'
     assert warning in plan.summary() and warning in dry and warning in wet
     assert not dirs['superseded'].exists()
+    assert 'which prune cannot see; do not fetch while prune runs' in plan.summary()
 
 
 def test_an_unwritable_lock_file_that_is_held_still_blocks(tmp_path, monkeypatch):
