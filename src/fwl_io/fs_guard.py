@@ -62,6 +62,23 @@ def _is_regular_file(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode)
 
 
+def _is_directory(path: Path) -> bool:
+    """True when ``path`` is a directory, symlinks followed; False when a component is absent.
+
+    Raises
+    ------
+    OSError
+        When ``path`` cannot be stat'd for any other reason, most often a
+        permission error on a directory above it, for the same reason as
+        :func:`_is_regular_file`.
+    """
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISDIR(st.st_mode)
+
+
 def _dir_size(directory: Path) -> int:
     """Sum the sizes of the regular files under ``directory``, symlinks excluded.
 
@@ -198,10 +215,6 @@ def _leaf_problem(
     return 'cannot be fully read' if unreadable else None
 
 
-#: The consequence every lock warning names.
-_UNLOCKED_FETCH = 'runs without a lock, which prune cannot see; do not fetch while prune runs'
-
-
 def _missing_access(path: Path) -> str | None:
     """Name the permission this user lacks on the directory ``path``, or ``None``."""
     writable, searchable = os.access(path, os.W_OK), os.access(path, os.X_OK)
@@ -213,7 +226,7 @@ def _missing_access(path: Path) -> str | None:
 
 
 def _lock_scan(
-    root: Path, *, lock_dirname: str, with_warnings: bool = True
+    root: Path, *, lock_dirname: str, operation: str = 'deletion', with_warnings: bool = True
 ) -> tuple[str | None, tuple[str, ...]]:
     """Probe every fetch lock under ``root``: why deletion must wait, and warnings.
 
@@ -229,7 +242,8 @@ def _lock_scan(
     so a tree shared with other users stays usable, but is named in the
     warnings: this user's own fetch through it would run without a lock.
     ``with_warnings=False`` skips those access checks, for the probe before
-    each removal, which only needs the reason.
+    each removal, which only needs the reason. ``operation`` names the caller
+    in the warnings that a fetch runs without a lock the caller cannot see.
 
     Returns
     -------
@@ -238,6 +252,9 @@ def _lock_scan(
         and the warning lines for the report.
     """
     lock_dir = root / lock_dirname
+    unlocked = (
+        f'runs without a lock, which {operation} cannot see; do not fetch while {operation} runs'
+    )
     warnings: list[str] = []
     unwritable = 0
 
@@ -245,7 +262,7 @@ def _lock_scan(
         if unwritable:
             warnings.append(
                 f'{unwritable} lock file(s) are not writable by this user; '
-                f'a fetch by this user through them {_UNLOCKED_FETCH}'
+                f'a fetch by this user through them {unlocked}'
             )
         return problem, tuple(warnings)
 
@@ -255,7 +272,7 @@ def _lock_scan(
         if with_warnings and not os.access(root, os.W_OK | os.X_OK):
             warnings.append(
                 f'{root} is not writable by this user, so a fetch by this user cannot create '
-                f'{lock_dirname} and {_UNLOCKED_FETCH}'
+                f'{lock_dirname} and {unlocked}'
             )
         return _result(None)
     except OSError as exc:
@@ -276,7 +293,7 @@ def _lock_scan(
     if missing is not None:
         warnings.append(
             f'{lock_dir} is not {missing} by this user; '
-            f'a fetch by this user whose lock file does not exist yet {_UNLOCKED_FETCH}'
+            f'a fetch by this user whose lock file does not exist yet {unlocked}'
         )
     for name in names:
         path = lock_dir / name
@@ -493,6 +510,29 @@ def _open_dir_below(root: Path, parts: tuple[str, ...]) -> int:
         os.close(fd)
         raise
     return fd
+
+
+def _probe_dir_below(root: Path, parts: tuple[str, ...]) -> None:
+    """Walk ``root/parts...`` as far as it exists, following no symlink below ``root``.
+
+    Raises
+    ------
+    OSError
+        When a component that exists is a symlink, is not a directory or
+        cannot be opened. A component that is absent ends the walk: the move
+        creates it.
+    """
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return
+            os.close(fd)
+            fd = nxt
+    finally:
+        os.close(fd)
 
 
 def _open_or_make_dir_below(root: Path, parts: tuple[str, ...]) -> int:

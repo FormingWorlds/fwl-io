@@ -12,6 +12,7 @@ at a closed port, and the relocation path itself never downloads.
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pytest
 
@@ -44,17 +45,18 @@ TARGET = f'star/tracks/baraffe_2015/r{RECID}'
 CONTENTS = {'BHAC15_tracks.dat': b'0.1 0.2 0.3\n', 'notes.txt': b'9.87\n'}
 
 
-def _digests(names=None):
-    chosen = CONTENTS if names is None else {n: CONTENTS[n] for n in names}
+def _digests(names=None, contents=None):
+    source = CONTENTS if contents is None else contents
+    chosen = source if names is None else {n: source[n] for n in names}
     return {n: f'sha256:{hashlib.sha256(b).hexdigest()}' for n, b in chosen.items()}
 
 
-def _install_manifest(monkeypatch, tmp_path, *, with_registry=True):
+def _install_manifest(monkeypatch, tmp_path, *, with_registry=True, contents=None):
     """Install a manifest declaring the migrated dataset, and its registry."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\n')
     if with_registry:
-        lines = ''.join(f'{n} {d}\n' for n, d in sorted(_digests().items()))
+        lines = ''.join(f'{n} {d}\n' for n, d in sorted(_digests(contents=contents).items()))
         (tmp_path / f'{KEY}.registry.txt').write_text(lines)
 
     class _EP:
@@ -259,11 +261,10 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
 def test_a_platform_missing_a_safe_move_capability_refuses_that_dataset(tmp_path, monkeypatch):
     """A platform that cannot move directories safely refuses the affected dataset by name.
 
-    The same no-follow open the actual move uses is probed at plan time for
-    every dataset the hash check found ready, so a platform without it is
-    refused cleanly there, before a move is attempted, rather than crashing
-    part way through with an error that names an implementation detail
-    instead of the reason. A dry run reports the same refusal, so it never
+    The shared platform guard is checked at plan time for every dataset the
+    hash check found ready, so a platform without a capability the move needs
+    is refused cleanly there, before a move is attempted, rather than crashing
+    part way through. A dry run reports the same refusal, so it never
     promises a move the real run cannot make.
     """
     import fwl_io.relocate as module
@@ -278,7 +279,8 @@ def test_a_platform_missing_a_safe_move_capability_refuses_that_dataset(tmp_path
 
     for result in (plan, report):
         assert [e.state for e in result.entries] == [UNRESOLVABLE]
-        assert 'cannot be safely opened' in result.entries[0].detail
+        assert 'relocation is not supported on this platform' in result.entries[0].detail
+        assert 'O_DIRECTORY' in result.entries[0].detail
         assert not result.ok
         assert result.moved == ()
     assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
@@ -307,7 +309,12 @@ def test_a_tidy_tree_is_not_refused_for_a_platform_capability_it_never_needed(
     assert report.ok
 
 
-def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypatch):
+LEAF_REASON = 'is a symlink, not a plain directory'
+OPEN_REASON = 'cannot be safely opened'
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypatch, dry_run):
     """A legacy directory that is itself a symlink is refused at the plan step, not the move.
 
     A symlinked directory whose target is a real, intact copy of the dataset
@@ -322,22 +329,44 @@ def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypa
     (root / LEGACY).parent.mkdir(parents=True, exist_ok=True)
     (root / LEGACY).symlink_to(real, target_is_directory=True)
 
-    report = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root, dry_run=dry_run)
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
-    assert 'symlink' in report.entries[0].detail
+    assert LEAF_REASON in report.entries[0].detail
     assert not (root / TARGET).exists()
+    assert (real / 'notes.txt').is_file()
 
 
+def test_the_leaf_symlink_check_refuses_on_its_own(tmp_path):
+    """``_classify`` refuses a symlinked legacy directory without the plan's open probe.
+
+    The probe would refuse it anyway, so only a call to ``_classify`` alone
+    can fail when this check is removed.
+    """
+    from fwl_io.relocate import _classify
+
+    real = tmp_path / 'real'
+    _populate(real)
+    link = tmp_path / 'link'
+    link.symlink_to(real, target_is_directory=True)
+
+    state, detail, files = _classify(link, tmp_path / 'target', _digests())
+
+    assert state == UNRESOLVABLE
+    assert LEAF_REASON in detail
+    assert files == ()
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
 def test_a_symlinked_ancestor_of_the_legacy_directory_is_refused_at_plan_time(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, dry_run
 ):
     """A symlink higher up in legacy_dir's path is refused at plan time, not only the leaf.
 
     ``legacy_dir`` itself not being a symlink is not enough: the leaf check
-    above passes an intact-looking directory reached through a symlinked
-    parent, and the same open the move already uses is what tells the two
-    apart, at plan time as well as when the move actually runs.
+    passes an intact-looking directory reached through a symlinked parent,
+    and the same open the move uses is what refuses it, at plan time as well
+    as when the move actually runs.
     """
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -345,11 +374,13 @@ def test_a_symlinked_ancestor_of_the_legacy_directory_is_refused_at_plan_time(
     _populate(real_parent / 'Baraffe')
     (root / LEGACY).parent.symlink_to(real_parent, target_is_directory=True)
 
-    report = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root, dry_run=dry_run)
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
-    assert 'symlink' in report.entries[0].detail
+    assert OPEN_REASON in report.entries[0].detail
+    assert LEAF_REASON not in report.entries[0].detail
     assert not (root / TARGET).exists()
+    assert (real_parent / 'Baraffe' / 'notes.txt').is_file()
 
 
 def test_a_symlinked_registry_file_is_refused_rather_than_moved(tmp_path, monkeypatch):
@@ -587,6 +618,22 @@ def test_the_shipped_table_names_only_datasets_and_relative_locations():
         assert location.strip('/') == location, f'{location!r} is not a clean relative path'
 
 
+DECOY = b'a decoy that must be neither moved nor overwritten\n'
+
+
+def _decoys(outside):
+    """Put a decoy under every registry name in ``outside``, a directory a symlink could reach."""
+    outside.mkdir()
+    for name in CONTENTS:
+        (outside / name).write_bytes(DECOY)
+
+
+def _assert_decoys_untouched(outside):
+    assert sorted(p.name for p in outside.iterdir()) == sorted(CONTENTS)
+    for name in CONTENTS:
+        assert (outside / name).read_bytes() == DECOY, f'{name} was moved or overwritten'
+
+
 def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, monkeypatch):
     """When the files cannot be put back, say so rather than call it a failure.
 
@@ -649,10 +696,8 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
     def _fail_second_move(root_, src_parent, dst_parent, filename):
         calls.append(filename)
         if len(calls) != 2:
-            # Every call but the one that fails, including the rollback that
-            # follows, goes to the real primitive: only that way does a
-            # passing test mean the real dir-fd guard refused the restore,
-            # rather than this fake's own bookkeeping standing in for it.
+            # Every call but the one that fails goes to the real primitive, so
+            # a pass means the real dir-fd guard refused the rollback.
             return real_move(root_, src_parent, dst_parent, filename)
         for entry in list(legacy.iterdir()):
             entry.unlink()
@@ -689,7 +734,7 @@ def test_a_symlink_swapped_into_target_dir_during_rollback_is_refused(tmp_path, 
     _populate(legacy)
     target = root / TARGET
     outside = tmp_path / 'outside'
-    outside.mkdir()
+    _decoys(outside)
     real_move = module._move_below_root
     calls = []
 
@@ -711,7 +756,8 @@ def test_a_symlink_swapped_into_target_dir_during_rollback_is_refused(tmp_path, 
     result = _move_one(entry, root)
 
     assert result.state == SPLIT
-    assert list(outside.iterdir()) == [], 'nothing may be read out through the swapped-in symlink'
+    _assert_decoys_untouched(outside)
+    assert all(p.read_bytes() != DECOY for p in legacy.iterdir()), 'a decoy was read out'
     assert target.is_symlink(), (
         'the swap itself is not undone; only the restore out of it is refused'
     )
@@ -754,6 +800,35 @@ def test_a_rollback_restores_every_file_moved_before_the_failure(tmp_path, monke
     assert list((root / TARGET).iterdir()) == [], 'the target holds nothing after a full rollback'
 
 
+def test_a_registry_file_swapped_for_a_symlink_before_the_move_is_refused(tmp_path):
+    """The move checks each entry is a plain file when it runs, not only when it was planned.
+
+    The link points at a file inside the data root, so the containment check
+    passes and only the recheck against the open directory handle refuses it.
+    Nothing may move, and what moved before it is put back.
+    """
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    elsewhere = root / 'elsewhere.dat'
+    elsewhere.write_bytes(CONTENTS['notes.txt'])
+    (legacy / 'notes.txt').unlink()
+    (legacy / 'notes.txt').symlink_to(elsewhere)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert 'is not a plain file' in result.detail
+    assert (legacy / 'notes.txt').is_symlink()
+    assert (legacy / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not any((root / TARGET / name).exists() for name in CONTENTS)
+
+
 def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
     """A symlink swapped into legacy_dir between the containment check and the move is refused.
 
@@ -770,7 +845,7 @@ def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, 
     legacy = root / LEGACY
     _populate(legacy)
     outside = tmp_path / 'outside'
-    outside.mkdir()
+    _decoys(outside)
     real_open = module._open_dir_below
     swapped = []
 
@@ -791,10 +866,8 @@ def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, 
     result = _move_one(entry, root)
 
     assert result.state != MOVED
-    assert not any((outside / name).exists() for name in CONTENTS)
-    assert not (root / TARGET).exists() or not any(
-        (root / TARGET / name).exists() for name in CONTENTS
-    )
+    _assert_decoys_untouched(outside)
+    assert not any((root / TARGET / name).exists() for name in CONTENTS)
 
 
 def test_a_failed_move_does_not_stop_the_others_from_being_tried(tmp_path, monkeypatch):
@@ -1161,3 +1234,256 @@ def test_an_archive_dataset_with_no_legacy_tree_is_absent_not_a_fault(tmp_path, 
     assert entry.state == ABSENT, f'no legacy tree reported as {entry.state}'
     assert entry.state != UNRESOLVABLE
     assert report.ok, 'a machine that never had the old layout must not fail'
+
+
+NESTED = {'x.dat': b'xx\n', 'sub/y.dat': b'yy\n'}
+
+
+def test_a_second_run_after_a_partial_move_reports_no_fault(tmp_path, monkeypatch):
+    """Running the move again after it moved only part of a tree is not a fault.
+
+    The first run moves the one registry file the legacy directory held; a
+    file that is not in the registry keeps the directory standing. On the next
+    run the legacy directory holds none of the registry, but the target holds
+    a verified part of it, so nothing is wrong and nothing is left to move.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['BHAC15_tracks.dat'])
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+
+    first = relocate_all(data_root=root)
+    second = relocate_all(data_root=root)
+    third = relocate_all(data_root=root)
+
+    assert [e.state for e in first.entries] == [MOVED]
+    for later in (second, third):
+        assert [e.state for e in later.entries] == [ABSENT]
+        assert later.ok and not later.faults
+        assert '1 of 2 file(s) already at' in later.entries[0].detail
+    assert (root / LEGACY / 'README').is_file()
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+
+
+def test_a_target_holding_a_corrupt_file_and_a_legacy_dir_with_none_is_still_a_fault(
+    tmp_path, monkeypatch
+):
+    """The partial-target exemption needs every registry file the target holds to match."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET, corrupt=['notes.txt'])
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [INCOMPLETE]
+    assert not report.ok
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_directory_inside_a_registry_name_is_refused_at_plan_time(
+    tmp_path, monkeypatch, dry_run
+):
+    """A symlinked subdirectory of the legacy tree is refused before the move, not during it.
+
+    The link points at a directory inside the data root, so the containment
+    check passes; the no-follow open the move makes refuses it, so the plan
+    must too, or the dry run promises a move the real run cannot make.
+    """
+    _install_manifest(monkeypatch, tmp_path, contents=NESTED)
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    legacy.mkdir(parents=True)
+    (legacy / 'x.dat').write_bytes(NESTED['x.dat'])
+    (root / 'realsub').mkdir()
+    (root / 'realsub' / 'y.dat').write_bytes(NESTED['sub/y.dat'])
+    (legacy / 'sub').symlink_to(root / 'realsub', target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert OPEN_REASON in report.entries[0].detail
+    assert (legacy / 'x.dat').is_file() and (root / 'realsub' / 'y.dat').is_file()
+    assert not (root / TARGET).exists()
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(tmp_path, monkeypatch, dry_run):
+    """A symlink on the target side, inside the data root, is refused at plan time as well."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / 'bigdisk_star').mkdir()
+    (root / 'star').symlink_to(root / 'bigdisk_star', target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert OPEN_REASON in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file()
+    assert list((root / 'bigdisk_star').iterdir()) == []
+
+
+def test_a_target_file_that_differs_from_the_registry_is_never_overwritten(tmp_path, monkeypatch):
+    """A file already at the target that is not the registry file blocks the dataset.
+
+    The move replaces by name, so a differing target file would be lost, and a
+    rollback after a later failure could not bring it back.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MISMATCH]
+    assert 'not overwritten' in report.entries[0].detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
+    assert (root / LEGACY / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not (root / TARGET / 'notes.txt').exists()
+
+
+def test_a_target_file_that_matches_the_registry_is_skipped_not_replaced(tmp_path, monkeypatch):
+    """A verified file already at the target counts as present and the rest still moves."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'])
+
+    plan = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root)
+
+    assert plan.entries[0].files == ('notes.txt',)
+    assert [e.state for e in report.entries] == [MOVED]
+    assert (root / TARGET / 'notes.txt').read_bytes() == CONTENTS['notes.txt']
+    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file(), 'the duplicate is left alone'
+
+
+def test_the_move_itself_refuses_to_overwrite_a_target_file(tmp_path):
+    """The move re-checks the target when it runs, so a file that appeared after the plan stays."""
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert (root / TARGET / 'notes.txt').read_bytes() == b'not the recorded contents\n'
+    for name in CONTENTS:
+        assert (legacy / name).read_bytes() == CONTENTS[name], f'{name} was not restored'
+    assert not (root / TARGET / 'BHAC15_tracks.dat').exists()
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+def test_an_unreadable_legacy_parent_refuses_that_dataset_and_does_not_raise(tmp_path, monkeypatch):
+    """A legacy parent this user cannot search is reported for that dataset, not raised."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    parent = root / LEGACY.split('/')[0]
+    parent.chmod(0)
+    try:
+        plan = plan_relocations(data_root=root)
+        report = relocate_all(data_root=root)
+    finally:
+        parent.chmod(0o755)
+
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'cannot read' in result.entries[0].detail
+        assert not result.ok
+    assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_a_platform_without_dir_fd_moves_refuses_that_dataset(tmp_path, monkeypatch):
+    """A platform that lacks directory-relative rename or mkdir is refused at plan time, by name."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr('fwl_io.fs_guard._DIR_FD_OK', False)
+
+    plan = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root)
+
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'relocation is not supported on this platform' in result.entries[0].detail
+        assert 'dir_fd' in result.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+@pytest.mark.parametrize(
+    ('unsupported_calls', 'state'), [({2}, 'failed'), ({2, 3}, 'split')], ids=['restored', 'split']
+)
+def test_a_move_primitive_the_platform_lacks_is_a_failure_not_a_crash(
+    tmp_path, monkeypatch, unsupported_calls, state
+):
+    """A NotImplementedError from the move, or from the rollback, is reported like an OSError."""
+    import fwl_io.relocate as module
+    from fwl_io.relocate import _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    real_replace = module.os.replace
+    calls = []
+
+    def _unsupported(*args, **kwargs):
+        calls.append(args)
+        if len(calls) in unsupported_calls:
+            raise NotImplementedError('dir_fd unavailable on this platform')
+        return real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'replace', _unsupported)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == state
+    assert len(calls) == 3, 'one move, one that failed, one rollback'
+    restored = state == 'failed'
+    assert (legacy / 'BHAC15_tracks.dat').exists() == restored
+
+
+@pytest.mark.parametrize(
+    ('setup', 'state'),
+    [
+        (lambda root: _populate(root / LEGACY, corrupt=['notes.txt']), MISMATCH),
+        (lambda root: (root / LEGACY).mkdir(parents=True), INCOMPLETE),
+        (lambda root: _populate(root / TARGET), ALREADY_CURRENT),
+        (lambda root: None, ABSENT),
+    ],
+    ids=['mismatch', 'incomplete', 'already-current', 'absent'],
+)
+def test_files_is_empty_for_every_state_but_ready(tmp_path, monkeypatch, setup, state):
+    """``Relocation.files`` names what a move would move, so it is empty unless one would."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    setup(root)
+
+    entry = plan_relocations(data_root=root).entries[0]
+
+    assert entry.state == state
+    assert entry.files == ()
+
+
+def test_files_names_the_verified_subset_for_a_ready_dataset(tmp_path, monkeypatch):
+    """A ready dataset lists only the present, verified files, not the whole registry."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['notes.txt'])
+
+    entry = plan_relocations(data_root=root).entries[0]
+
+    assert entry.state == READY
+    assert entry.files == ('notes.txt',)
