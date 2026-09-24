@@ -458,6 +458,19 @@ def _fake_response(status_code: int, content: bytes):
     return response
 
 
+def _publish_route(seen, post_reply):
+    """Answer the state check with a draft and every other call with ``post_reply``."""
+    draft = b'{"status": "OK", "data": {"latestVersion": {"versionState": "DRAFT"}}}'
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        return (
+            _fake_response(200, draft) if method == 'GET' else post_reply(method, *args, **kwargs)
+        )
+
+    return route
+
+
 @pytest.mark.unit
 def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id():
     """A 2xx create response with an empty body still fails, for the missing id."""
@@ -572,9 +585,11 @@ def test_publish_accepts_an_empty_success_body():
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
+    seen = []
+    requests.request = _publish_route(seen, lambda *args, **kwargs: _fake_response(200, b''))
     try:
         client.publish('doi:10.34894/DEMO01')  # must not raise
+        assert seen == ['GET', 'POST']
     finally:
         requests.request = orig
 
@@ -586,11 +601,15 @@ def test_publish_raises_with_the_status_and_body_on_a_non_json_success_body():
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    seen = []
+    requests.request = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    )
     try:
         with pytest.raises(DataverseError, match='this is not json') as exc_info:
             client.publish('doi:10.34894/DEMO01')
         assert '200' in str(exc_info.value)
+        assert seen == ['GET', 'POST']
     finally:
         requests.request = orig
 
@@ -640,8 +659,12 @@ def test_publish_existing_draft_raises_clearly_on_an_already_published_dataset()
     import requests
 
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(
-        403, b'{"status": "ERROR", "message": "Dataset already published"}'
+    seen = []
+    requests.request = _publish_route(
+        seen,
+        lambda *args, **kwargs: _fake_response(
+            403, b'{"status": "ERROR", "message": "Dataset already published"}'
+        ),
     )
     try:
         with pytest.raises(DataverseError, match='already published') as exc_info:
@@ -649,6 +672,7 @@ def test_publish_existing_draft_raises_clearly_on_an_already_published_dataset()
                 'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
             )
         assert '403' in str(exc_info.value)
+        assert seen == ['GET', 'POST']
     finally:
         requests.request = orig
 
@@ -659,13 +683,17 @@ def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_su
     import requests
 
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    seen = []
+    requests.request = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    )
     try:
         with pytest.raises(DataverseError, match='this is not json') as exc_info:
             publish_existing_dataverse_draft(
                 'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
             )
         assert '200' in str(exc_info.value)
+        assert seen == ['GET', 'POST']
     finally:
         requests.request = orig
 
@@ -1521,11 +1549,11 @@ def test_bot_check_detection_ignores_header_case_and_needs_html():
 )
 def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
     """A listed file matches only with its size and a checksum of a known type."""
-    from fwl_io.mirror import _same_file
+    from fwl_io.mirror import _ALGORITHMS, _same_file
 
     path = tmp_path / 'a.dat'
     path.write_bytes(b'AAAA')
-    algorithm = {'SHA-256': 'sha256', 'SHA-512': 'sha512', 'SHA-1': 'sha1'}.get(kind, 'md5')
+    algorithm = _ALGORITHMS.get(kind, 'md5')
     value = hashlib.new(algorithm, b'AAAA').hexdigest()
     entry = {'filesize': 4, 'checksum': {'type': kind, 'value': value}}
     assert _same_file(entry, path) is expected
@@ -1534,6 +1562,9 @@ def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
         'checksum': {'type': kind, 'value': hashlib.new(algorithm, b'ZZZZ').hexdigest()},
     }
     assert _same_file(other, path) is False
+    if expected:
+        assert _same_file({**entry, 'checksum': {'type': kind, 'value': value.upper()}}, path)
+        assert _same_file({**entry, 'filesize': 5}, path) is False
 
 
 @pytest.mark.unit
@@ -1627,10 +1658,10 @@ def test_publish_refuses_an_already_published_dataset(dataverse_server, sleeps):
 
 def test_an_unconfirmed_publish_keeps_the_dataset(http_server, dataverse_server, sleeps, caplog):
     """When no publish reply gets through, the dataset may be public, so it is not deleted."""
-    from fwl_io.mirror import DataverseRetryableError
+    from fwl_io.mirror import DataversePublishUnconfirmed
 
     _DataverseHandler.script = {('POST', '/actions/:publish'): ['challenge'] * 5}
-    with pytest.raises(DataverseRetryableError, match='publish of doi:10.34894/DEMO01'):
+    with pytest.raises(DataversePublishUnconfirmed, match='publish of doi:10.34894/DEMO01'):
         _mirror(http_server, dataverse_server, publish=True)
     assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
     assert 'not confirmed' in caplog.text
@@ -1644,4 +1675,70 @@ def test_an_extra_file_in_the_draft_stops_the_mirror(http_server, dataverse_serv
     with pytest.raises(DataverseError, match=r"not expected \['a-1.dat'\]"):
         _mirror(http_server, dataverse_server, publish=True)
     assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
+    assert _DataverseHandler.deleted
+
+
+def test_a_failed_state_check_rolls_the_draft_back(http_server, dataverse_server, sleeps, caplog):
+    """No publish request went out, so the draft is known private and is deleted."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('GET', '/api/datasets/:persistentId'): ['challenge'] * 5}
+    with pytest.raises(DataverseRetryableError, match='state check'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
+    assert _DataverseHandler.deleted
+    assert 'not confirmed' not in caplog.text
+
+
+def test_a_rejection_after_a_lost_publish_reply_keeps_the_dataset(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """A 504 then a 409 (e.g. the dataset is locked while publishing): the dataset is kept."""
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    _DataverseHandler.script = {('POST', '/actions/:publish'): [504, 409]}
+    with pytest.raises(DataversePublishUnconfirmed, match='409'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+    assert 'not confirmed' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_connection_error_is_retried_but_a_certificate_error_is_not(sleeps):
+    """A dropped connection may hide a request that arrived; a bad certificate never succeeds."""
+    import requests
+
+    def run(first):
+        replies = [first, _fake_response(404, b'{"status": "ERROR"}')]
+
+        def fake(*args, **kwargs):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        orig = requests.request
+        requests.request = fake
+        try:
+            DataverseClient('http://unused', 'tok').delete_draft('doi:10.34894/X')
+        finally:
+            requests.request = orig
+
+    run(requests.ConnectionError('connection reset'))
+    assert sleeps == [30.0]
+    with pytest.raises(DataverseError, match='certificate'):
+        run(requests.exceptions.SSLError('certificate verify failed'))
+    assert sleeps == [30.0]
+
+
+def test_a_draft_file_in_a_folder_or_without_a_name_counts_as_extra(
+    http_server, dataverse_server, sleeps
+):
+    """Listed files are keyed by folder and name, and an unnamed entry is reported, not a crash."""
+    _DataverseHandler.draft_files = [
+        {'filename': 'a.dat', 'directoryLabel': 'sub', 'filesize': 4},
+        {'filesize': 1},
+    ]
+    with pytest.raises(DataverseError, match=r"not expected \['', 'sub/a.dat'\]"):
+        _mirror(http_server, dataverse_server)
     assert _DataverseHandler.deleted

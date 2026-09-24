@@ -67,7 +67,11 @@ class DataverseError(RuntimeError):
 
 
 class DataverseRetryableError(DataverseError):
-    """A Dataverse call hit the bot-check page or a gateway error; it may succeed if repeated."""
+    """A Dataverse call hit the bot-check page, a gateway error or a lost connection."""
+
+
+class DataversePublishUnconfirmed(DataverseError):
+    """A publish request was sent, but whether it took effect is not known."""
 
 
 def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
@@ -166,7 +170,9 @@ def _same_file(entry: dict, path: Path) -> bool:
     if algorithm is None or entry.get('filesize') != path.stat().st_size:
         return False
     with path.open('rb') as handle:
-        return hashlib.file_digest(handle, algorithm).hexdigest() == checksum.get('value')
+        return (
+            hashlib.file_digest(handle, algorithm).hexdigest() == str(checksum.get('value')).lower()
+        )
 
 
 class DataverseClient:
@@ -220,6 +226,8 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
+        except (requests.exceptions.SSLError, requests.exceptions.ProxyError) as exc:
+            raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
         except (requests.ConnectionError, requests.Timeout) as exc:
             # The request may have reached Dataverse, like a gateway error.
             raise DataverseRetryableError(f'Dataverse {method} {path} failed: {exc}') from exc
@@ -267,6 +275,9 @@ class DataverseClient:
     def _retry(self, call, what: str, done=None):
         """Run ``call`` up to MAX_ATTEMPTS times while it raises DataverseRetryableError.
 
+        That error stands for the bot-check page, a gateway error, or a
+        connection error or timeout.
+
         Before each repeat, ``done()`` (when given) tells whether the earlier
         attempt took effect on the server after all; the call is then not
         repeated. The waits are 30, 60, 120 and 240 s: at most 450 s of sleep,
@@ -305,14 +316,16 @@ class DataverseClient:
                 _sleep(delay)
 
     def _draft_files(self, persistent_id: str) -> dict:
-        """Return the draft's file metadata keyed by file name."""
+        """Return the draft's file metadata keyed by path (folder label, file name)."""
         body = self._request(
             'GET',
             '/api/datasets/:persistentId/versions/:draft/files',
             params={'persistentId': persistent_id},
         )
         files = [entry.get('dataFile') or {} for entry in body.get('data') or []]
-        return {f.get('filename'): f for f in files}
+        return {
+            '/'.join(filter(None, (f.get('directoryLabel'), f.get('filename')))): f for f in files
+        }
 
     def _file_arrived(self, persistent_id: str, path: Path) -> bool:
         """Return whether ``path`` is already in the draft, byte for byte.
@@ -351,9 +364,11 @@ class DataverseClient:
         wrong = sorted(n for n, p in files.items() if not _same_file(listed.get(n, {}), p))
         extra = sorted(set(listed) - set(files))
         if wrong or extra:
+            kinds = sorted({str((f.get('checksum') or {}).get('type')) for f in listed.values()})
             raise DataverseError(
                 f'draft {persistent_id} does not match the Zenodo files: '
-                f'missing or different {wrong}, not expected {extra}'
+                f'missing or different {wrong}, not expected {extra} '
+                f'(checksum types listed: {kinds})'
             )
 
     def _released(self, persistent_id: str) -> bool:
@@ -410,18 +425,36 @@ class DataverseClient:
         Raises
         ------
         DataverseError
-            If the dataset is already published before the call.
+            If the dataset is already published before the call, or Dataverse
+            rejects the publish request.
+        DataversePublishUnconfirmed
+            If a publish request got no clear reply and its effect is unknown.
         """
         if self._retry(lambda: self._released(persistent_id), f'state check of {persistent_id}'):
             raise DataverseError(f'{persistent_id} is already published')
-        self._retry(
-            lambda: self._post(
-                '/api/datasets/:persistentId/actions/:publish',
-                params={'persistentId': persistent_id, 'type': version_type},
-            ),
-            f'publish of {persistent_id}',
-            done=lambda: self._released(persistent_id),
-        )
+        unclear = []
+
+        def post():
+            try:
+                self._post(
+                    '/api/datasets/:persistentId/actions/:publish',
+                    params={'persistentId': persistent_id, 'type': version_type},
+                )
+            except DataverseRetryableError:
+                unclear.append(True)
+                raise
+
+        try:
+            self._retry(
+                post, f'publish of {persistent_id}', done=lambda: self._released(persistent_id)
+            )
+        except DataverseError as exc:
+            # Only a publish rejected at the first reply is known not to have happened.
+            if unclear:
+                raise DataversePublishUnconfirmed(
+                    f'publish of {persistent_id} not confirmed: {exc}', exc.status_code
+                ) from exc
+            raise
 
     def delete_draft(self, persistent_id: str) -> None:
         """Delete an unpublished draft dataset (used to roll back a failed mirror)."""
@@ -532,8 +565,12 @@ def mirror_to_dataverse(
         example an unknown subject in the citation metadata), the HTTP transport
         fails (connection error or timeout), or a 2xx response body is not a
         JSON object (a non-empty body that fails to parse, or that parses to
-        something other than a JSON object). A failure during upload or publish
-        can leave a draft that the rollback then tries to delete.
+        something other than a JSON object), or the draft does not hold
+        exactly the Zenodo files. After such a failure the rollback deletes the
+        draft; if that fails too, the log names the draft to delete by hand.
+    DataversePublishUnconfirmed
+        If a publish request got no clear reply and its effect is unknown; the
+        dataset is kept, since it may be public already.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
@@ -597,21 +634,19 @@ def mirror_to_dataverse(
         log.info('created Dataverse dataset %s', persistent_id)
         # From here the draft exists with a real DOI: on any failure before
         # publish, delete it so a failed run leaves no orphaned deposit behind.
-        publishing = False
         try:
             for name in sorted(files):
                 client.add_file(persistent_id, files[name])
                 log.info('uploaded %s', name)
             client.check_draft(persistent_id, files)
             if publish:
-                publishing = True
                 client.publish(persistent_id)
                 log.info('published %s', persistent_id)
-        except Exception as exc:
-            if publishing and isinstance(exc, DataverseRetryableError):
-                # The dataset may be published already, so it is not deleted.
-                log.error('publish of %s not confirmed; check its state by hand', persistent_id)
-                raise
+        except DataversePublishUnconfirmed:
+            # The dataset may be published already, so it is not deleted.
+            log.error('publish of %s not confirmed; check its state by hand', persistent_id)
+            raise
+        except Exception:
             try:
                 client.delete_draft(persistent_id)
                 log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)
