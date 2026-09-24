@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import ssl
 import tempfile
 import time
 from pathlib import Path
@@ -48,12 +49,12 @@ log = logging.getLogger('fwl.' + __name__)
 _NO_INGEST_PARAM = 'noVarDetect'
 
 
-# Retry of a native-API call that DataverseNL answers with its bot-check page
-# or a gateway error: 30, 60, 120, 240 s between 5 attempts, at most 450 s of waiting.
+# Retry of a native-API call hit by the bot-check page, a gateway error, a 429 or a
+# lost connection: 30, 60, 120, 240 s between 5 attempts, at most 450 s of waiting.
 MAX_ATTEMPTS = 5
 BACKOFF_S = 30.0
 BACKOFF_CAP_S = 300.0
-_RETRY_STATUSES = (502, 503, 504)
+_RETRY_STATUSES = (429, 502, 503, 504)
 _CHALLENGE_MARKERS = ('Oh noes!', '/.within.website/')
 _sleep = time.sleep
 
@@ -67,7 +68,26 @@ class DataverseError(RuntimeError):
 
 
 class DataverseRetryableError(DataverseError):
-    """A Dataverse call hit the bot-check page, a gateway error or a lost connection."""
+    """A Dataverse call hit the bot-check page, a gateway error, a 429 or a lost connection."""
+
+    def __init__(self, message: str, status_code: int | None = None, retry_after=None):
+        super().__init__(message, status_code)
+        self.retry_after = retry_after
+
+
+def _cert_failure(exc: BaseException) -> bool:
+    """Return whether a certificate verification failure is anywhere in the exception chain."""
+    todo, seen = [exc], set()
+    while todo:
+        e = todo.pop()
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, ssl.SSLCertVerificationError):
+            return True
+        links = (e.__cause__, e.__context__, getattr(e, 'reason', None), *e.args)
+        todo += [x for x in links if isinstance(x, BaseException)]
+    return False
 
 
 class DataversePublishUnconfirmed(DataverseError):
@@ -226,11 +246,17 @@ class DataverseClient:
                 timeout=self.timeout,
                 **kwargs,
             )
-        except (requests.exceptions.SSLError, requests.exceptions.ProxyError) as exc:
+        except requests.exceptions.ProxyError as exc:
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
-        except (requests.ConnectionError, requests.Timeout) as exc:
-            # The request may have reached Dataverse, like a gateway error.
-            raise DataverseRetryableError(f'Dataverse {method} {path} failed: {exc}') from exc
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            # The request may have reached Dataverse, like a gateway error; a
+            # certificate failure is final (SSLError is a ConnectionError).
+            cls = DataverseError if _cert_failure(exc) else DataverseRetryableError
+            raise cls(f'Dataverse {method} {path} failed: {exc}') from exc
         except requests.RequestException as exc:
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
         if 'text/html' in response.headers.get('Content-Type', '').lower() and any(
@@ -242,9 +268,11 @@ class DataverseClient:
                 response.status_code,
             )
         if response.status_code in _RETRY_STATUSES:
+            wait = response.headers.get('Retry-After', '')
             raise DataverseRetryableError(
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
                 response.status_code,
+                float(wait) if wait.isdigit() else None,
             )
         if not response.ok:
             raise DataverseError(
@@ -275,8 +303,9 @@ class DataverseClient:
     def _retry(self, call, what: str, done=None):
         """Run ``call`` up to MAX_ATTEMPTS times while it raises DataverseRetryableError.
 
-        That error stands for the bot-check page, a gateway error, or a
-        connection error or timeout.
+        That error stands for the bot-check page, a 429 (its Retry-After is
+        used as the wait), a gateway error, or a connection error or timeout.
+        Any other error, from ``call`` or ``done``, passes through at once.
 
         Before each repeat, ``done()`` (when given) tells whether the earlier
         attempt took effect on the server after all; the call is then not
@@ -287,8 +316,8 @@ class DataverseClient:
         Raises
         ------
         DataverseRetryableError
-            If every attempt hit the bot-check page or a gateway error; the
-            message names the call and the last response.
+            If every attempt failed that way; the message names the call, how
+            many times it was sent, and the last error.
         """
         sent = 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -304,7 +333,7 @@ class DataverseClient:
                         f'last: {exc}',
                         exc.status_code,
                     ) from exc
-                delay = min(BACKOFF_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
+                delay = min(exc.retry_after or BACKOFF_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
                 log.warning(
                     '%s (attempt %d of %d): %s; retrying in %.0f s',
                     what,
@@ -376,7 +405,8 @@ class DataverseClient:
         body = self._request(
             'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
         )
-        return body.get('data', {}).get('latestVersion', {}).get('versionState') == 'RELEASED'
+        version = (body.get('data') or {}).get('latestVersion') or {}
+        return version.get('versionState') == 'RELEASED'
 
     def _deleted(self, persistent_id: str) -> bool:
         """Return whether the dataset is gone (404)."""
@@ -428,31 +458,36 @@ class DataverseClient:
             If the dataset is already published before the call, or Dataverse
             rejects the publish request.
         DataversePublishUnconfirmed
-            If a publish request got no clear reply and its effect is unknown.
+            If a publish request got any reply other than a 4xx, or none; its
+            effect is then unknown.
         """
         if self._retry(lambda: self._released(persistent_id), f'state check of {persistent_id}'):
             raise DataverseError(f'{persistent_id} is already published')
-        unclear = []
+        sent, unclear = [], []
 
         def post():
+            sent.append(True)
             try:
                 self._post(
                     '/api/datasets/:persistentId/actions/:publish',
                     params={'persistentId': persistent_id, 'type': version_type},
                 )
-            except DataverseRetryableError:
-                unclear.append(True)
+            except DataverseError as exc:
+                # Only a 4xx shows the request had no effect.
+                if not 400 <= (exc.status_code or 0) < 500:
+                    unclear.append(True)
                 raise
 
         try:
             self._retry(
                 post, f'publish of {persistent_id}', done=lambda: self._released(persistent_id)
             )
-        except DataverseError as exc:
-            # Only a publish rejected at the first reply is known not to have happened.
+        except Exception as exc:
             if unclear:
                 raise DataversePublishUnconfirmed(
-                    f'publish of {persistent_id} not confirmed: {exc}', exc.status_code
+                    f'publish of {persistent_id} not confirmed (request sent {len(sent)} '
+                    f'time(s)); last error: {exc}',
+                    getattr(exc, 'status_code', None),
                 ) from exc
             raise
 
@@ -566,11 +601,13 @@ def mirror_to_dataverse(
         fails (connection error or timeout), or a 2xx response body is not a
         JSON object (a non-empty body that fails to parse, or that parses to
         something other than a JSON object), or the draft does not hold
-        exactly the Zenodo files. After such a failure the rollback deletes the
-        draft; if that fails too, the log names the draft to delete by hand.
+        exactly the Zenodo files. After a failure past the dataset creation the
+        rollback deletes the draft; if that fails too, the log names the draft
+        to delete by hand. A failed creation leaves no draft to roll back, but a
+        creation whose reply was lost can leave one in the collection.
     DataversePublishUnconfirmed
-        If a publish request got no clear reply and its effect is unknown; the
-        dataset is kept, since it may be public already.
+        If a publish request got any reply other than a 4xx, or none, so its
+        effect is unknown; the dataset is kept, since it may be public already.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
@@ -632,8 +669,8 @@ def mirror_to_dataverse(
         client = DataverseClient(dataverse_url, token)
         persistent_id = client.create_dataset(collection, metadata)
         log.info('created Dataverse dataset %s', persistent_id)
-        # From here the draft exists with a real DOI: on any failure before
-        # publish, delete it so a failed run leaves no orphaned deposit behind.
+        # From here the draft exists with a real DOI: on a failure, delete it so a
+        # failed run leaves no orphaned deposit, unless a publish may have happened.
         try:
             for name in sorted(files):
                 client.add_file(persistent_id, files[name])
@@ -694,7 +731,10 @@ def publish_existing_dataverse_draft(
         or ``version_type`` is not ``'major'`` or ``'minor'``.
     DataverseError
         If the publish request fails: for example the dataset is already
-        published, does not exist, or the server returns a non-2xx status.
+        published, does not exist, or the server returns a 4xx status.
+    DataversePublishUnconfirmed
+        If the publish request got any reply other than a 4xx, or none, so its
+        effect is unknown; check the dataset's state before trying again.
     """
     if version_type not in ('major', 'minor'):
         raise ValueError(

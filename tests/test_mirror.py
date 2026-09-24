@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import pooch
 import pytest
+import urllib3
+from requests import exceptions as requests_exceptions
 
 from fwl_io.mirror import (
     DataverseClient,
@@ -1726,9 +1729,22 @@ def test_a_connection_error_is_retried_but_a_certificate_error_is_not(sleeps):
 
     run(requests.ConnectionError('connection reset'))
     assert sleeps == [30.0]
+    # A TLS error after the request went out (EOF while reading the reply) is retried.
+    run(requests.exceptions.SSLError('EOF occurred in violation of protocol'))
+    assert sleeps == [30.0, 30.0]
+    # A connection that breaks in the middle of the reply body is retried too.
+    run(requests.exceptions.ChunkedEncodingError('connection broken mid-body'))
+    assert sleeps == [30.0, 30.0, 30.0]
+    # The chain requests raises for a failed certificate check is final.
+    reason = urllib3.exceptions.SSLError(
+        ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    )
+    cert = requests.exceptions.SSLError(
+        urllib3.exceptions.MaxRetryError(None, 'https://dataverse.nl', reason=reason)
+    )
     with pytest.raises(DataverseError, match='certificate'):
-        run(requests.exceptions.SSLError('certificate verify failed'))
-    assert sleeps == [30.0]
+        run(cert)
+    assert sleeps == [30.0, 30.0, 30.0]
 
 
 def test_a_draft_file_in_a_folder_or_without_a_name_counts_as_extra(
@@ -1739,6 +1755,150 @@ def test_a_draft_file_in_a_folder_or_without_a_name_counts_as_extra(
         {'filename': 'a.dat', 'directoryLabel': 'sub', 'filesize': 4},
         {'filesize': 1},
     ]
-    with pytest.raises(DataverseError, match=r"not expected \['', 'sub/a.dat'\]"):
+    with pytest.raises(
+        DataverseError, match=r"not expected \['', 'sub/a.dat'\].*types listed: \['MD5', 'None'\]"
+    ):
         _mirror(http_server, dataverse_server)
     assert _DataverseHandler.deleted
+
+
+def _raise(exc):
+    def reply(*args, **kwargs):
+        raise exc
+
+    return reply
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'post_reply',
+    [
+        _raise(requests_exceptions.SSLError('EOF occurred in violation of protocol')),
+        _raise(requests_exceptions.ChunkedEncodingError('connection broken mid-body')),
+        lambda *args, **kwargs: _fake_response(200, b'<html>accepted</html>'),
+        lambda *args, **kwargs: _fake_response(500, b'{"status": "ERROR"}'),
+    ],
+    ids=['ssl-eof', 'chunked', 'non-json-2xx', 'server-error'],
+)
+def test_a_publish_reply_other_than_a_4xx_leaves_the_publish_unconfirmed(sleeps, post_reply):
+    """Only a 4xx shows a publish had no effect; any other reply or failure is unconfirmed."""
+    import requests
+
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, post_reply)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request sent \d time'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert 'POST' in seen
+
+
+@pytest.mark.unit
+def test_a_429_then_a_rejection_is_a_known_rejection(sleeps):
+    """A 429 means the request was not processed, so a 400 after it is a plain rejection."""
+    import requests
+
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    replies = [_fake_response(429, b'{}'), _fake_response(400, b'{"message": "rejected"}')]
+    replies[0].headers['Retry-After'] = '7'
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, lambda *args, **kwargs: replies.pop(0))
+    try:
+        with pytest.raises(DataverseError, match='rejected') as info:
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert not isinstance(info.value, DataversePublishUnconfirmed)
+    assert sleeps == [7.0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(('wait', 'expected'), [('7', 7.0), ('900', 300.0), ('soon', 30.0)])
+def test_a_429_waits_as_told_up_to_the_cap(sleeps, wait, expected):
+    """Retry-After in seconds sets the wait, capped at 300 s; another form uses the backoff."""
+    import requests
+
+    first = _fake_response(429, b'{}')
+    first.headers['Retry-After'] = wait
+    replies = [first, _fake_response(404, b'{"status": "ERROR"}')]
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: replies.pop(0)
+    try:
+        DataverseClient('http://unused', 'tok').delete_draft('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert sleeps == [expected]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('state', [b'{"data": null}', b'{"data": {"latestVersion": null}}'])
+def test_a_state_without_a_version_counts_as_unpublished(state):
+    """A state reply without data or latestVersion does not crash the publish."""
+    import requests
+
+    seen = []
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        return _fake_response(200, state if method == 'GET' else b'{"status": "OK"}')
+
+    orig = requests.request
+    requests.request = route
+    try:
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert seen == ['GET', 'POST']
+
+
+@pytest.mark.unit
+def test_an_unconfirmed_publish_says_how_often_it_was_sent(sleeps):
+    """One publish request and four failed state checks: the error says it was sent once."""
+    import requests
+
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    page = _fake_response(200, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'text/html'
+    draft = _fake_response(200, b'{"data": {"latestVersion": {"versionState": "DRAFT"}}}')
+    replies = [draft, page] + [page] * 4
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: replies.pop(0)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request sent 1 time\(s\)'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert replies == []
+
+
+@pytest.mark.unit
+def test_any_error_after_an_unclear_publish_keeps_it_unconfirmed(sleeps, monkeypatch):
+    """After a lost publish reply, even an unexpected error in the state check is unconfirmed."""
+    import requests
+
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    client = DataverseClient('http://unused', 'tok')
+    checks = [False]
+
+    def released(persistent_id):
+        if checks:
+            return checks.pop()
+        raise KeyError('versionState')
+
+    monkeypatch.setattr(client, '_released', released)
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(504, b'{}')
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match='versionState'):
+            client.publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert sleeps == [30.0]
