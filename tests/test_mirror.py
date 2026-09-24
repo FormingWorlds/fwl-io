@@ -9,17 +9,22 @@ asserted without touching a real Dataverse installation.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import pooch
 import pytest
+import urllib3
+from requests import exceptions as requests_exceptions
 
 from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
+    DataversePublishUnconfirmed,
     mirror_to_dataverse,
     publish_existing_dataverse_draft,
     zenodo_record_to_citation,
@@ -61,6 +66,13 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     fail_on_publish: bool = False  # set by a test to force a publish failure
     fail_on_delete: bool = False  # set by a test to force a rollback failure
     omit_persistent_id: bool = False  # set by a test to drop the create response id
+    # (method, path suffix) -> replies served before the normal one: 'challenge' or a status
+    script: dict = {}
+    # (method, path suffix) -> replies served after the normal handling ran
+    script_after: dict = {}
+    draft_files: list = []  # files the fake draft holds, as the listing reports them
+    released: bool = False
+    deleted: bool = False
 
     def log_message(self, *args):  # noqa: D102 -- silence request logging
         pass
@@ -81,6 +93,38 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         )
         return parsed
 
+    def _scripted(self, method, path, table):
+        for (m, suffix), replies in table.items():
+            if m == method and path.endswith(suffix) and replies:
+                reply = replies.pop(0)
+                if isinstance(reply, str):
+                    # 'challenge' or 'proxy', with an optional status: 'challenge 403'
+                    kind, _, status = reply.partition(' ')
+                    page = b'<!doctype html><html><head><title>Not Found</title></head></html>'
+                    if kind == 'challenge':
+                        page = b'<!doctype html><html><head><title>Oh noes!</title>'
+                        page += b'<link href="/.within.website/x/xess/xess.min.css"></head></html>'
+                    self.send_response(int(status or 200))
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(page)
+                else:
+                    self._reply(reply, {'status': 'ERROR', 'message': 'gateway'})
+                return True
+        return False
+
+    def do_GET(self):  # noqa: N802 -- BaseHTTPRequestHandler API
+        parsed = self._record('GET')
+        if self._scripted('GET', parsed.path, self.script):
+            return
+        if parsed.path.endswith('/versions/:draft/files'):
+            self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]})
+        elif self.deleted:
+            self._reply(404, {'status': 'ERROR', 'message': 'not found'})
+        else:
+            state = 'RELEASED' if self.released else 'DRAFT'
+            self._reply(200, {'status': 'OK', 'data': {'latestVersion': {'versionState': state}}})
+
     def _reply(self, status, payload):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
@@ -89,6 +133,18 @@ class _DataverseHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 -- BaseHTTPRequestHandler API
         parsed = self._record('POST')
+        if self._scripted('POST', parsed.path, self.script):
+            return
+        if parsed.path.endswith('/add') and self._scripted('POST', '/add', self.script_after):
+            # The upload reached the draft, but the response was lost.
+            self.draft_files.append(self._uploaded_file())
+            return
+        if parsed.path.endswith('/actions/:publish') and self.script_after.get(
+            ('POST', '/actions/:publish')
+        ):
+            _DataverseHandler.released = True
+            self._scripted('POST', '/actions/:publish', self.script_after)
+            return
         if parsed.path.endswith('/datasets'):
             if self.fail_on_create:
                 # Mimic a real Dataverse citation-validation rejection (e.g. an
@@ -104,21 +160,36 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             if self.fail_on_add:
                 self._reply(400, {'status': 'ERROR', 'message': 'bad field'})
             else:
+                self.draft_files.append(self._uploaded_file())
                 self._reply(200, {'status': 'OK', 'data': {'files': [{'label': 'ok'}]}})
         elif parsed.path.endswith('/actions/:publish'):
             if self.fail_on_publish:
                 self._reply(400, {'status': 'ERROR', 'message': 'publish rejected'})
                 return
+            _DataverseHandler.released = True
             self._reply(200, {'status': 'OK', 'data': {'id': 7}})
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _uploaded_file(self):
+        body = self.calls[-1]['body']
+        name = body.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
+        payload = body.split(b'\r\n\r\n', 1)[1].rsplit(b'\r\n--', 1)[0]
+        checksum = {'type': 'MD5', 'value': hashlib.md5(payload).hexdigest()}
+        return {'filename': name, 'filesize': len(payload), 'checksum': checksum}
+
     def do_DELETE(self):  # noqa: N802 -- BaseHTTPRequestHandler API
-        self._record('DELETE')
+        parsed = self._record('DELETE')
+        if self._scripted('DELETE', parsed.path, self.script):
+            return
+        if self._scripted('DELETE', parsed.path, self.script_after):
+            _DataverseHandler.deleted = True
+            return
         if self.fail_on_delete:
             self._reply(500, {'status': 'ERROR', 'message': 'delete failed'})
         else:
+            _DataverseHandler.deleted = True
             self._reply(200, {'status': 'OK', 'data': {'message': 'deleted'}})
 
 
@@ -131,6 +202,11 @@ def dataverse_server():
     _DataverseHandler.fail_on_publish = False
     _DataverseHandler.fail_on_delete = False
     _DataverseHandler.omit_persistent_id = False
+    _DataverseHandler.script = {}
+    _DataverseHandler.script_after = {}
+    _DataverseHandler.draft_files = []
+    _DataverseHandler.released = False
+    _DataverseHandler.deleted = False
     server = ThreadingHTTPServer(('127.0.0.1', 0), _DataverseHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -174,7 +250,9 @@ def test_full_mirror_creates_uploads_and_publishes(http_server, dataverse_server
     assert paths.index('/api/dataverses/Proteus_Fr/datasets') < paths.index(
         '/api/datasets/:persistentId/add'
     )
-    assert paths.index('/api/datasets/:persistentId/actions/:publish') == len(paths) - 1
+    # The publish is the last write; a state check confirms it.
+    assert paths.index('/api/datasets/:persistentId/actions/:publish') == len(paths) - 2
+    assert calls[-1]['method'] == 'GET' and paths[-1] == '/api/datasets/:persistentId'
     # A clean run does not roll back: no draft is deleted.
     assert not any(c['method'] == 'DELETE' for c in calls)
 
@@ -341,6 +419,10 @@ def test_dataverse_error_on_failed_request():
         ok = False
         status_code = 403
         text = 'Forbidden'
+        headers = {'Content-Type': 'text/plain'}
+
+        def json(self):
+            raise ValueError('not JSON')
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
@@ -387,6 +469,21 @@ def _fake_response(status_code: int, content: bytes):
     response.status_code = status_code
     response._content = content
     return response
+
+
+def _publish_route(seen, post_reply, states=('DRAFT',)):
+    """Answer state checks with ``states`` (the last repeats), others with ``post_reply``."""
+    states = list(states)
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        if method != 'GET':
+            return post_reply(method, *args, **kwargs)
+        state = states.pop(0) if len(states) > 1 else states[0]
+        body = {'status': 'OK', 'data': {'latestVersion': {'versionState': state}}}
+        return _fake_response(200, json.dumps(body).encode())
+
+    return route
 
 
 @pytest.mark.unit
@@ -498,30 +595,38 @@ def test_add_file_raises_with_the_status_and_body_on_a_non_json_success_body(tmp
 
 @pytest.mark.unit
 def test_publish_accepts_an_empty_success_body():
-    """publish does not raise when Dataverse returns 2xx with an empty body."""
+    """A 2xx with an empty body, then a RELEASED state, is a publish."""
     import requests
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'')
+    seen = []
+    requests.request = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b''), ('DRAFT', 'RELEASED')
+    )
     try:
         client.publish('doi:10.34894/DEMO01')  # must not raise
+        assert seen == ['GET', 'POST', 'GET']
     finally:
         requests.request = orig
 
 
 @pytest.mark.unit
-def test_publish_raises_with_the_status_and_body_on_a_non_json_success_body():
-    """publish raises on a 2xx non-JSON body, naming the status and body."""
+def test_publish_raises_with_the_status_and_body_on_a_non_json_success_body(sleeps):
+    """A 2xx non-JSON body and no RELEASED state is unconfirmed, naming the status and body."""
     import requests
 
     client = DataverseClient('http://unused', 'tok')
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    seen = []
+    requests.request = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    )
     try:
-        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+        with pytest.raises(DataversePublishUnconfirmed, match='this is not json') as exc_info:
             client.publish('doi:10.34894/DEMO01')
         assert '200' in str(exc_info.value)
+        assert seen == ['GET', 'POST'] + ['GET'] * 5
     finally:
         requests.request = orig
 
@@ -571,8 +676,12 @@ def test_publish_existing_draft_raises_clearly_on_an_already_published_dataset()
     import requests
 
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(
-        403, b'{"status": "ERROR", "message": "Dataset already published"}'
+    seen = []
+    requests.request = _publish_route(
+        seen,
+        lambda *args, **kwargs: _fake_response(
+            403, b'{"status": "ERROR", "message": "Dataset already published"}'
+        ),
     )
     try:
         with pytest.raises(DataverseError, match='already published') as exc_info:
@@ -580,23 +689,30 @@ def test_publish_existing_draft_raises_clearly_on_an_already_published_dataset()
                 'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
             )
         assert '403' in str(exc_info.value)
+        assert seen == ['GET', 'POST']
     finally:
         requests.request = orig
 
 
 @pytest.mark.unit
-def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_success_body():
-    """A 2xx publish response with a non-JSON body raises, naming the status and body."""
+def test_publish_existing_draft_raises_with_the_status_and_body_on_a_non_json_success_body(
+    sleeps,
+):
+    """A 2xx non-JSON body and no RELEASED state is unconfirmed, naming the status and body."""
     import requests
 
     orig = requests.request
-    requests.request = lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    seen = []
+    requests.request = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b'this is not json')
+    )
     try:
-        with pytest.raises(DataverseError, match='this is not json') as exc_info:
+        with pytest.raises(DataversePublishUnconfirmed, match='this is not json') as exc_info:
             publish_existing_dataverse_draft(
                 'doi:10.34894/DEMO01', dataverse_url='http://unused', token='tok'
             )
         assert '200' in str(exc_info.value)
+        assert seen == ['GET', 'POST'] + ['GET'] * 5
     finally:
         requests.request = orig
 
@@ -1265,3 +1381,892 @@ def test_cli_mirror_publish_surfaces_a_dataverse_error(monkeypatch, capsys):
     rc = main(['mirror-publish', 'doi:10.34894/DEMO01'])
     assert rc == 1
     assert 'already published' in capsys.readouterr().err
+
+
+@pytest.fixture()
+def sleeps(monkeypatch):
+    """Record the retry waits instead of sleeping."""
+    import fwl_io.mirror as mirror
+
+    waits = []
+    monkeypatch.setattr(mirror, '_sleep', waits.append)
+    return waits
+
+
+def _adds(calls, name=None):
+    adds = [c for c in calls if c['method'] == 'POST' and c['path'].endswith('/add')]
+    return [c for c in adds if name is None or f'filename="{name}"'.encode() in c['body']]
+
+
+def test_bot_check_page_on_add_is_retried_with_the_file_reopened(
+    http_server, dataverse_server, sleeps
+):
+    """Two bot-check pages on an upload: listed, waited, then sent again in full."""
+    _DataverseHandler.script = {('POST', '/add'): ['challenge', 'challenge']}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 3
+    assert all(b'AAA\n' in c['body'] for c in _adds(calls, 'a.dat'))
+    assert sleeps == [30.0, 60.0]
+    # One listing before each resend, one for the file-set check.
+    assert sum(c['path'].endswith('/versions/:draft/files') for c in calls) == 3
+    assert not any(c['method'] == 'DELETE' for c in calls)
+
+
+def test_an_upload_that_arrived_behind_a_bot_check_page_is_not_sent_again(
+    http_server, dataverse_server, sleeps
+):
+    """The file reached the draft but the reply was the bot-check page: no second upload."""
+    _DataverseHandler.script_after = {('POST', '/add'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 1
+    assert [f['filename'] for f in _DataverseHandler.draft_files] == ['a.dat', 'b.dat']
+    assert sleeps == [30.0]
+
+
+def test_a_different_file_of_the_same_name_in_the_draft_stops_the_upload(
+    http_server, dataverse_server, sleeps
+):
+    """A listed file with the same name but other bytes is an error, never overwritten."""
+    _DataverseHandler.script = {('POST', '/add'): ['challenge']}
+    _DataverseHandler.draft_files = [
+        {'filename': 'a.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
+    ]
+    with pytest.raises(DataverseError, match='holds a file named a.dat that is not the same file'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 1
+    assert _DataverseHandler.deleted
+
+
+def test_a_gateway_error_is_retried_but_a_rejection_is_not(http_server, dataverse_server, sleeps):
+    """A 504 on upload is repeated; a 400 fails at once and rolls the draft back."""
+    _DataverseHandler.script = {('POST', '/add'): [504]}
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 2
+    assert sleeps == [30.0]
+
+    sleeps.clear()
+    _DataverseHandler.calls.clear()
+    _DataverseHandler.fail_on_add = True
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls)) == 1
+    assert sleeps == []
+
+
+def test_retries_run_out_with_a_message_naming_the_bot_check_page(
+    http_server, dataverse_server, sleeps
+):
+    """Five bot-check pages in a row stop the mirror, name the page, and roll back."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 5}
+    with pytest.raises(DataverseRetryableError, match='sent 5 time.*in 5 attempts.*bot-check page'):
+        _mirror(http_server, dataverse_server)
+    assert sleeps == [30.0, 60.0, 120.0, 240.0]
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 5
+    assert _DataverseHandler.deleted
+
+
+def test_backoff_is_capped(http_server, dataverse_server, sleeps, monkeypatch):
+    """The wait doubles from 30 s and stops growing at 300 s."""
+    import fwl_io.mirror as mirror
+
+    monkeypatch.setattr(mirror, 'MAX_ATTEMPTS', 7)
+    _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 6}
+    result, _calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert sleeps == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0]
+
+
+def test_the_rollback_delete_is_retried(http_server, dataverse_server, sleeps, caplog):
+    """A bot-check page on the rollback does not leave an orphan draft."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script = {('DELETE', '/api/datasets/:persistentId'): ['challenge']}
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    deletes = [c for c in _DataverseHandler.calls if c['method'] == 'DELETE']
+    assert len(deletes) == 2
+    assert _DataverseHandler.deleted
+    assert 'could not roll back' not in caplog.text
+
+
+def test_a_rollback_that_went_through_is_not_repeated(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """The draft was deleted behind a bot-check page: the 404 ends the retry."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script_after = {('DELETE', '/api/datasets/:persistentId'): ['challenge']}
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    deletes = [c for c in _DataverseHandler.calls if c['method'] == 'DELETE']
+    assert len(deletes) == 1
+    assert sleeps == [30.0]
+    assert 'could not roll back' not in caplog.text
+
+
+def test_a_publish_that_went_through_is_not_repeated(http_server, dataverse_server, sleeps):
+    """The dataset was published behind a bot-check page: no second publish."""
+    _DataverseHandler.script_after = {('POST', '/actions/:publish'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server, publish=True)
+    assert result == 'doi:10.34894/DEMO01'
+    publishes = [c for c in calls if c['path'].endswith('/actions/:publish')]
+    assert len(publishes) == 1
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+def test_an_html_body_without_the_bot_check_marker_is_not_retried(sleeps):
+    """Only the bot-check page is retryable; another HTML body is a plain failure."""
+    import requests
+
+    from fwl_io.mirror import DataverseRetryableError
+
+    response = _fake_response(200, b'<html><body>maintenance</body></html>')
+    response.headers['Content-Type'] = 'text/html'
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: response
+    try:
+        with pytest.raises(DataverseError, match='non-JSON body') as info:
+            client.publish('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert not isinstance(info.value, DataverseRetryableError)
+    assert sleeps == []
+
+
+@pytest.mark.unit
+def test_bot_check_detection_ignores_header_case_and_needs_html():
+    """An upper-case text/html header is detected; the marker in a JSON body is not."""
+    import requests
+
+    from fwl_io.mirror import DataverseRetryableError
+
+    page = _fake_response(403, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'TEXT/HTML; charset=UTF-8'
+    json_body = _fake_response(200, b'{"status": "OK", "message": "Oh noes!"}')
+    json_body.headers['Content-Type'] = 'application/json'
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    try:
+        requests.request = lambda *args, **kwargs: page
+        with pytest.raises(DataverseRetryableError, match='bot-check page'):
+            client._request('GET', '/api/x')
+        requests.request = lambda *args, **kwargs: json_body
+        assert client._request('GET', '/api/x') == {'status': 'OK', 'message': 'Oh noes!'}
+    finally:
+        requests.request = orig
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('kind', 'expected'),
+    [('SHA-256', True), ('SHA-512', True), ('SHA-1', True), ('MD5', True), ('CRC32C', False)],
+)
+def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
+    """A listed file matches only with its size and a checksum of a known type."""
+    from fwl_io.mirror import _ALGORITHMS, _same_file
+
+    path = tmp_path / 'a.dat'
+    path.write_bytes(b'AAAA')
+    algorithm = _ALGORITHMS.get(kind, 'md5')
+    value = hashlib.new(algorithm, b'AAAA').hexdigest()
+    entry = {'filesize': 4, 'checksum': {'type': kind, 'value': value}}
+    assert _same_file(entry, path) is expected
+    other = {
+        'filesize': 4,
+        'checksum': {'type': kind, 'value': hashlib.new(algorithm, b'ZZZZ').hexdigest()},
+    }
+    assert _same_file(other, path) is False
+    if expected:
+        assert _same_file({**entry, 'checksum': {'type': kind, 'value': value.upper()}}, path)
+        assert _same_file({**entry, 'filesize': 5}, path) is False
+
+
+@pytest.mark.unit
+def test_a_timeout_is_retried(sleeps):
+    """A read timeout may hide a request that went through, so it is retried."""
+    import requests
+
+    replies = [requests.Timeout('read timed out'), _fake_response(404, b'{"status": "ERROR"}')]
+
+    def fake(*args, **kwargs):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    client = DataverseClient('http://unused', 'tok')
+    orig = requests.request
+    requests.request = fake
+    try:
+        client.delete_draft('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert sleeps == [30.0]
+    assert replies == []
+
+
+def test_a_bot_check_page_on_the_listing_counts_as_an_attempt(
+    http_server, dataverse_server, sleeps
+):
+    """A challenged listing uses an attempt; the upload is sent again once the listing works."""
+    _DataverseHandler.script = {
+        ('POST', '/add'): ['challenge', 'challenge'],
+        ('GET', '/versions/:draft/files'): ['challenge'],
+    }
+    result, calls = _mirror(http_server, dataverse_server)
+    assert result == 'doi:10.34894/DEMO01'
+    assert len(_adds(calls, 'a.dat')) == 3
+    assert sleeps == [30.0, 60.0, 120.0]
+
+
+def test_the_final_error_counts_the_calls_actually_sent(http_server, dataverse_server, sleeps):
+    """A challenged listing uses an attempt, so 5 attempts sent the upload 4 times."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {
+        ('POST', '/add'): ['challenge'] * 4,
+        ('GET', '/versions/:draft/files'): ['challenge'],
+    }
+    with pytest.raises(DataverseRetryableError, match=r'sent 4 time\(s\) in 5 attempts'):
+        _mirror(http_server, dataverse_server)
+    assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 4
+
+
+def test_create_is_not_retried(http_server, dataverse_server, sleeps):
+    """A bot-check page on create stops at once: a repeat could mint a second draft."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('POST', '/datasets'): ['challenge']}
+    with pytest.raises(DataverseRetryableError, match='bot-check page'):
+        _mirror(http_server, dataverse_server)
+    creates = [c for c in _DataverseHandler.calls if c['path'].endswith('/datasets')]
+    assert len(creates) == 1
+    assert sleeps == []
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+
+
+def test_a_failed_deletion_check_is_reported_not_counted_as_deleted(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """Only a 404 means deleted; another error on the check leaves the draft to delete by hand."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.script = {
+        ('DELETE', '/api/datasets/:persistentId'): ['challenge'],
+        ('GET', '/api/datasets/:persistentId'): [500],
+    }
+    with pytest.raises(DataverseError, match='400'):
+        _mirror(http_server, dataverse_server)
+    assert 'could not roll back' in caplog.text
+    assert not _DataverseHandler.deleted
+
+
+def test_publish_refuses_an_already_published_dataset(dataverse_server, sleeps):
+    """A published dataset is reported, not published again or passed as success."""
+    dv_url, calls = dataverse_server
+    _DataverseHandler.released = True
+    client = DataverseClient(dv_url, 'tok')
+    with pytest.raises(DataverseError, match='already published'):
+        client.publish('doi:10.34894/DEMO01')
+    assert not any(c['path'].endswith('/actions/:publish') for c in calls)
+
+
+def test_an_unconfirmed_publish_keeps_the_dataset(http_server, dataverse_server, sleeps, caplog):
+    """When no publish reply gets through, the dataset may be public, so it is not deleted."""
+    _DataverseHandler.script = {('POST', '/actions/:publish'): ['challenge'] * 5}
+    with pytest.raises(DataversePublishUnconfirmed, match='publish of doi:10.34894/DEMO01'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+    assert 'not confirmed' in caplog.text
+
+
+def test_an_extra_file_in_the_draft_stops_the_mirror(http_server, dataverse_server, sleeps):
+    """A draft that holds a file Zenodo does not (e.g. a renamed second upload) is rolled back."""
+    _DataverseHandler.draft_files = [
+        {'filename': 'a-1.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
+    ]
+    with pytest.raises(DataverseError, match=r"not expected \['a-1.dat'\]"):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
+    assert _DataverseHandler.deleted
+
+
+def test_a_failed_state_check_rolls_the_draft_back(http_server, dataverse_server, sleeps, caplog):
+    """No publish request went out, so the draft is known private and is deleted."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    _DataverseHandler.script = {('GET', '/api/datasets/:persistentId'): ['challenge'] * 5}
+    with pytest.raises(DataverseRetryableError, match='state check'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
+    assert _DataverseHandler.deleted
+    assert 'not confirmed' not in caplog.text
+
+
+def test_a_publish_504_is_polled_not_resent_and_the_draft_is_kept(
+    http_server, dataverse_server, sleeps, caplog
+):
+    """A 504 is not resent: the state is polled, and a dataset still in DRAFT is kept."""
+    _DataverseHandler.script = {('POST', '/actions/:publish'): [504]}
+    with pytest.raises(DataversePublishUnconfirmed, match='504'):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+    assert sum(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls) == 1
+    assert sleeps == [30.0, 60.0, 120.0, 240.0]
+    assert 'not confirmed' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_connection_error_is_retried_but_a_certificate_error_is_not(sleeps):
+    """A dropped connection may hide a request that arrived; a bad certificate never succeeds."""
+    import requests
+
+    def run(first):
+        replies = [first, _fake_response(404, b'{"status": "ERROR"}')]
+
+        def fake(*args, **kwargs):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        orig = requests.request
+        requests.request = fake
+        try:
+            DataverseClient('http://unused', 'tok').delete_draft('doi:10.34894/X')
+        finally:
+            requests.request = orig
+
+    run(requests.ConnectionError('connection reset'))
+    assert sleeps == [30.0]
+    # A TLS error that is not a certificate failure (here an EOF) is retried.
+    run(requests.exceptions.SSLError('EOF occurred in violation of protocol'))
+    assert sleeps == [30.0, 30.0]
+    # A connection that breaks in the middle of the reply body is retried too.
+    run(requests.exceptions.ChunkedEncodingError('connection broken mid-body'))
+    assert sleeps == [30.0, 30.0, 30.0]
+    # The chain requests raises for a failed certificate check is final.
+    reason = urllib3.exceptions.SSLError(
+        ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    )
+    cert = requests.exceptions.SSLError(
+        urllib3.exceptions.MaxRetryError(None, 'https://dataverse.nl', reason=reason)
+    )
+    with pytest.raises(DataverseError, match='certificate'):
+        run(cert)
+    assert sleeps == [30.0, 30.0, 30.0]
+
+
+def test_a_draft_file_in_a_folder_or_without_a_name_counts_as_extra(
+    http_server, dataverse_server, sleeps
+):
+    """Listed files are keyed by folder and name, and an unnamed entry is reported, not a crash."""
+    _DataverseHandler.draft_files = [
+        {'filename': 'a.dat', 'directoryLabel': 'sub', 'filesize': 4},
+        {'filesize': 1},
+    ]
+    with pytest.raises(
+        DataverseError, match=r"not expected \['', 'sub/a.dat'\].*types listed: \['MD5', 'None'\]"
+    ):
+        _mirror(http_server, dataverse_server)
+    assert _DataverseHandler.deleted
+
+
+def _raise(exc):
+    def reply(*args, **kwargs):
+        raise exc
+
+    return reply
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'post_reply',
+    [
+        _raise(requests_exceptions.SSLError('EOF occurred in violation of protocol')),
+        _raise(requests_exceptions.ChunkedEncodingError('connection broken mid-body')),
+        lambda *args, **kwargs: _fake_response(200, b'<html>accepted</html>'),
+        lambda *args, **kwargs: _fake_response(500, b'{"status": "ERROR"}'),
+    ],
+    ids=['ssl-eof', 'chunked', 'non-json-2xx', 'server-error'],
+)
+def test_a_publish_reply_other_than_a_4xx_leaves_the_publish_unconfirmed(sleeps, post_reply):
+    """Only a 4xx shows a publish had no effect; any other reply or failure is unconfirmed."""
+    import requests
+
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, post_reply)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request attempted \d time'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert 'POST' in seen
+
+
+@pytest.mark.unit
+def test_a_429_then_a_rejection_is_a_known_rejection(sleeps):
+    """A 429 means the request was not processed, so a 400 after it is a plain rejection."""
+    import requests
+
+    replies = [_fake_response(429, b'{}'), _fake_response(400, b'{"message": "rejected"}')]
+    replies[0].headers['Retry-After'] = '7'
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, lambda *args, **kwargs: replies.pop(0))
+    try:
+        with pytest.raises(DataverseError, match='rejected') as info:
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert not isinstance(info.value, DataversePublishUnconfirmed)
+    assert sleeps == [7.0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('status', 'wait', 'expected'),
+    [
+        (429, '7', 7.0),
+        (429, '0', 0.0),
+        (429, '900', 300.0),
+        (429, 'soon', 30.0),
+        (429, '\u00b2', 30.0),
+        (503, '1', 30.0),
+    ],
+)
+def test_a_429_waits_as_told_up_to_the_cap(sleeps, status, wait, expected):
+    """A 429's Retry-After in seconds sets the wait (cap 300 s); anything else uses the backoff."""
+    import requests
+
+    first = _fake_response(status, b'{}')
+    first.headers['Retry-After'] = wait
+    replies = [first, _fake_response(404, b'{"status": "ERROR"}')]
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: replies.pop(0)
+    try:
+        DataverseClient('http://unused', 'tok').delete_draft('doi:10.34894/X')
+    finally:
+        requests.request = orig
+    assert sleeps == [expected]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('state', [b'{"data": null}', b'{"data": {"latestVersion": null}}'])
+def test_a_state_without_a_version_counts_as_unpublished(state):
+    """A state reply without data or latestVersion does not crash the publish."""
+    import requests
+
+    seen = []
+
+    released = b'{"data": {"latestVersion": {"versionState": "RELEASED"}}}'
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        if method == 'GET':
+            return _fake_response(200, released if 'POST' in seen else state)
+        return _fake_response(200, b'{"status": "OK"}')
+
+    orig = requests.request
+    requests.request = route
+    try:
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert seen == ['GET', 'POST', 'GET']
+
+
+@pytest.mark.unit
+def test_an_unconfirmed_publish_says_how_often_it_was_sent(sleeps):
+    """One lost publish reply and five failed state checks: the error says it was sent once."""
+    import requests
+
+    page = _fake_response(200, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'text/html'
+    draft = _fake_response(200, b'{"data": {"latestVersion": {"versionState": "DRAFT"}}}')
+    replies = [draft, _fake_response(504, b'{}')] + [page] * 5
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: replies.pop(0)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request attempted 1 time\(s\)'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert replies == []
+
+
+@pytest.mark.unit
+def test_any_error_after_an_unclear_publish_keeps_it_unconfirmed(sleeps, monkeypatch):
+    """After a lost publish reply, even an unexpected error in the state check is unconfirmed."""
+    import requests
+
+    client = DataverseClient('http://unused', 'tok')
+    checks = [False]
+
+    def released(persistent_id):
+        if checks:
+            return checks.pop()
+        raise KeyError('versionState')
+
+    monkeypatch.setattr(client, '_released', released)
+    orig = requests.request
+    requests.request = lambda *args, **kwargs: _fake_response(504, b'{}')
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match='versionState'):
+            client.publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert sleeps == [30.0, 60.0, 120.0, 240.0]
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(10)
+def test_the_certificate_check_ends_on_a_cyclic_exception_chain():
+    """An exception chain that loops back on itself is walked once, not forever."""
+    from fwl_io.mirror import _cert_failure
+
+    first = ValueError('outer')
+    second = KeyError(first)
+    first.__context__ = second
+    assert _cert_failure(first) is False
+    second.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    assert _cert_failure(first) is True
+
+
+@pytest.mark.unit
+def test_an_unexpected_error_after_the_publish_request_keeps_it_unconfirmed(sleeps):
+    """A reply that breaks the JSON parser in an unexpected way is not a known rejection."""
+    import requests
+
+    def post_reply(*args, **kwargs):
+        raise RecursionError('maximum recursion depth exceeded')
+
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, post_reply)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match='recursion'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert seen == ['GET', 'POST'] + ['GET'] * 5
+
+
+def _state(state):
+    body = {'status': 'OK', 'data': {'latestVersion': {'versionState': state}}}
+    return _fake_response(200, json.dumps(body).encode())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'reply',
+    [
+        (200, b''),
+        (204, b''),
+        (200, b'{"status": "ERROR"}'),
+        (202, b'{"status": "WORKFLOW_IN_PROGRESS"}'),
+    ],
+)
+def test_an_accepted_publish_is_polled_until_released(sleeps, monkeypatch, reply):
+    """A 2xx of any body is not a publish until the state is RELEASED; the POST is sent once."""
+    import requests
+
+    seen = []
+    route = _publish_route(
+        seen,
+        lambda *args, **kwargs: _fake_response(*reply),
+        ('DRAFT', 'DRAFT', 'DRAFT', 'RELEASED'),
+    )
+    monkeypatch.setattr(requests, 'request', route)
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'GET', 'GET']
+    assert sleeps == [30.0, 60.0]
+
+
+@pytest.mark.unit
+def test_an_accepted_publish_that_stays_a_draft_is_unconfirmed(sleeps, monkeypatch):
+    """A 2xx and a DRAFT state until the wait limit: unconfirmed, the POST sent once."""
+    import requests
+
+    seen = []
+    route = _publish_route(seen, lambda *args, **kwargs: _fake_response(200, b'{"status": "OK"}'))
+    monkeypatch.setattr(requests, 'request', route)
+    with pytest.raises(DataversePublishUnconfirmed, match=r'attempted 1 time\(s\).*450 s'):
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST'] + ['GET'] * 5
+
+
+def test_an_accepted_publish_that_stays_a_draft_keeps_the_dataset(
+    http_server, dataverse_server, sleeps
+):
+    """A 202 with an error body and no RELEASED state: the mirror keeps the dataset."""
+    _DataverseHandler.script = {('POST', '/actions/:publish'): [202]}
+    with pytest.raises(DataversePublishUnconfirmed):
+        _mirror(http_server, dataverse_server, publish=True)
+    calls = _DataverseHandler.calls
+    assert not any(c['method'] == 'DELETE' for c in calls)
+    assert sum(c['path'].endswith('/actions/:publish') for c in calls) == 1
+
+
+@pytest.mark.unit
+def test_a_timeout_on_publish_is_polled_not_resent(sleeps, monkeypatch):
+    """A publish timeout, then RELEASED on the third state check: done, the POST sent once."""
+    import requests
+
+    def post_reply(*args, **kwargs):
+        raise requests_exceptions.ReadTimeout('read timed out')
+
+    seen = []
+    route = _publish_route(seen, post_reply, ('DRAFT', 'DRAFT', 'DRAFT', 'RELEASED'))
+    monkeypatch.setattr(requests, 'request', route)
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'GET', 'GET']
+    assert sleeps == [30.0, 60.0]
+
+
+def test_a_publish_answered_by_the_bot_check_page_is_sent_again(
+    http_server, dataverse_server, sleeps
+):
+    """The bot-check page shows the publish was not processed, so it is sent again."""
+    _DataverseHandler.script = {('POST', '/actions/:publish'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server, publish=True)
+    assert result == 'doi:10.34894/DEMO01'
+    assert sum(c['path'].endswith('/actions/:publish') for c in calls) == 2
+    assert sleeps == [30.0]
+
+
+@pytest.mark.parametrize('page', ['challenge 403', 'challenge'])
+def test_a_publish_that_only_gets_the_bot_check_page_keeps_the_dataset(
+    http_server, dataverse_server, sleeps, page
+):
+    """The bot-check page on every attempt, at any status: unconfirmed, never deleted."""
+    _DataverseHandler.script = {('POST', '/actions/:publish'): [page] * 5}
+    with pytest.raises(DataversePublishUnconfirmed, match='bot-check page'):
+        _mirror(http_server, dataverse_server, publish=True)
+    calls = _DataverseHandler.calls
+    assert not any(c['method'] == 'DELETE' for c in calls)
+    assert sum(c['path'].endswith('/actions/:publish') for c in calls) == 5
+
+
+@pytest.mark.parametrize('page', ['proxy 404', 'challenge 404'])
+def test_a_404_page_after_a_failed_delete_is_not_a_rollback(
+    http_server, dataverse_server, sleeps, caplog, page
+):
+    """A 404 page from a proxy or the bot-check page does not show that the draft is gone."""
+    _DataverseHandler.fail_on_add = True
+    _DataverseHandler.fail_on_delete = True
+    _DataverseHandler.script = {
+        ('DELETE', '/api/datasets/:persistentId'): ['challenge'],
+        ('GET', '/api/datasets/:persistentId'): [page] * 5,
+    }
+    with pytest.raises(DataverseError):
+        _mirror(http_server, dataverse_server)
+    assert 'rolled back the draft' not in caplog.text
+    assert 'could not roll back' in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('content_type', 'body', 'gone'),
+    [
+        ('application/json', b'{"status": "ERROR", "message": "not found"}', True),
+        ('application/json', b'{"message": "not found"}', False),
+        ('text/html', b'<html><title>Not Found</title></html>', False),
+    ],
+)
+def test_only_a_dataverse_404_counts_as_deleted(monkeypatch, content_type, body, gone):
+    """_deleted accepts a 404 only with a Dataverse JSON error body."""
+    import requests
+
+    response = _fake_response(404, body)
+    response.headers['Content-Type'] = content_type
+    monkeypatch.setattr(requests, 'request', lambda *args, **kwargs: response)
+    client = DataverseClient('http://unused', 'tok')
+    if gone:
+        assert client._deleted('doi:10.34894/DEMO01')
+    else:
+        with pytest.raises(DataverseError, match='404'):
+            client._deleted('doi:10.34894/DEMO01')
+
+
+def test_an_already_published_dataset_is_not_deleted(http_server, dataverse_server, caplog):
+    """A dataset found RELEASED before the publish request is kept."""
+    from fwl_io.mirror import DataverseAlreadyPublished
+
+    _DataverseHandler.released = True
+    with pytest.raises(DataverseAlreadyPublished):
+        _mirror(http_server, dataverse_server, publish=True)
+    calls = _DataverseHandler.calls
+    assert not any(c['method'] == 'DELETE' for c in calls)
+    assert not any(c['path'].endswith('/actions/:publish') for c in calls)
+    assert 'check its state by hand' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_file_listed_twice_in_the_draft_is_a_fault(tmp_path, monkeypatch):
+    """A draft that lists a path twice fails the check, even when both entries match."""
+    import requests
+
+    target = tmp_path / 'a.dat'
+    target.write_bytes(b'AAA\n')
+    entry = {
+        'filename': 'a.dat',
+        'filesize': 4,
+        'checksum': {'type': 'MD5', 'value': hashlib.md5(b'AAA\n').hexdigest()},
+    }
+    body = json.dumps({'status': 'OK', 'data': [{'dataFile': entry}, {'dataFile': entry}]})
+    monkeypatch.setattr(
+        requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
+    )
+    with pytest.raises(DataverseError, match=r"\['a.dat'\] more than once"):
+        DataverseClient('http://unused', 'tok').check_draft(
+            'doi:10.34894/DEMO01', {'a.dat': target}
+        )
+
+
+@pytest.mark.unit
+def test_a_proxy_error_is_retried(sleeps, monkeypatch):
+    """A proxy failure is a lost connection: the call is tried again."""
+    import requests
+
+    replies = [
+        requests_exceptions.ProxyError('proxy refused the connection'),
+        _fake_response(200, b''),
+    ]
+
+    def route(method, *args, **kwargs):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    client = DataverseClient('http://unused', 'tok')
+    monkeypatch.setattr(requests, 'request', route)
+    monkeypatch.setattr(client, '_deleted', lambda persistent_id: False)
+    client.delete_draft('doi:10.34894/DEMO01')
+    assert replies == []
+    assert sleeps == [30.0]
+
+
+def test_the_created_dataset_is_logged_as_a_warning(http_server, dataverse_server, caplog):
+    """The DOI of the created dataset reaches the default log handler."""
+    import logging
+
+    _mirror(http_server, dataverse_server, publish=False)
+    created = [r for r in caplog.records if 'created Dataverse dataset' in r.getMessage()]
+    assert [r.levelno for r in created] == [logging.WARNING]
+    assert 'doi:10.34894/DEMO01' in created[0].getMessage()
+
+
+def test_an_interrupted_mirror_keeps_the_dataset(
+    http_server, dataverse_server, caplog, monkeypatch
+):
+    """An interrupt after the create logs the DOI and deletes nothing."""
+
+    def interrupt(self, persistent_id, files):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DataverseClient, 'check_draft', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        _mirror(http_server, dataverse_server, publish=True)
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
+    assert 'doi:10.34894/DEMO01 interrupted' in caplog.text
+    assert 'check its state by hand' in caplog.text
+
+
+def _scripted_route(seen, gets, posts):
+    """Answer GETs and POSTs from their own reply lists, in order."""
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        return (gets if method == 'GET' else posts).pop(0)
+
+    return route
+
+
+def _page(status):
+    page = _fake_response(status, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'text/html'
+    return page
+
+
+@pytest.mark.unit
+def test_the_last_state_check_is_named_even_after_failed_checks(sleeps, monkeypatch):
+    """A DRAFT state after failed checks is what the unconfirmed message names last."""
+    import requests
+
+    gets = [_state('DRAFT')] + [_fake_response(500, b'{}')] * 4 + [_state('DRAFT')]
+    route = _scripted_route([], gets, [_fake_response(200, b'{"status": "OK"}')])
+    monkeypatch.setattr(requests, 'request', route)
+    with pytest.raises(DataversePublishUnconfirmed, match='last state check: not RELEASED$'):
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert gets == []
+
+
+def test_an_interrupt_during_the_rollback_is_logged(
+    http_server, dataverse_server, caplog, monkeypatch
+):
+    """An interrupt while deleting the draft names the draft to check by hand."""
+
+    def interrupt(self, persistent_id):
+        raise KeyboardInterrupt
+
+    _DataverseHandler.fail_on_add = True
+    monkeypatch.setattr(DataverseClient, 'delete_draft', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        _mirror(http_server, dataverse_server)
+    assert 'rollback of doi:10.34894/DEMO01 interrupted; check it by hand' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_bot_check_page_at_a_5xx_status_is_polled_not_resent(sleeps, monkeypatch):
+    """The bot-check page at a 5xx may follow a processed request, so publish is not resent."""
+    import requests
+
+    seen = []
+    gets = [_state('DRAFT'), _state('DRAFT'), _state('RELEASED')]
+    monkeypatch.setattr(requests, 'request', _scripted_route(seen, gets, [_page(503)]))
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'GET']
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+def test_an_unexpected_state_reply_before_a_resend_is_not_fatal(sleeps, monkeypatch, caplog):
+    """A state reply that breaks the parser before a resend counts as not RELEASED."""
+    import requests
+
+    seen = []
+    gets = [_state('DRAFT'), _fake_response(200, b'{"data": [1]}'), _state('RELEASED')]
+    posts = [_fake_response(429, b'{}'), _fake_response(200, b'{"status": "OK"}')]
+    monkeypatch.setattr(requests, 'request', _scripted_route(seen, gets, posts))
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'POST', 'GET']
+    assert 'state check of doi:10.34894/DEMO01 failed' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypatch):
+    """The listing's directoryLabel on the file entry, outside dataFile, keys the path."""
+    import requests
+
+    target = tmp_path / 'a.dat'
+    target.write_bytes(b'AAA\n')
+    data_file = {
+        'filename': 'a.dat',
+        'filesize': 4,
+        'checksum': {'type': 'MD5', 'value': hashlib.md5(b'AAA\n').hexdigest()},
+    }
+    body = json.dumps({'status': 'OK', 'data': [{'directoryLabel': 'sub', 'dataFile': data_file}]})
+    monkeypatch.setattr(
+        requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
+    )
+    with pytest.raises(DataverseError, match=r"not expected \['sub/a.dat'\]"):
+        DataverseClient('http://unused', 'tok').check_draft(
+            'doi:10.34894/DEMO01', {'a.dat': target}
+        )

@@ -22,9 +22,17 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
     Commit that change in a pull request, like any other data change.
 
+## When a run fails
+
+DataverseNL sometimes answers an API call with its bot-check page (an HTML page titled "Oh noes!"), a 429 (too many requests), a 502, 503 or 504 gateway error, or not at all, and a proxy on the way can drop the connection. The mirror makes up to 5 attempts in total at a file upload, the draft deletion and the reads it makes to check them, waiting 30, 60, 120 and 240 s in between (after a 429, the wait the server asks for in whole seconds, at most 300 s). Before it sends a file again, it lists the draft and skips a file that arrived. A different file of the same name stops the run; so does a file whose checksum type the mirror does not know (it knows MD5, SHA-1, SHA-256 and SHA-512), since it counts as a different file. After the uploads, with or without publishing, it checks that the draft holds exactly the Zenodo files, each listed once, with the same sizes and checksums.
+
+The publish request is sent again only after the bot-check page at a status below 500 or a 429, which show that DataverseNL did not process it. After any other reply except a 4xx rejection, a success included, or no reply, the request is not sent again: the mirror checks the dataset state up to 5 times over 450 s, and the publish counts as done only when the state is RELEASED. If it is not, or if all 5 attempts get the bot-check page or a 429, the publish is not confirmed. A 4xx reply other than the bot-check page is a rejection.
+
+The run logs the DOI of the dataset it creates. The dataset creation is not repeated, since a repeat could create a second draft: when it fails, look in the collection for a draft the run did not report. When a later step fails, the run deletes the draft it created, with the same retries, and the error names the call and the last response. The draft counts as deleted only when DataverseNL itself answers 404; if the deletion fails, the log names the draft to delete by hand. The run keeps the dataset, logs its DOI and asks you to check its state by hand when the publish is not confirmed, when the dataset was already published before the publish request, or when the run is interrupted.
+
 ## Publishing a reviewed draft
 
-A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published.
+A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published. If the dataset is not RELEASED after its publish request, the run stops with an error saying the publish was not confirmed: check the dataset's state on DataverseNL before running it again.
 
 ## What the mirror does
 
