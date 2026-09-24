@@ -1516,7 +1516,7 @@ def test_a_parent_swapped_during_the_checks_is_not_removed(tmp_path, monkeypatch
     victim = _stamped_version(outside, '', OLD_RECID, stamp_subdir=SUBDIR)
     parent = version.parent
 
-    def _swap(_root):
+    def _swap(_root, **_kwargs):
         _swap_parent_for_link(parent, outside)
         return None
 
@@ -1585,7 +1585,7 @@ def test_a_parent_moved_out_of_the_root_behind_a_link_is_not_removed(tmp_path, m
     outside = tmp_path / 'user_home' / 'project'
     outside.parent.mkdir()
 
-    def _move_out(_root):
+    def _move_out(_root, **_kwargs):
         parent.rename(outside)
         parent.symlink_to(outside, target_is_directory=True)
         return None
@@ -1645,7 +1645,7 @@ def test_an_entry_swapped_in_under_the_same_name_is_not_removed(tmp_path, monkey
     aside = version.with_name('aside')
     real_rename = prune_mod.os.rename
 
-    def _swap_entry(_root):
+    def _swap_entry(_root, **_kwargs):
         real_rename(version, aside)
         version.mkdir()
         (version / 'newcomer.dat').write_bytes(b'new\n')
@@ -1671,7 +1671,7 @@ def test_a_candidate_deleted_during_the_checks_is_reported_changed(tmp_path, mon
     root = tmp_path / 'data'
     version = _stamped_version(root, SUBDIR, OLD_RECID)
 
-    def _delete(_root):
+    def _delete(_root, **_kwargs):
         shutil.rmtree(version)
         return None
 
@@ -1762,6 +1762,43 @@ def test_a_looping_parent_after_the_delete_is_reported_not_raised(tmp_path, monk
     assert result.state == 'removed'
     assert result.detail.startswith('empty parent directories kept')
     assert not list((root / _STAGING_DIRNAME).glob('prune-*'))
+
+
+def test_symlink_hops_matches_the_kernel_on_a_real_chain(tmp_path):
+    """_symlink_hops's hand-rolled walk is checked against the kernel's own resolution.
+
+    Builds two real chains on disk, no mocking: one through a symlinked
+    directory (``via -> real_dir``, then ``link -> via/leaf``), and one that
+    additionally walks back out and in again with ``..``. For both, the hop
+    set must name every real directory and file the kernel actually visits,
+    and the endpoint must agree with ``os.path.realpath``, the OS's own
+    resolver, not just with the function's own restated logic.
+    """
+    from fwl_io.fs_guard import _symlink_hops
+
+    real_dir = tmp_path / 'real_dir'
+    real_dir.mkdir()
+    leaf = real_dir / 'leaf'
+    leaf.write_text('x')
+    via = tmp_path / 'via'
+    via.symlink_to('real_dir', target_is_directory=True)
+    link = tmp_path / 'link'
+    link.symlink_to('via/leaf')
+
+    hops = _symlink_hops(link)
+
+    assert hops == {via, real_dir, leaf}
+    assert os.path.realpath(link) == os.path.realpath(leaf)
+
+    sibling = tmp_path / 'sibling'
+    sibling.mkdir()
+    dotdot_link = tmp_path / 'dotdot_link'
+    dotdot_link.symlink_to('sibling/../via/leaf')
+
+    dotdot_hops = _symlink_hops(dotdot_link)
+
+    assert dotdot_hops == {sibling, via, real_dir, leaf}
+    assert os.path.realpath(dotdot_link) == os.path.realpath(leaf)
 
 
 def test_a_symlink_chain_through_a_candidate_protects_it(tmp_path, monkeypatch):
@@ -2107,8 +2144,11 @@ def test_the_probe_sees_a_lock_held_by_the_fetcher_itself(tmp_path):
         data_root=root,
     )
     with fetcher._fetch_lock('a.dat', fetcher.target_dir / 'a.dat'):
-        assert prune_mod._lock_problem(root) == 'a fetch lock is held on the data root'
-    assert prune_mod._lock_problem(root) is None
+        assert (
+            prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+            == 'a fetch lock is held on the data root'
+        )
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_a_read_only_unheld_lock_file_does_not_block(tmp_path, monkeypatch):
@@ -2122,7 +2162,7 @@ def test_a_read_only_unheld_lock_file_does_not_block(tmp_path, monkeypatch):
     lock.write_text('')
     os.chmod(lock, 0o444)
     try:
-        assert prune_mod._lock_problem(root) is None
+        assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
         report = prune_versions(data_root=root, delete=True)
         assert not dirs['superseded'].exists()
         assert report.ok
@@ -2343,7 +2383,7 @@ def test_a_lock_path_that_is_a_file_blocks_deletion(tmp_path):
     root.mkdir()
     (root / _LOCK_DIRNAME).write_bytes(b'not a directory\n')
 
-    assert 'is not a directory' in prune_mod._lock_problem(root)
+    assert 'is not a directory' in prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
 
 
 def test_an_unreadable_lock_directory_blocks_deletion(tmp_path):
@@ -2356,7 +2396,9 @@ def test_an_unreadable_lock_directory_blocks_deletion(tmp_path):
     (lock_dir / 'a.lock').write_text('')
     os.chmod(lock_dir, 0)
     try:
-        assert prune_mod._lock_problem(root).startswith(f'cannot read {lock_dir}')
+        assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME).startswith(
+            f'cannot read {lock_dir}'
+        )
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2365,6 +2407,7 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
     """A flock error other than would-block is reported as untestable, never as free."""
     import errno
 
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
@@ -2373,47 +2416,48 @@ def test_a_filesystem_without_flock_makes_a_lock_untestable(tmp_path, monkeypatc
     def _no_flock(fd, op):
         raise OSError(errno.ENOLCK, 'No locks available')
 
-    monkeypatch.setattr(prune_mod.fcntl, 'flock', _no_flock)
+    monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _no_flock)
 
-    assert prune_mod._lock_problem(root).startswith('cannot test lock file')
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME).startswith(
+        'cannot test lock file'
+    )
 
 
 def test_a_lock_file_that_vanishes_before_it_is_opened_is_skipped(tmp_path, monkeypatch):
     """A lock file removed between listing and opening is no longer a lock, so it is skipped."""
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
     (_lock_dir(root) / 'a.lock').write_text('')
-    real_open = prune_mod.os.open
 
-    def _gone(path, *args, **kwargs):
-        if str(path).endswith('a.lock'):
-            raise FileNotFoundError(path)
-        return real_open(path, *args, **kwargs)
+    def _gone(path):
+        raise FileNotFoundError(path)
 
-    monkeypatch.setattr('fwl_io.prune.os.open', _gone)
+    monkeypatch.setattr(fs_guard_mod, '_open_lock_fd', _gone)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_an_unlock_error_does_not_escape_the_probe(tmp_path, monkeypatch):
     """Failing to drop the probe's own shared lock is harmless; the descriptor is closed anyway."""
     import errno
 
+    import fwl_io.fs_guard as fs_guard_mod
     import fwl_io.prune as prune_mod
 
     root = tmp_path / 'data'
     (_lock_dir(root) / 'a.lock').write_text('')
-    real_flock = prune_mod.fcntl.flock
+    real_flock = fs_guard_mod.fcntl.flock
 
     def _unlock_fails(fd, op):
-        if op == prune_mod.fcntl.LOCK_UN:
+        if op == fs_guard_mod.fcntl.LOCK_UN:
             raise OSError(errno.EIO, 'I/O error')
         return real_flock(fd, op)
 
-    monkeypatch.setattr(prune_mod.fcntl, 'flock', _unlock_fails)
+    monkeypatch.setattr(fs_guard_mod.fcntl, 'flock', _unlock_fails)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
 
 
 def test_apply_refuses_a_target_that_became_unrecognised(tmp_path, monkeypatch):
@@ -2435,6 +2479,7 @@ def test_apply_refuses_a_target_that_became_unrecognised(tmp_path, monkeypatch):
     'flag, value, missing',
     [
         ('_DIR_FD_OK', False, 'dir_fd'),
+        ('_NOFOLLOW_STAT_OK', False, 'a no-follow stat'),
         ('_RMTREE_IS_SAFE', False, 'a symlink-safe rmtree'),
         ('fcntl', None, 'flock'),
     ],
@@ -2444,7 +2489,7 @@ def test_each_missing_capability_refuses_deletion(tmp_path, monkeypatch, flag, v
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
     dirs = _make_tree(root)
-    monkeypatch.setattr(f'fwl_io.prune.{flag}', value)
+    monkeypatch.setattr(f'fwl_io.fs_guard.{flag}', value)
 
     report = prune_versions(data_root=root, delete=True)
 
@@ -2465,7 +2510,7 @@ def test_a_deleting_run_decides_case_with_a_fresh_probe_file(tmp_path, monkeypat
         looked_up.append(a.name)
         return real_same(a, b)
 
-    monkeypatch.setattr('fwl_io.prune._same_entry', _recording)
+    monkeypatch.setattr('fwl_io.fs_guard._same_entry', _recording)
 
     prune_mod._fs_is_case_insensitive(root, may_write=True)
 
@@ -2481,7 +2526,10 @@ def test_locks_are_reported_uncheckable_without_no_follow_opens(tmp_path, monkey
     (_lock_dir(root) / 'a.lock').write_text('')
     monkeypatch.delattr(os, 'O_NOFOLLOW')
 
-    assert prune_mod._lock_problem(root) == 'fetch locks cannot be checked on this platform'
+    assert (
+        prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+        == 'fetch locks cannot be checked on this platform'
+    )
 
 
 # Round 6: probe before every removal, lock entries the fetcher cannot use.
@@ -2566,7 +2614,7 @@ def test_a_lock_entry_that_is_not_a_regular_file_blocks_unopened(tmp_path, monke
 
     monkeypatch.setattr('fwl_io.prune.os.open', _recording_open)
 
-    problem = prune_mod._lock_problem(root)
+    problem = prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
     report = prune_versions(data_root=root, delete=True)
 
     assert problem == f'lock file {entry} is not a regular file; fetch locks cannot be checked'
@@ -2599,6 +2647,7 @@ def test_an_unwritable_unheld_lock_file_warns_in_both_runs(tmp_path, monkeypatch
     warning = '1 lock file(s) are not writable by this user'
     assert warning in plan.summary() and warning in dry and warning in wet
     assert not dirs['superseded'].exists()
+    assert 'which prune cannot see; do not fetch while prune runs' in plan.summary()
 
 
 def test_an_unwritable_lock_file_that_is_held_still_blocks(tmp_path, monkeypatch):
@@ -2615,7 +2664,10 @@ def test_an_unwritable_lock_file_that_is_held_still_blocks(tmp_path, monkeypatch
     fd = os.open(lock, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert prune_mod._lock_problem(root) == 'a fetch lock is held on the data root'
+        assert (
+            prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME)
+            == 'a fetch lock is held on the data root'
+        )
     finally:
         os.close(fd)
         os.chmod(lock, stat.S_IRUSR | stat.S_IWUSR)
@@ -2645,7 +2697,7 @@ def test_the_cli_refuses_an_unsupported_platform_before_asking(tmp_path, monkeyp
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
     dirs = _make_tree(root)
-    monkeypatch.setattr('fwl_io.prune._DIR_FD_OK', False)
+    monkeypatch.setattr('fwl_io.fs_guard._DIR_FD_OK', False)
 
     def _no_prompt(prompt):
         raise AssertionError('the prompt must not be shown on an unsupported platform')
@@ -2667,7 +2719,7 @@ def test_a_dry_run_exits_1_where_existing_locks_cannot_be_checked(tmp_path, monk
     root = tmp_path / 'data'
     _make_tree(root)
     (_lock_dir(root) / 'a.lock').write_text('')
-    monkeypatch.setattr('fwl_io.prune.fcntl', None)
+    monkeypatch.setattr('fwl_io.fs_guard.fcntl', None)
 
     plan = plan_prune(data_root=root)
     code = main(['prune', '--data-root', str(root)])
@@ -2744,7 +2796,7 @@ def test_a_lock_directory_that_cannot_be_searched_warns(tmp_path):
     lock_dir = _lock_dir(root)
     os.chmod(lock_dir, 0o666)
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2762,7 +2814,7 @@ def test_a_blocking_lock_entry_keeps_the_warnings_found_before_it(tmp_path):
     (lock_dir / 'odd.lock').mkdir()
     os.chmod(lock_dir, 0o555)
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2801,7 +2853,7 @@ def test_a_held_lock_keeps_the_warnings_found_before_it(tmp_path):
     os.chmod(lock_dir, 0o555)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.close(fd)
         os.chmod(lock_dir, stat.S_IRWXU)
@@ -2825,7 +2877,7 @@ def test_an_unwritable_lock_file_warning_survives_a_later_blocking_entry(tmp_pat
     os.chmod(theirs, 0o444)
     (lock_dir / 'zzzz.lock').mkdir()
     try:
-        problem, warnings = prune_mod._lock_scan(root)
+        problem, warnings = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)
     finally:
         os.chmod(theirs, stat.S_IRUSR | stat.S_IWUSR)
 
@@ -2849,9 +2901,9 @@ def test_the_probe_before_each_removal_skips_the_warning_checks(tmp_path, monkey
 
     monkeypatch.setattr('fwl_io.prune.os.access', _counting)
 
-    assert prune_mod._lock_problem(root) is None
+    assert prune_mod._lock_problem(root, lock_dirname=_LOCK_DIRNAME) is None
     assert calls == []
-    assert prune_mod._lock_scan(root)[0] is None
+    assert prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)[0] is None
     assert calls, 'the full scan used for the report still checks access'
 
 
@@ -2870,7 +2922,7 @@ def test_an_unwritable_lock_directory_warning_names_what_is_missing(tmp_path):
     ):
         os.chmod(lock_dir, mode)
         try:
-            seen[word] = prune_mod._lock_scan(root)[1]
+            seen[word] = prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME)[1]
         finally:
             os.chmod(lock_dir, stat.S_IRWXU)
 
@@ -2911,5 +2963,5 @@ def test_a_failing_close_does_not_escape_the_lock_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr('fwl_io.prune.os.close', _close_fails)
 
-    assert prune_mod._lock_scan(root) == (None, ())
+    assert prune_mod._lock_scan(root, lock_dirname=_LOCK_DIRNAME) == (None, ())
     assert closed

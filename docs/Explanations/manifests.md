@@ -107,6 +107,7 @@ Models adopt this layout when they migrate to fwl-io; legacy directories from th
 |---|---|
 | `spectral_files/<Set>/<bands>` | `atmos_clim/spectral_files/<set>/<bands>/r<recid>` |
 | `surface_albedos/Hammond24` | `atmos_clim/surface_albedos/hammond_2024/r<recid>` |
+| `EOS_material_properties/EOS_Seager2007` | `interior_struct/eos/seager_2007/r<recid>` |
 | `interior_lookup_tables/1TPa-dK09-elec-free/<set>` | `interior/eos/dk09_1tpa_elec_free/<set>/r<recid>` |
 | `interior_lookup_tables/Melting_curves` | `interior/melting_curves/<dataset>/r<recid>` |
 | `zalmoxis_eos/EOS_PALEOS_*` | `interior/eos/paleos_*/r<recid>` |

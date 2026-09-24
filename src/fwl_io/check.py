@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fwl_io.fetch import Fetcher, create_fetcher
+from fwl_io.fs_guard import _is_regular_file
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -219,7 +220,7 @@ def _file_state(fetcher: Fetcher, name: str) -> str:
     """Classify one registry file: present and correct, absent, or otherwise."""
     path = fetcher.target_dir / name
     try:
-        if not path.is_file():
+        if not _is_regular_file(path):
             return MISSING
         return OK if fetcher.file_matches(name) else MISMATCH
     except OSError as exc:
@@ -238,7 +239,7 @@ def _member_state(path: Path) -> str:
     denies traversal, must cost that one entry and not the whole report.
     """
     try:
-        return PRESENT if path.is_file() else MISSING
+        return PRESENT if _is_regular_file(path) else MISSING
     except OSError as exc:
         log.warning('cannot read %s: %s', path, exc)
         return UNREADABLE

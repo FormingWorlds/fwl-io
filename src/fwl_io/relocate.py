@@ -7,32 +7,51 @@ default and the wrong one for anybody who wants the tree tidy today, which is
 what this does: it finds the datasets an installed manifest declares, works
 out where each one used to live, and moves the files across.
 
-Nothing is moved on trust. Every file is hashed against the registry the
-manifest ships before anything is touched, and a dataset with a file missing
-or a file whose contents do not match is reported and left exactly where it
-is. The alternative, moving first and discovering afterwards, turns a stale
-copy into a stale copy in the place the fetcher will now believe.
+Nothing is moved on trust. Every present file is hashed against the registry
+the manifest ships before anything is touched, and only a file that matches
+moves; a present file whose contents do not match blocks the whole dataset,
+so an absent file can never mask a corrupt one. A file already at the new
+location is not replaced: an intact one is skipped and a differing one blocks
+the dataset. A legacy tree holding none of its registry's files is reported and
+left exactly where it is. The alternative, moving first and discovering
+afterwards, turns a stale copy into a stale copy in the place the fetcher will
+now believe.
 
-Nothing is downloaded either. A dataset whose legacy tree is incomplete stays
-incomplete here; the fetcher is what fills it, and it will do so at the
-current location once the move has happened.
+Nothing is downloaded either. A dataset moved with some registry files still
+absent stays that way at its new location; the fetcher is what fills it in,
+once the move has happened.
 
 A dataset packaged as an archive is reported rather than moved. Its registry
 pins the packed archive, and a legacy tree holds the extracted members, so
 there is nothing to hash the tree against.
+
+A run assumes that no other process renames or replaces directories under the
+data root while it moves files. Unlike a deletion, a move does not check the
+fetch lock, so a fetch running at the same time is not detected at all; do
+not relocate while a fetch could be running.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
+from fwl_io.fs_guard import (
+    _inside,
+    _is_directory,
+    _is_regular_file,
+    _open_dir_below,
+    _open_or_make_dir_below,
+    _platform_gap,
+    _probe_dir_below,
+)
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
@@ -41,12 +60,11 @@ if TYPE_CHECKING:
 log = logging.getLogger('fwl.' + __name__)
 
 _LAYOUT_RESOURCE = 'legacy_layout.toml'
+_REPAIR = '; repair with "fwl-io check <model>", then "fwl-io fetch <model>"'
 
-# What a dataset's legacy tree turned out to be. Only ``READY`` describes
-# something to do; the rest say why nothing was done, and are kept apart
-# because they call for different responses. ``INCOMPLETE`` and ``MISMATCH``
-# are faults in the tree, the other two are the ordinary cases of a dataset
-# that has already moved or never had a legacy copy at all.
+# A dataset's legacy tree. ``READY``: every present file matches, absent ones
+# are left to the fetcher. ``INCOMPLETE``: none of its registry's files.
+# ``MISMATCH``: a present file fails its hash, or would replace one at the target.
 READY = 'ready'
 ABSENT = 'absent'
 ALREADY_CURRENT = 'already-current'
@@ -69,6 +87,8 @@ class Relocation:
     state: str
     legacy_dir: Path | None = None
     target_dir: Path | None = None
+    #: The verified files this move moves, not the whole registry: set from
+    #: ``READY`` on, kept through ``MOVED``, ``FAILED`` and ``SPLIT``, else empty.
     files: tuple[str, ...] = ()
     detail: str = ''
     legacy_present: bool = False
@@ -207,37 +227,6 @@ def _legacy_locations() -> tuple[dict[str, str], str | None]:
     return safe, None
 
 
-def _inside(path: Path, root: Path) -> bool:
-    """True when ``path`` resolves within ``root``, symlinks followed.
-
-    Walks up from the resolved path by filesystem identity (device and
-    inode), not by comparing path strings, so a case-insensitive filesystem's
-    alternate spelling of ``root`` or one of its ancestors still matches. A
-    component that does not exist yet (the target side of a move that has
-    not happened) is skipped up to the nearest ancestor that does exist.
-    """
-    try:
-        current = path.resolve()
-        root_stat = os.stat(root.resolve())
-    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
-        return False
-    while True:
-        try:
-            current_stat = os.stat(current)
-        except OSError:
-            parent = current.parent
-            if parent == current:
-                return False
-            current = parent
-            continue
-        if (current_stat.st_dev, current_stat.st_ino) == (root_stat.st_dev, root_stat.st_ino):
-            return True
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
-
-
 def _escaping(
     legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path
 ) -> Path | None:
@@ -292,45 +281,276 @@ def _unmovable(ds: Dataset, registry: dict[str, str]) -> str | None:
     return None
 
 
-def _classify(legacy_dir: Path, target_dir: Path, registry: dict[str, str]) -> tuple[str, str]:
-    """Decide what the two trees on disk allow, without touching either."""
-    if _all_match(target_dir, registry):
+def _list(names: list[str] | set[str]) -> str:
+    """The names, sorted and comma separated."""
+    return ', '.join(sorted(names))
+
+
+def _agree(names: list[str] | set[str], one: str, many: str) -> str:
+    """``one`` for a single name, ``many`` for several."""
+    return one if len(names) == 1 else many
+
+
+def _classify(
+    legacy_dir: Path,
+    target_dir: Path,
+    registry: dict[str, str],
+    legacy_present: bool,
+    root: Path,
+) -> tuple[str, str, tuple[str, ...]]:
+    """Decide what the two trees on disk allow, without touching either.
+
+    With no legacy directory the answer is ``ALREADY_CURRENT`` or ``ABSENT``
+    whatever state the target is in: nothing can be moved, so a target this
+    user cannot read, or a registry digest that cannot be used, is not a fault
+    of this command.
+
+    Returns
+    -------
+    tuple
+        ``(state, detail, files)``, where ``files`` is what a move would
+        move: empty for every state but ``READY``, where it is every verified
+        legacy file the target does not already hold intact. A present file
+        that does not match still blocks the whole move, so an absent file
+        never masks a corrupt one, and so does a legacy file that would replace
+        a different entry at the target, which is never overwritten.
+    """
+    if legacy_present and legacy_dir.is_symlink():
+        return UNRESOLVABLE, f'{legacy_dir} is a symlink, not a plain directory; not moved', ()
+    try:
+        intact, other, skipped = _held(target_dir, registry, root, strict=legacy_present)
+    except (OSError, ValueError):
+        if legacy_present:
+            raise
+        return ABSENT, '', ()
+    if intact and len(intact) == len(registry):
         detail = f'already at {target_dir}'
-        if legacy_dir.is_dir():
+        if legacy_present:
+            linked = [n for n in registry if _way(root, legacy_dir / n) == _LINKED]
+            if linked:
+                # A symlinked directory on the legacy side can lead back to the
+                # target, so deleting the "redundant" copy would delete the target.
+                return (
+                    UNRESOLVABLE,
+                    f'{_list(linked)} in {legacy_dir} {_agree(linked, "is", "are")} behind a '
+                    'symlinked directory, which may lead back to the target; left alone',
+                    (),
+                )
             # Both copies are intact, so the legacy one is redundant rather
             # than needed. Naming it is as far as this goes: deleting data the
             # user has not asked to lose is not this command's business.
             detail += f'; the copy at {legacy_dir} is now redundant and was left alone'
-        return ALREADY_CURRENT, detail
-    if not legacy_dir.is_dir():
-        return ABSENT, ''
-    missing = [name for name in registry if not (legacy_dir / name).is_file()]
-    if missing:
-        return INCOMPLETE, f'{len(missing)} of {len(registry)} file(s) absent from {legacy_dir}'
+        return ALREADY_CURRENT, detail, ()
+    if not legacy_present:
+        return ABSENT, '', ()
     try:
-        wrong = [
-            name
-            for name, digest in registry.items()
-            if not _hash_matches(legacy_dir / name, digest)
-        ]
+        present, linked = [], []
+        for name in registry:
+            path = legacy_dir / name
+            if path.is_symlink():
+                linked.append(name)
+            elif _is_regular_file(path):
+                present.append(name)
     except OSError as exc:
-        return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}'
-    if wrong:
-        return MISMATCH, f'{len(wrong)} file(s) differ from the registry in {legacy_dir}'
-    return READY, ''
-
-
-def _all_match(directory: Path, registry: dict[str, str]) -> bool:
-    """True when ``directory`` already holds every registry file, intact."""
-    if not directory.is_dir():
-        return False
-    try:
-        return all(
-            (directory / name).is_file() and _hash_matches(directory / name, digest)
-            for name, digest in registry.items()
+        return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
+    if linked:
+        return (
+            UNRESOLVABLE,
+            f'{len(linked)} of {len(registry)} file(s) in {legacy_dir} are symlinks, '
+            'not plain files; not moved',
+            (),
         )
-    except OSError:
-        return False
+    differ = []
+    if skipped:
+        differ.append(
+            f'{_list(skipped)} at {target_dir} {_agree(skipped, "is", "are")} behind a '
+            'symlinked directory, not verified'
+        )
+    if other:
+        differ.append(
+            f'{_list(other)} at {target_dir} {_agree(other, "differs", "differ")} '
+            f'from the registry, left alone{_REPAIR}'
+        )
+    if present:
+        try:
+            wrong = [n for n in present if not _hash_matches(legacy_dir / n, registry[n])]
+        except OSError as exc:
+            return UNRESOLVABLE, f'cannot read {legacy_dir}: {exc}', ()
+        if wrong:
+            held = [n for n in wrong if n in intact]
+            note = (
+                f'; {_list(held)} {_agree(held, "is a copy", "are copies")} '
+                'the target already holds intact'
+                if held
+                else ''
+            )
+            detail = (
+                f'{len(wrong)} file(s) differ from the registry in {legacy_dir}: '
+                f'{_list(wrong)}{note}'
+            )
+            return MISMATCH, detail, ()
+        clash = sorted(set(present) & other)
+        if clash:
+            return (
+                MISMATCH,
+                f'{_list(clash)} at {target_dir} {_agree(clash, "is", "are")} not the '
+                f'registry {_agree(clash, "file", "files")}; not overwritten{_REPAIR}',
+                (),
+            )
+    elif not intact:
+        return (
+            INCOMPLETE,
+            '; '.join([f'0 of {len(registry)} file(s) present in {legacy_dir}', *differ]),
+            (),
+        )
+    moving = tuple(sorted(set(present) - intact))
+    if not moving:
+        # A partly moved tree seen again: what is left is the fetcher's to fill in.
+        held = f'{len(intact)} of {len(registry)} file(s) already at {target_dir}'
+        return ABSENT, '; '.join([held, f'nothing in {legacy_dir} to move', *differ]), ()
+    absent = sorted(set(registry) - set(present) - intact - other - skipped)
+    notes = []
+    if absent:
+        notes.append(
+            f'{len(present)} of {len(registry)} file(s) present and verified in {legacy_dir}; '
+            f'{len(absent)} absent, to be fetched at the new location'
+        )
+    if len(moving) < len(present):
+        notes.append(f'{len(present) - len(moving)} already at {target_dir}, so that copy stays')
+    notes.extend(differ)
+    return READY, '; '.join(notes), moving
+
+
+_PLAIN, _ABSENT, _LINKED = 'plain', 'absent', 'linked'
+
+
+def _way(root: Path, path: Path) -> str:
+    """How ``path`` is reached below ``root``: ``plain``, ``absent`` or ``linked``.
+
+    ``plain`` means every directory on the way is a plain directory. ``absent``
+    means one does not exist. ``linked`` means one is a symlink or is not a
+    directory, so what lies behind it is not necessarily this tree's own.
+
+    Raises
+    ------
+    OSError
+        When a component cannot be examined for a reason other than absence.
+    """
+    walked = root
+    for part in path.relative_to(root).parts[:-1]:
+        walked = walked / part
+        try:
+            if not stat.S_ISDIR(os.lstat(walked).st_mode):
+                return _LINKED
+        except FileNotFoundError:
+            return _ABSENT
+    return _PLAIN
+
+
+def _held(
+    directory: Path, registry: dict[str, str], root: Path, strict: bool = True
+) -> tuple[set[str], set[str], set[str]]:
+    """Registry names ``directory`` holds as an intact file, as any other entry, or not verified.
+
+    Intact is a regular file, not a symlink, whose digest matches, reached
+    through plain directories below ``root``. A differing file, a symlink, a
+    dangling symlink or a directory under a registry name is the other kind: a
+    move would replace it. A file behind a symlinked or non-directory parent is
+    skipped, because the move refuses that path itself; ``strict=False`` looks
+    at the file alone, for a target nothing is moved into.
+
+    Raises
+    ------
+    OSError
+        When an entry cannot be examined, for example because a directory on
+        the way cannot be searched.
+    """
+    intact, other, skipped = set(), set(), set()
+    ways: dict[Path, str] = {}
+    for name, digest in registry.items():
+        path = directory / name
+        if strict:
+            if path.parent not in ways:
+                ways[path.parent] = _way(root, path)
+            if ways[path.parent] == _LINKED:
+                skipped.add(name)
+                continue
+        try:
+            mode = os.lstat(path).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        ok = stat.S_ISREG(mode) and _hash_matches(path, digest)
+        (intact if ok else other).add(name)
+    return intact, other, skipped
+
+
+def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path) -> str | None:
+    """Why moving these files would be refused, or ``None``, from the opens the move makes.
+
+    A symlink anywhere on the way, on either side, is refused by the move
+    itself, so the plan must refuse it too or a dry run promises a move the
+    real run cannot make. Only the part of the target that exists is opened.
+    """
+    unsupported = _platform_gap(operation='relocation', needs_locks=False)
+    if unsupported is not None:
+        return unsupported
+    legacy_rel = legacy_dir.relative_to(root).parts
+    target_rel = target_dir.relative_to(root).parts
+    for parent in sorted({PurePosixPath(name).parts[:-1] for name in names}):
+        try:
+            os.close(_open_dir_below(root, legacy_rel + parent))
+        except OSError as exc:
+            return f'{legacy_dir} cannot be safely opened: {_why(root, legacy_rel + parent, exc)}'
+        try:
+            _probe_dir_below(root, target_rel + parent)
+        except OSError as exc:
+            return f'{target_dir} cannot be safely opened: {_why(root, target_rel + parent, exc)}'
+    return None
+
+
+def _why(root: Path, parts: tuple[str, ...], exc: OSError) -> str:
+    """Name the symlink or file that stopped an open, or fall back to the error text.
+
+    The no-follow open reports a symlink as "Not a directory", which sends a
+    reader looking for a file that is not there.
+    """
+    walked = root
+    for part in parts:
+        walked = walked / part
+        try:
+            mode = os.lstat(walked).st_mode
+        except OSError:
+            break
+        if stat.S_ISLNK(mode):
+            return f'{walked} is a symlink'
+        if not stat.S_ISDIR(mode):
+            return f'{walked} is not a directory'
+    return str(exc)
+
+
+def _assess(
+    ds: Dataset,
+    registry: dict[str, str],
+    legacy_dir: Path,
+    target_dir: Path,
+    root: Path,
+    legacy_present: bool,
+) -> tuple[str, str, tuple[str, ...]]:
+    """One dataset's ``(state, detail, files)``: the refusals, then :func:`_classify`."""
+    unmovable = _unmovable(ds, registry) if legacy_present else None
+    if unmovable is not None:
+        return UNRESOLVABLE, unmovable, ()
+    outside = _escaping(legacy_dir, target_dir, tuple(registry), root) if legacy_present else None
+    if outside is not None:
+        # A symlink is how this happens in a real tree: every joined
+        # path looks clean and only resolving one shows it leaves.
+        return UNRESOLVABLE, f'{outside} resolves outside the data root {root}', ()
+    state, detail, files = _classify(legacy_dir, target_dir, registry, legacy_present, root)
+    if state == READY:
+        refusal = _refusal(legacy_dir, target_dir, files, root)
+        if refusal is not None:
+            return UNRESOLVABLE, refusal, ()
+    return state, detail, files
 
 
 def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
@@ -370,42 +590,29 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     Relocation(ds.key, UNRESOLVABLE, legacy_dir=legacy_dir, detail=str(exc))
                 )
                 continue
-            unmovable = _unmovable(ds, registry) if legacy_dir.is_dir() else None
-            if unmovable is not None:
-                entries.append(
-                    Relocation(
-                        ds.key,
-                        UNRESOLVABLE,
-                        legacy_dir=legacy_dir,
-                        target_dir=target_dir,
-                        detail=unmovable,
-                    )
+            legacy_present = True  # a directory that cannot be read is still there
+            try:
+                legacy_present = _is_directory(legacy_dir)
+                state, detail, files = _assess(
+                    ds, registry, legacy_dir, target_dir, root, legacy_present
                 )
-                continue
-            outside = _escaping(legacy_dir, target_dir, tuple(registry), root)
-            if outside is not None:
-                # A symlink is how this happens in a real tree: every joined
-                # path looks clean and only resolving one shows it leaves.
-                entries.append(
-                    Relocation(
-                        ds.key,
-                        UNRESOLVABLE,
-                        legacy_dir=legacy_dir,
-                        target_dir=target_dir,
-                        detail=f'{outside} resolves outside the data root {root}',
-                    )
+            except OSError as exc:
+                state, detail, files = (
+                    UNRESOLVABLE,
+                    f'cannot read {legacy_dir} or {target_dir}: {exc}',
+                    (),
                 )
-                continue
-            state, detail = _classify(legacy_dir, target_dir, registry)
+            except ValueError as exc:
+                state, detail, files = UNRESOLVABLE, f'{ds.key} registry cannot be used: {exc}', ()
             entries.append(
                 Relocation(
                     ds.key,
                     state,
                     legacy_dir=legacy_dir,
                     target_dir=target_dir,
-                    files=tuple(sorted(registry)),
+                    files=files,
                     detail=detail,
-                    legacy_present=legacy_dir.is_dir(),
+                    legacy_present=legacy_present,
                 )
             )
     return RelocationReport(
@@ -418,6 +625,46 @@ def _version_dir(ds: Dataset) -> str:
     from fwl_io.doi import zenodo_record_id
 
     return f'{ds.subdir}/r{zenodo_record_id(ds.zenodo)}'
+
+
+def _move_below_root(
+    root: Path, src_parent: tuple[str, ...], dst_parent: tuple[str, ...], filename: str
+) -> None:
+    """Move ``filename`` from ``root/src_parent`` to ``root/dst_parent``.
+
+    Both parents are opened as directory handles from ``root``, following no
+    symlink below it, so a parent directory replaced by a symlink after the
+    plan's containment check is refused rather than walked into; the
+    destination's parent is created the same no-follow way if it does not
+    exist yet. The source entry is checked once more, against the open parent
+    handle, to still be a plain file rather than a symlink, immediately
+    before the move. That check and the move itself are still two syscalls on
+    the same name, so this does not cover the entry itself being swapped in
+    the instant between them; closing that window needs no other process to
+    rename or replace entries under the data root while a run is in progress,
+    the same assumption this module states for the rest of a run. The
+    destination is checked to hold nothing under that name, so a file already
+    there is not replaced; a file created there between that check and the
+    move is, the same window as for the source entry above.
+    """
+    src_fd = _open_dir_below(root, src_parent)
+    try:
+        dst_fd = _open_or_make_dir_below(root, dst_parent)
+        try:
+            st = os.stat(filename, dir_fd=src_fd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                rel = '/'.join((*src_parent, filename))
+                raise OSError(f'{rel} is not a plain file; not moved')
+            try:
+                os.stat(filename, dir_fd=dst_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.replace(filename, filename, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+            else:
+                raise FileExistsError(f'{filename} already exists at the destination')
+        finally:
+            os.close(dst_fd)
+    finally:
+        os.close(src_fd)
 
 
 def _move_one(entry: Relocation, root: Path) -> Relocation:
@@ -435,27 +682,39 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
             target_dir=entry.target_dir,
             detail=f'{outside} resolves outside the data root {root}',
         )
+    try:
+        legacy_rel = entry.legacy_dir.relative_to(root).parts
+        target_rel = entry.target_dir.relative_to(root).parts
+    except ValueError as exc:
+        return Relocation(
+            entry.key,
+            UNRESOLVABLE,
+            legacy_dir=entry.legacy_dir,
+            target_dir=entry.target_dir,
+            detail=str(exc),
+        )
+
+    def _move_name(name: str, src_rel: tuple[str, ...], dst_rel: tuple[str, ...]) -> None:
+        parts = PurePosixPath(name).parts
+        _move_below_root(root, src_rel + parts[:-1], dst_rel + parts[:-1], parts[-1])
+
     done: list[str] = []
     try:
-        entry.target_dir.mkdir(parents=True, exist_ok=True)
         for name in entry.files:
-            destination = entry.target_dir / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(entry.legacy_dir / name, destination)
+            _move_name(name, legacy_rel, target_rel)
             done.append(name)
-    except OSError as exc:
-        # Put back what was moved, so a failure part way leaves the tree as it
-        # was rather than split across two layouts.
+    except (OSError, NotImplementedError) as exc:
+        # Put back what was moved, through the same no-follow primitive, so a
+        # failure part way leaves the tree as it was, not split across layouts.
         unrestored = []
         for name in done:
             try:
-                os.replace(entry.target_dir / name, entry.legacy_dir / name)
-            except OSError:
+                _move_name(name, target_rel, legacy_rel)
+            except (OSError, NotImplementedError):
                 unrestored.append(name)
         if unrestored:
-            # The state the rollback exists to prevent, reached anyway. It is
-            # reported as its own thing because the remedy is a person looking
-            # at two directories, not a rerun.
+            # The state the rollback exists to prevent, reached anyway; the
+            # remedy is a person looking at two directories, not a rerun.
             log.error('could not restore %s to %s', ', '.join(unrestored), entry.legacy_dir)
             return Relocation(
                 entry.key,
@@ -484,6 +743,7 @@ def _move_one(entry: Relocation, root: Path) -> Relocation:
         legacy_dir=entry.legacy_dir,
         target_dir=entry.target_dir,
         files=entry.files,
+        detail=entry.detail,
     )
 
 
@@ -526,10 +786,12 @@ def _prune(directory: Path, root: Path) -> None:
 def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> RelocationReport:
     """Move every legacy tree that checks out into the current layout.
 
-    A dataset is moved only when every file its registry declares is present
-    in the legacy location and matches its recorded digest. Anything else is
-    reported and left untouched, including a dataset already at its current
-    location, which is the ordinary state once a fetch has happened there.
+    Every present file in the legacy location that matches its recorded
+    digest moves; an absent file is reported for the fetcher to fill in at
+    the new location. A present file that does not match its digest, or a
+    legacy tree holding none of its registry's files, is reported and left
+    untouched, as is a dataset already at its current location, which is the
+    ordinary state once a fetch has happened there.
 
     Parameters
     ----------
@@ -547,18 +809,17 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
     if dry_run:
         return plan
     root = resolve_data_root(data_root)
-    done, halted = [], False
+    done = []
     for entry in plan.entries:
-        if entry.state != READY or halted:
+        if entry.state != READY:
             done.append(entry)
             continue
         moved = _move_one(entry, root)
         done.append(moved)
         if moved.state in (FAILED, SPLIT):
-            # Stop rather than move more data past a tree that is already in a
-            # state somebody has to look at.
-            log.error('stopping after %s could not be relocated', moved.key)
-            halted = True
+            # Reported and left for a person to look at; a fault in one
+            # dataset says nothing about the ones after it, so they still run.
+            log.error('%s could not be relocated', moved.key)
     return RelocationReport(
         tuple(done), dict(plan.manifest_errors), plan.layout_error, plan.conflict_providers
     )

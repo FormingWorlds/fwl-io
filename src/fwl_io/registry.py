@@ -22,6 +22,8 @@ def validate_entry_name(name: str) -> None:
     """Reject registry file names that could escape the dataset directory or break its format."""
     if '\\' in name:
         raise ValueError(f'registry name {name!r} contains a backslash')
+    if '\0' in name:
+        raise ValueError(f'registry name {name!r} contains a NUL byte')
     if any(c.isspace() for c in name):
         raise ValueError(
             f'registry name {name!r} contains whitespace, which the registry file '

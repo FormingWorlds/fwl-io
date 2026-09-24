@@ -35,34 +35,44 @@ fetch lock, which is not the whole of every fetch.
 
 from __future__ import annotations
 
-import contextlib
-import errno
 import logging
 import os
 import re
 import shutil
 import stat
-import tempfile
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
-try:
-    import fcntl
-except ImportError:  # Windows: no flock, so locks cannot be probed and deletion is refused
-    fcntl = None
-
-from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME, Fetcher
+from fwl_io.fetch import (
+    _LOCK_DIRNAME,
+    _RESERVED_DIRNAMES,
+    _STAGING_DIRNAME,
+    _STAMP_FILENAME,
+    read_stamp,
+)
+from fwl_io.fs_guard import (
+    _delete_unsupported,
+    _dir_size,
+    _fs_is_case_insensitive,
+    _hop_identities,
+    _inside,
+    _is_plain_dir,
+    _leaf_problem,
+    _lock_problem,
+    _lock_scan,
+    _open_dir_below,
+    _referenced_symlink_targets,
+    _same_dir,
+    _same_entry,
+)
 from fwl_io.paths import resolve_data_root
-from fwl_io.relocate import _inside, _version_dir
+from fwl_io.relocate import _version_dir
 
 log = logging.getLogger('fwl.' + __name__)
 
 #: A version directory is ``r`` followed by the Zenodo record-id digits.
 _VERSION_DIR_PATTERN = re.compile(r'r[0-9]+\Z')
-
-#: Directories under the data root that fwl-io owns and this never walks into.
-_RESERVED_DIRNAMES = frozenset({_LOCK_DIRNAME, _STAGING_DIRNAME})
 
 # The state of one version directory on disk. Only ``SUPERSEDED`` (and
 # ``ORPHANED`` under an explicit opt-in) is ever a delete target; the rest
@@ -75,12 +85,6 @@ REMOVED = 'removed'
 REMOVE_FAILED = 'remove-failed'
 REFUSED = 'refused'
 GONE = 'gone'
-
-#: Whether this Python's rmtree resists symlink swaps, read once at import.
-_RMTREE_IS_SAFE = shutil.rmtree.avoids_symlink_attacks
-
-#: Whether directory-relative open, rename and stat exist here, read once at import.
-_DIR_FD_OK = {os.open, os.rename, os.stat, os.mkdir} <= os.supports_dir_fd
 
 #: Largest stamp read; a real stamp lists at most one line per archive member.
 _MAX_STAMP_BYTES = 32 * 1024 * 1024
@@ -108,7 +112,7 @@ class PruneCandidate:
 
     def summary(self) -> str:
         """One line naming the directory, its state, and its size on disk."""
-        line = f'{self.rel}: {self.state}, {_human_bytes(self.size)}'
+        line = f'{self.rel}: {self.state}, {human_bytes(self.size)}'
         if self.detail:
             line += f', {self.detail}'
         return line
@@ -234,9 +238,9 @@ class PruneReport:
         gone, bad = len(self.removed), len(self.problems)
         closing = (
             f'{kept} referenced kept; '
-            f'{sup} superseded ({_human_bytes(self.reclaimable(SUPERSEDED))}); '
-            f'{orph} orphaned ({_human_bytes(self.reclaimable(ORPHANED))}); '
-            f'{unrec} unrecognised ({_human_bytes(self.reclaimable(UNRECOGNISED))})'
+            f'{sup} superseded ({human_bytes(self.reclaimable(SUPERSEDED))}); '
+            f'{orph} orphaned ({human_bytes(self.reclaimable(ORPHANED))}); '
+            f'{unrec} unrecognised ({human_bytes(self.reclaimable(UNRECOGNISED))})'
         )
         if gone or bad:
             closing += f'; {gone} removed, {bad} not removed'
@@ -261,7 +265,7 @@ class PruneReport:
         return '\n'.join(lines)
 
 
-def _human_bytes(count: int) -> str:
+def human_bytes(count: int) -> str:
     """Render a byte count as a short human-readable size."""
     size = float(count)
     for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
@@ -269,53 +273,6 @@ def _human_bytes(count: int) -> str:
             return f'{size:.0f} {unit}' if unit == 'B' else f'{size:.1f} {unit}'
         size /= 1024
     return f'{count} B'
-
-
-def _dir_size(directory: Path) -> int:
-    """Sum the sizes of the regular files under ``directory``, symlinks excluded.
-
-    A symlink is measured as the link, not its target, so a link pointing out
-    of the tree cannot inflate the figure or reach a file the delete would not
-    touch. Anything unreadable is skipped rather than raised: the size is a
-    report figure, not a decision the deletion depends on.
-    """
-    total = 0
-    for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
-        dirnames[:] = [d for d in dirnames if _is_plain_dir(Path(dirpath) / d)]
-        for name in filenames:
-            try:
-                st = os.lstat(Path(dirpath) / name)
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode):
-                total += st.st_size
-    return total
-
-
-def _is_plain_dir(path: Path) -> bool:
-    """True when ``path`` is a directory and not a symlink; False when it cannot be read."""
-    try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
-    except OSError:
-        return False
-
-
-def _same_dir(a: Path, b: Path) -> bool:
-    """True when ``a`` and ``b`` name the same directory on disk.
-
-    Uses ``os.path.samefile`` so the comparison is by filesystem identity
-    (device and inode), not by path string: on a case-insensitive filesystem
-    two differently-cased spellings of the same directory compare equal here,
-    where a resolved-path string comparison would not. Falls back to resolved
-    path equality when either side cannot be stat'd (already removed).
-    """
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        try:
-            return a.resolve() == b.resolve()
-        except (OSError, RuntimeError):
-            return False
 
 
 def _existing_root(data_root: str | Path | None) -> Path:
@@ -331,59 +288,6 @@ def _existing_root(data_root: str | Path | None) -> Path:
     if not root.is_dir():
         raise FileNotFoundError(f'data root {root} does not exist; nothing to prune')
     return root
-
-
-def _same_entry(a: Path, b: Path) -> bool:
-    """True when ``a`` and ``b`` are the same directory entry, symlinks not followed."""
-    try:
-        sa, sb = os.lstat(a), os.lstat(b)
-    except OSError:
-        return False
-    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
-
-
-def _fs_is_case_insensitive(root: Path, *, may_write: bool = False) -> bool:
-    """True when the filesystem holding ``root``'s entries treats case as insignificant.
-
-    The probe looks inside ``root``, since ``root``'s own name lives on its
-    parent's filesystem. A deleting run (``may_write``) always creates a fresh
-    probe file in ``root``, looks it up under the flipped spelling and removes
-    it again. A dry run touches nothing: it looks up a directory whose name has
-    cased letters under the flipped spelling (only a directory, since a file
-    could be a hard link) and answers False when there is none. Any failure
-    answers False, which only makes subdir matching stricter.
-    """
-    if may_write:
-        return _probe_case_with_a_file(root)
-    try:
-        with os.scandir(root) as entries:
-            name = next(
-                (
-                    e.name
-                    for e in entries
-                    if e.name.swapcase() != e.name and e.is_dir(follow_symlinks=False)
-                ),
-                None,
-            )
-    except OSError:
-        return False
-    if name is not None:
-        return _same_entry(root / name, root / name.swapcase())
-    return False
-
-
-def _probe_case_with_a_file(root: Path) -> bool:
-    """Create a probe file in ``root``, look it up under the flipped case, remove it."""
-    try:
-        fd, probe_name = tempfile.mkstemp(dir=root, prefix='.fwl-io-case-probe-')
-    except OSError:
-        return False
-    os.close(fd)
-    probe = Path(probe_name)
-    try:
-        return _same_entry(probe, probe.with_name(probe.name.swapcase()))
-    finally:
-        probe.unlink(missing_ok=True)
 
 
 def _matches_subdir(parent_subdir: str, known_subdirs: set[str], case_insensitive: bool) -> bool:
@@ -428,7 +332,7 @@ def _read_stamp_safely(directory: Path) -> dict | None:
     if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_STAMP_BYTES:
         return None
     try:
-        return Fetcher._read_stamp(directory)
+        return read_stamp(directory)
     except RecursionError:
         return None
 
@@ -451,287 +355,6 @@ def _has_matching_stamp(path: Path, rel_parent: str, *, case_insensitive: bool) 
     if case_insensitive:
         return subdir.casefold() == rel_parent.casefold()
     return subdir == rel_parent
-
-
-def _leaf_problem(path: Path) -> str | None:
-    """Why ``path`` is not a plain leaf version directory, or ``None`` if it is.
-
-    A version directory is a leaf: nothing a manifest declares lives inside
-    one. A candidate holding a further ``r<digits>`` entry or a stamp file below
-    its own top level is a subtree that also matches the version-name shape,
-    and removing it could take a live pin nested inside. A subdirectory on
-    another filesystem is a mount that ``rmtree`` would empty. Names are checked
-    before descending, and anything unreadable fails closed.
-    """
-    unreadable = False
-
-    def _fail(_exc: OSError) -> None:
-        nonlocal unreadable
-        unreadable = True
-
-    try:
-        device = os.lstat(path).st_dev
-    except OSError:
-        return 'cannot be fully read'
-    for dirpath, dirnames, filenames in os.walk(path, followlinks=False, onerror=_fail):
-        current = Path(dirpath)
-        if current != path and _STAMP_FILENAME in filenames:
-            return 'contains a nested stamp'
-        if any(_VERSION_DIR_PATTERN.fullmatch(d) for d in dirnames):
-            return 'contains a nested version'
-        keep = []
-        for name in dirnames:
-            try:
-                st = os.lstat(current / name)
-            except OSError:
-                return 'cannot be fully read'
-            if stat.S_ISLNK(st.st_mode):
-                continue
-            if st.st_dev != device:
-                return 'contains a mount point'
-            keep.append(name)
-        dirnames[:] = keep
-    return 'cannot be fully read' if unreadable else None
-
-
-#: The consequence every lock warning names.
-_UNLOCKED_FETCH = 'runs without a lock, which prune cannot see; do not fetch while prune runs'
-
-
-def _missing_access(path: Path) -> str | None:
-    """Name the permission this user lacks on the directory ``path``, or ``None``."""
-    writable, searchable = os.access(path, os.W_OK), os.access(path, os.X_OK)
-    if writable and searchable:
-        return None
-    if not writable and not searchable:
-        return 'writable or searchable'
-    return 'searchable' if writable else 'writable'
-
-
-def _lock_scan(root: Path, *, with_warnings: bool = True) -> tuple[str | None, tuple[str, ...]]:
-    """Probe every fetch lock under ``root``: why deletion must wait, and warnings.
-
-    A lock file name is an opaque hash of the path it guards, so the whole
-    lock directory is checked. Each regular lock file is opened read-only
-    without following symlinks and probed with a shared, non-blocking flock,
-    which conflicts with the exclusive flock a fetch holds; nothing is created,
-    truncated or written. A lock entry that is not a regular file is not
-    probed, so its state is unknown and it blocks under its own reason, as do
-    a lock directory that is a symlink or not a directory and a lock file that
-    cannot be probed. A lock file, the lock directory or (with no lock
-    directory yet) the data root that this user cannot write does not block,
-    so a tree shared with other users stays usable, but is named in the
-    warnings: this user's own fetch through it would run without a lock.
-    ``with_warnings=False`` skips those access checks, for the probe before
-    each removal, which only needs the reason.
-
-    Returns
-    -------
-    tuple
-        ``(problem, warnings)``: the reason deletion must wait, or ``None``,
-        and the warning lines for the report.
-    """
-    lock_dir = root / _LOCK_DIRNAME
-    warnings: list[str] = []
-    unwritable = 0
-
-    def _result(problem: str | None) -> tuple[str | None, tuple[str, ...]]:
-        if unwritable:
-            warnings.append(
-                f'{unwritable} lock file(s) are not writable by this user; '
-                f'a fetch by this user through them {_UNLOCKED_FETCH}'
-            )
-        return problem, tuple(warnings)
-
-    try:
-        st = os.lstat(lock_dir)
-    except FileNotFoundError:
-        if with_warnings and not os.access(root, os.W_OK | os.X_OK):
-            warnings.append(
-                f'{root} is not writable by this user, so a fetch by this user cannot create '
-                f'{_LOCK_DIRNAME} and {_UNLOCKED_FETCH}'
-            )
-        return _result(None)
-    except OSError as exc:
-        return _result(f'cannot read {lock_dir}: {exc}')
-    if stat.S_ISLNK(st.st_mode):
-        return _result(f'{lock_dir} is a symlink; fetch locks cannot be checked')
-    if not stat.S_ISDIR(st.st_mode):
-        # A fetch then runs without a lock, so its state cannot be seen here.
-        return _result(f'{lock_dir} is not a directory; fetch locks cannot be checked')
-    if fcntl is None or not hasattr(os, 'O_NOFOLLOW'):
-        return _result('fetch locks cannot be checked on this platform')
-    try:
-        with os.scandir(lock_dir) as entries:
-            names = sorted(e.name for e in entries if e.name.endswith('.lock'))
-    except OSError as exc:
-        return _result(f'cannot read {lock_dir}: {exc}')
-    missing = _missing_access(lock_dir) if with_warnings else None
-    if missing is not None:
-        warnings.append(
-            f'{lock_dir} is not {missing} by this user; '
-            f'a fetch by this user whose lock file does not exist yet {_UNLOCKED_FETCH}'
-        )
-    for name in names:
-        path = lock_dir / name
-        try:
-            entry = os.lstat(path)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            return _result(f'cannot test lock file {path}: {exc}')
-        if not stat.S_ISREG(entry.st_mode):
-            return _result(f'lock file {path} is not a regular file; fetch locks cannot be checked')
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            return _result(f'cannot test lock file {path}: {exc}')
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return _result('a fetch lock is held on the data root')
-        except OSError as exc:
-            return _result(f'cannot test lock file {path}: {exc}')
-        else:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if with_warnings and not os.access(path, os.W_OK):
-            unwritable += 1
-    return _result(None)
-
-
-def _lock_problem(root: Path) -> str | None:
-    """Why deletion must wait for a fetch lock, or ``None``; the reason only, no warnings."""
-    return _lock_scan(root, with_warnings=False)[0]
-
-
-#: Symlinks followed while tracing one link before giving up, the usual kernel limit.
-_MAX_SYMLINKS = 40
-
-
-class _WalkEnds(Exception):
-    """Raised inside :func:`_symlink_hops` where the kernel would stop resolving."""
-
-
-def _symlink_hops(link: Path) -> set[Path]:
-    """Every path the kernel visits while resolving ``link``.
-
-    The link text is walked one name at a time, as the kernel does, and each
-    name is recorded before any symlink it names is followed. A chain that
-    passes through a candidate, through a symlinked directory inside one, or
-    by way of ``..``, therefore names the candidate itself. Like the kernel,
-    the walk ends at the first name that is missing or that would have to be
-    walked through while it is not a directory; the names recorded before it
-    are kept, and nothing after it is reached.
-
-    Raises
-    ------
-    OSError
-        When the link cannot be read or more than ``_MAX_SYMLINKS`` links are
-        met, which includes a loop.
-    """
-    hops: set[Path] = set()
-    budget = _MAX_SYMLINKS
-
-    def _require_dir(path: Path) -> None:
-        try:
-            is_dir = stat.S_ISDIR(os.lstat(path).st_mode)
-        except (FileNotFoundError, NotADirectoryError):
-            is_dir = False
-        if not is_dir:
-            raise _WalkEnds
-
-    def _visit(text: str, base: Path) -> Path:
-        nonlocal budget
-        target = Path(text)
-        current = Path(target.anchor) if target.is_absolute() else base
-        for part in target.parts[1:] if target.is_absolute() else target.parts:
-            _require_dir(current)
-            if part == '.':
-                continue
-            if part == '..':
-                current = current.parent
-                continue
-            step = current / part
-            hops.add(step)
-            try:
-                is_link = stat.S_ISLNK(os.lstat(step).st_mode)
-            except (FileNotFoundError, NotADirectoryError):
-                raise _WalkEnds from None
-            if not is_link:
-                current = step
-                continue
-            budget -= 1
-            if budget < 0:
-                raise OSError(errno.ELOOP, 'too many levels of symbolic links', str(link))
-            current = _visit(os.readlink(step), current)
-        return current
-
-    try:
-        _visit(os.readlink(link), link.parent)
-    except _WalkEnds:
-        pass
-    return hops
-
-
-def _hop_identities(hops: set[Path]) -> frozenset[tuple[int, int]]:
-    """Device and inode of every hop and of every ancestor of one, symlinks not followed.
-
-    A candidate is passed through by a link exactly when its own identity is
-    in this set, so each candidate costs one lookup instead of a walk over
-    every hop. Ancestors shared between hops are read once.
-    """
-    ids: set[tuple[int, int]] = set()
-    seen: set[Path] = set()
-    for hop in hops:
-        for entry in (hop, *hop.parents):
-            if entry in seen:
-                break
-            seen.add(entry)
-            try:
-                st = os.lstat(entry)
-            except OSError:
-                continue
-            ids.add((st.st_dev, st.st_ino))
-    return frozenset(ids)
-
-
-def _referenced_symlink_targets(referenced: set[Path]) -> tuple[set[Path], str | None]:
-    """Every hop of every symlink found inside a referenced directory.
-
-    Collected once so ``_remove_one`` can refuse a candidate that a current
-    pin's own links pass through, rather than walking every referenced
-    directory again for each candidate. The second value is the first error
-    met, if any: an unreadable part of a referenced directory, or a link that
-    cannot be traced, may lead into any candidate, so the caller must not delete.
-    """
-    targets: set[Path] = set()
-    error: str | None = None
-
-    def _capture(exc: OSError) -> None:
-        nonlocal error
-        if error is None:
-            error = str(exc)
-
-    for ref in referenced:
-        if not _is_plain_dir(ref):
-            continue
-        for dirpath, dirnames, filenames in os.walk(ref, followlinks=False, onerror=_capture):
-            current = Path(dirpath)
-            for name in (*dirnames, *filenames):
-                candidate = current / name
-                try:
-                    if not stat.S_ISLNK(os.lstat(candidate).st_mode):
-                        continue
-                    targets |= _symlink_hops(candidate)
-                except OSError as exc:
-                    _capture(exc)
-    return targets, error
 
 
 @dataclass(frozen=True)
@@ -907,13 +530,16 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         )
         if state != REFERENCED and (
             not _has_matching_stamp(path, rel_parent, case_insensitive=case_insensitive)
-            or _leaf_problem(path) is not None
+            or _leaf_problem(
+                path, stamp_filename=_STAMP_FILENAME, version_pattern=_VERSION_DIR_PATTERN
+            )
+            is not None
         ):
             state = UNRECOGNISED
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
-    lock_problem, lock_warnings = _lock_scan(root)
+    lock_problem, lock_warnings = _lock_scan(root, lock_dirname=_LOCK_DIRNAME, operation='prune')
     symlink_targets: set[Path] = set()
     if for_delete:
         symlink_targets, symlink_error = _referenced_symlink_targets(referenced)
@@ -954,40 +580,6 @@ def plan_prune(data_root: str | Path | None = None) -> PruneReport:
         When the data root does not exist. A plan never creates it.
     """
     return _build(_existing_root(data_root)).report()
-
-
-def _delete_unsupported() -> str | None:
-    """Why this platform cannot delete safely, or ``None`` when it can.
-
-    Deletion moves directories through handles opened without following
-    symlinks and probes fetch locks with flock; a platform without these (such
-    as Windows) is refused up front rather than failing part way. Checked by
-    feature, not by platform name.
-    """
-    missing = [name for name in ('O_DIRECTORY', 'O_NOFOLLOW') if not hasattr(os, name)]
-    if not _DIR_FD_OK:
-        missing.append('dir_fd')
-    if not _RMTREE_IS_SAFE:
-        missing.append('a symlink-safe rmtree')
-    if fcntl is None:
-        missing.append('flock')
-    if missing:
-        return f'deletion is not supported on this platform (missing {", ".join(missing)})'
-    return None
-
-
-def _open_dir_below(root: Path, parts: tuple[str, ...]) -> int:
-    """Open ``root/parts...`` as a directory, following no symlink below ``root``."""
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in parts:
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = nxt
-    except OSError:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _remove_one(
@@ -1091,12 +683,14 @@ def _remove_checked(
         return _refuse('contains a referenced version; not removed')
     if not _has_matching_stamp(path, rel.parent.as_posix(), case_insensitive=case_insensitive):
         return _refuse('has no matching stamp; not removed')
-    problem = _leaf_problem(path)
+    problem = _leaf_problem(
+        path, stamp_filename=_STAMP_FILENAME, version_pattern=_VERSION_DIR_PATTERN
+    )
     if problem is not None:
         return _refuse(f'{problem}; not removed')
     if (before.st_dev, before.st_ino) in referenced_link_ids:
         return _refuse('a referenced file symlinks into this directory; not removed')
-    lock_problem = _lock_problem(root)
+    lock_problem = _lock_problem(root, lock_dirname=_LOCK_DIRNAME)
     if lock_problem is not None:
         return _refuse(f'{lock_problem}; not removed')
     staging = root / _STAGING_DIRNAME
@@ -1213,6 +807,16 @@ def _prune_empty_parents(directory: Path, root: Path) -> str | None:
     return None
 
 
+def _target_states(*, include_orphans: bool) -> frozenset[str]:
+    """The candidate states a delete or apply call may act on."""
+    return frozenset({SUPERSEDED, ORPHANED}) if include_orphans else frozenset({SUPERSEDED})
+
+
+def _refused(report: PruneReport, reason: str, **extra: object) -> PruneReport:
+    """``report`` with ``apply_refusal`` set to ``reason``, the one place that field is set."""
+    return replace(report, apply_refusal=reason, **extra)
+
+
 def prune_versions(
     data_root: str | Path | None = None,
     *,
@@ -1260,13 +864,13 @@ def prune_versions(
     build = _build(root, for_delete=delete and unsupported is None)
     report = build.report()
     if unsupported is not None:
-        return replace(report, apply_refusal=unsupported)
+        return _refused(report, unsupported)
     if not delete or report.deletion_refusal(
         include_orphans=include_orphans, allow_empty_reference_set=allow_empty_reference_set
     ):
         # A dry run, or a run the reference set will not allow: report, do nothing.
         return report
-    targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
+    targets = _target_states(include_orphans=include_orphans)
     results = [
         _remove_one(
             c,
@@ -1333,14 +937,11 @@ def apply_prune(
     root = _existing_root(data_root)
     unsupported = _delete_unsupported()
     if unsupported is not None:
-        return replace(report, apply_refusal=unsupported)
+        return _refused(report, unsupported)
     stray = next((c for c in report.candidates if not _inside(c.path, root)), None)
     if stray is not None:
-        return replace(
-            report,
-            apply_refusal=(
-                f'the plan lists {stray.path}, outside {root}; it was built for another root'
-            ),
+        return _refused(
+            report, f'the plan lists {stray.path}, outside {root}; it was built for another root'
         )
     build = _build(root, for_delete=True)
     current = build.report()
@@ -1349,8 +950,8 @@ def apply_prune(
     )
     if refusal:
         # The tree changed under us into a state the plan could not delete from.
-        return replace(current, candidates=report.candidates, apply_refusal=refusal)
-    targets = {SUPERSEDED, ORPHANED} if include_orphans else {SUPERSEDED}
+        return _refused(current, refusal, candidates=report.candidates)
+    targets = _target_states(include_orphans=include_orphans)
     # A candidate must be a target both in the plan the caller confirmed and
     # in this call's fresh build: the plan bounds what may go, and the fresh
     # state catches a directory that stopped being safe to remove since.
