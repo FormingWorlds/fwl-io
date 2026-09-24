@@ -1545,5 +1545,19 @@ def test_a_digest_algorithm_nobody_supports_refuses_that_dataset_and_does_not_ra
     report = relocate_all(data_root=root)
 
     assert [e.state for e in report.entries] == [UNRESOLVABLE]
-    assert 'cannot read' in report.entries[0].detail
+    assert 'registry cannot be used' in report.entries[0].detail
     assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_the_target_probe_walks_what_exists_and_needs_the_root(tmp_path):
+    """The probe stops at the first missing component below the root, but the root must exist."""
+    from fwl_io.fs_guard import _probe_dir_below
+
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'b').symlink_to(tmp_path / 'a', target_is_directory=True)
+
+    _probe_dir_below(tmp_path, ('a', 'missing', 'deeper'))
+    with pytest.raises(OSError):
+        _probe_dir_below(tmp_path, ('b', 'x'))
+    with pytest.raises(FileNotFoundError):
+        _probe_dir_below(tmp_path / 'no-such-root', ('a',))

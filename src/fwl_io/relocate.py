@@ -477,12 +477,14 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 state, detail, files = _assess(
                     ds, registry, legacy_dir, target_dir, root, legacy_present
                 )
-            except (OSError, ValueError) as exc:
+            except OSError as exc:
                 state, detail, files = (
                     UNRESOLVABLE,
                     f'cannot read {legacy_dir} or {target_dir}: {exc}',
                     (),
                 )
+            except ValueError as exc:
+                state, detail, files = UNRESOLVABLE, f'{ds.key} registry cannot be used: {exc}', ()
             entries.append(
                 Relocation(
                     ds.key,

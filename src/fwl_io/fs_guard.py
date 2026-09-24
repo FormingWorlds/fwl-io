@@ -518,10 +518,11 @@ def _probe_dir_below(root: Path, parts: tuple[str, ...]) -> None:
     Raises
     ------
     OSError
-        When a component that exists is a symlink, is not a directory or
-        cannot be opened. A component that is absent ends the walk: the move
-        creates it.
+        When ``root`` is absent, or a component that exists is a symlink, is
+        not a directory or cannot be opened. A component below ``root`` that
+        is absent ends the walk: the move creates it.
     """
+    os.close(os.open(root, os.O_RDONLY | os.O_DIRECTORY))
     try:
         os.close(_open_dir_below(root, parts))
     except FileNotFoundError:
