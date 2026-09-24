@@ -326,7 +326,10 @@ def _classify(
             (),
         )
     differ = (
-        [f'{len(other)} file(s) at {target_dir} differ from the registry and were left alone']
+        [
+            f'{", ".join(sorted(other))} at {target_dir} differ from the registry and were left '
+            'alone; repair with "fwl-io check <model>", then "fwl-io fetch <model>"'
+        ]
         if other
         else []
     )
@@ -345,7 +348,7 @@ def _classify(
                 'not overwritten',
                 (),
             )
-    elif not intact or other:
+    elif not intact:
         return (
             INCOMPLETE,
             '; '.join([f'0 of {len(registry)} file(s) present in {legacy_dir}', *differ]),

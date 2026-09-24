@@ -1265,13 +1265,13 @@ def test_a_second_run_after_a_partial_move_reports_no_fault(tmp_path, monkeypatc
     assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
 
 
-def test_a_target_holding_a_corrupt_file_and_a_legacy_dir_with_none_is_still_a_fault(
+def test_a_target_holding_only_a_corrupt_file_and_a_legacy_dir_with_none_is_still_a_fault(
     tmp_path, monkeypatch
 ):
-    """The partial-target exemption needs every registry file the target holds to match."""
+    """The partial-target exemption needs at least one intact registry file at the target."""
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
-    _populate(root / TARGET, corrupt=['notes.txt'])
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
     (root / LEGACY).mkdir(parents=True)
     (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
 
@@ -1279,6 +1279,7 @@ def test_a_target_holding_a_corrupt_file_and_a_legacy_dir_with_none_is_still_a_f
 
     assert [e.state for e in report.entries] == [INCOMPLETE]
     assert not report.ok
+    assert 'notes.txt at' in report.entries[0].detail
 
 
 @pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
@@ -1492,10 +1493,11 @@ def test_files_names_the_verified_subset_for_a_ready_dataset(tmp_path, monkeypat
 def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_called_absent(
     tmp_path, monkeypatch
 ):
-    """A corrupt file at the target is reported as such, on the run that moves and on the next.
+    """A corrupt file at the target is named with its repair, on the run that moves and after it.
 
     The legacy tree holds only the other file, so nothing is overwritten and
-    the move goes ahead; the detail must not call the corrupt file absent.
+    the move goes ahead. Once it has moved there is nothing left to do, so
+    the next run is not a fault, and the detail never calls the file absent.
     """
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -1505,11 +1507,15 @@ def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_call
 
     plan = relocate_all(data_root=root, dry_run=True).entries[0]
     first = relocate_all(data_root=root).entries[0]
-    second = relocate_all(data_root=root).entries[0]
+    later = relocate_all(data_root=root)
+    second = later.entries[0]
 
-    assert (plan.state, first.state, second.state) == (READY, MOVED, INCOMPLETE)
+    assert (plan.state, first.state, second.state) == (READY, MOVED, ABSENT)
+    assert later.ok and not later.faults
     for entry in (plan, first, second):
-        assert '1 file(s) at' in entry.detail and 'differ from the registry' in entry.detail
+        assert 'BHAC15_tracks.dat at' in entry.detail
+        assert 'differ from the registry' in entry.detail
+        assert 'fwl-io check <model>", then "fwl-io fetch <model>' in entry.detail
     assert '0 absent' not in plan.detail and 'absent' not in plan.detail
     assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
 
