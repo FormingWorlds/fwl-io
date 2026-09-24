@@ -1729,7 +1729,7 @@ def test_a_connection_error_is_retried_but_a_certificate_error_is_not(sleeps):
 
     run(requests.ConnectionError('connection reset'))
     assert sleeps == [30.0]
-    # A TLS error after the request went out (EOF while reading the reply) is retried.
+    # A TLS error that is not a certificate failure (here an EOF) is retried.
     run(requests.exceptions.SSLError('EOF occurred in violation of protocol'))
     assert sleeps == [30.0, 30.0]
     # A connection that breaks in the middle of the reply body is retried too.
@@ -1819,12 +1819,22 @@ def test_a_429_then_a_rejection_is_a_known_rejection(sleeps):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(('wait', 'expected'), [('7', 7.0), ('900', 300.0), ('soon', 30.0)])
-def test_a_429_waits_as_told_up_to_the_cap(sleeps, wait, expected):
-    """Retry-After in seconds sets the wait, capped at 300 s; another form uses the backoff."""
+@pytest.mark.parametrize(
+    ('status', 'wait', 'expected'),
+    [
+        (429, '7', 7.0),
+        (429, '0', 0.0),
+        (429, '900', 300.0),
+        (429, 'soon', 30.0),
+        (429, '\u00b2', 30.0),
+        (503, '1', 30.0),
+    ],
+)
+def test_a_429_waits_as_told_up_to_the_cap(sleeps, status, wait, expected):
+    """A 429's Retry-After in seconds sets the wait (cap 300 s); anything else uses the backoff."""
     import requests
 
-    first = _fake_response(429, b'{}')
+    first = _fake_response(status, b'{}')
     first.headers['Retry-After'] = wait
     replies = [first, _fake_response(404, b'{"status": "ERROR"}')]
     orig = requests.request
@@ -1902,3 +1912,38 @@ def test_any_error_after_an_unclear_publish_keeps_it_unconfirmed(sleeps, monkeyp
     finally:
         requests.request = orig
     assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(10)
+def test_the_certificate_check_ends_on_a_cyclic_exception_chain():
+    """An exception chain that loops back on itself is walked once, not forever."""
+    from fwl_io.mirror import _cert_failure
+
+    first = ValueError('outer')
+    second = KeyError(first)
+    first.__context__ = second
+    assert _cert_failure(first) is False
+    second.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    assert _cert_failure(first) is True
+
+
+@pytest.mark.unit
+def test_an_unexpected_error_after_the_publish_request_keeps_it_unconfirmed(sleeps):
+    """A reply that breaks the JSON parser in an unexpected way is not a known rejection."""
+    import requests
+
+    from fwl_io.mirror import DataversePublishUnconfirmed
+
+    def post_reply(*args, **kwargs):
+        raise RecursionError('maximum recursion depth exceeded')
+
+    seen = []
+    orig = requests.request
+    requests.request = _publish_route(seen, post_reply)
+    try:
+        with pytest.raises(DataversePublishUnconfirmed, match='recursion'):
+            DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    finally:
+        requests.request = orig
+    assert seen == ['GET', 'POST']

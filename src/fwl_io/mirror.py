@@ -50,7 +50,7 @@ _NO_INGEST_PARAM = 'noVarDetect'
 
 
 # Retry of a native-API call hit by the bot-check page, a gateway error, a 429 or a
-# lost connection: 30, 60, 120, 240 s between 5 attempts, at most 450 s of waiting.
+# lost connection: 30, 60, 120, 240 s between 5 attempts, or a 429's Retry-After (<= 300 s).
 MAX_ATTEMPTS = 5
 BACKOFF_S = 30.0
 BACKOFF_CAP_S = 300.0
@@ -231,10 +231,11 @@ class DataverseClient:
         ------
         DataverseRetryableError
             If the response is the DataverseNL bot-check page (text/html with
-            its "Oh noes!" marker), a 502, 503 or 504 gateway error, or the
-            connection fails or times out.
+            its "Oh noes!" marker), a 429 or a 502, 503 or 504 gateway error, or
+            the connection fails, times out or breaks mid-body, or a TLS error
+            occurs that is not a certificate verification failure.
         DataverseError
-            If another transport error occurs, the response status is 400 or
+            If another transport error occurs, another status is 400 or
             higher, or a non-empty successful body fails to parse as JSON or
             parses to something other than a JSON object.
         """
@@ -268,11 +269,11 @@ class DataverseClient:
                 response.status_code,
             )
         if response.status_code in _RETRY_STATUSES:
-            wait = response.headers.get('Retry-After', '')
+            wait = response.headers.get('Retry-After', '') if response.status_code == 429 else ''
             raise DataverseRetryableError(
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
                 response.status_code,
-                float(wait) if wait.isdigit() else None,
+                float(wait) if wait.isdecimal() else None,
             )
         if not response.ok:
             raise DataverseError(
@@ -309,9 +310,10 @@ class DataverseClient:
 
         Before each repeat, ``done()`` (when given) tells whether the earlier
         attempt took effect on the server after all; the call is then not
-        repeated. The waits are 30, 60, 120 and 240 s: at most 450 s of sleep,
-        plus up to MAX_ATTEMPTS request timeouts, for one call that never
-        succeeds. The mirror workflow has no job timeout below GitHub's 6 h.
+        repeated. The waits are 30, 60, 120 and 240 s, or a 429's Retry-After
+        capped at 300 s: at most 1200 s of sleep, plus up to MAX_ATTEMPTS
+        request timeouts, for one call that never succeeds. The mirror workflow
+        has no job timeout below GitHub's 6 h.
 
         Raises
         ------
@@ -333,7 +335,8 @@ class DataverseClient:
                         f'last: {exc}',
                         exc.status_code,
                     ) from exc
-                delay = min(exc.retry_after or BACKOFF_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
+                backoff = BACKOFF_S * 2 ** (attempt - 1)
+                delay = min(backoff if exc.retry_after is None else exc.retry_after, BACKOFF_CAP_S)
                 log.warning(
                     '%s (attempt %d of %d): %s; retrying in %.0f s',
                     what,
@@ -472,9 +475,9 @@ class DataverseClient:
                     '/api/datasets/:persistentId/actions/:publish',
                     params={'persistentId': persistent_id, 'type': version_type},
                 )
-            except DataverseError as exc:
+            except Exception as exc:
                 # Only a 4xx shows the request had no effect.
-                if not 400 <= (exc.status_code or 0) < 500:
+                if not 400 <= (getattr(exc, 'status_code', None) or 0) < 500:
                     unclear.append(True)
                 raise
 
