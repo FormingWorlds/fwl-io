@@ -31,6 +31,7 @@ import logging
 import ssl
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -72,7 +73,8 @@ class DataverseRetryableError(DataverseError):
     """A Dataverse call hit the bot-check page, a gateway error, a 429 or a lost connection.
 
     ``unprocessed`` is True when the reply shows that Dataverse did not process
-    the request (the bot-check page or a 429), so a resend cannot repeat it.
+    the request (the bot-check page at a status below 500, or a 429), so a
+    resend cannot repeat it.
     """
 
     def __init__(
@@ -81,6 +83,13 @@ class DataverseRetryableError(DataverseError):
         super().__init__(message, status_code)
         self.retry_after = retry_after
         self.unprocessed = unprocessed
+
+
+def _wait(attempt: int, retry_after=None) -> float:
+    """Return the wait after ``attempt``: 30 s doubling, or a Retry-After, at most 300 s."""
+    return min(
+        BACKOFF_S * 2 ** (attempt - 1) if retry_after is None else retry_after, BACKOFF_CAP_S
+    )
 
 
 def _cert_failure(exc: BaseException) -> bool:
@@ -282,7 +291,7 @@ class DataverseClient:
                 f'Dataverse {method} {path} returned its bot-check page '
                 f'({response.status_code}, text/html, "Oh noes!") instead of an API response',
                 response.status_code,
-                unprocessed=True,
+                unprocessed=response.status_code < 500,
             )
         if response.status_code in _RETRY_STATUSES:
             wait = response.headers.get('Retry-After', '') if response.status_code == 429 else ''
@@ -357,8 +366,7 @@ class DataverseClient:
                         f'last: {exc}',
                         exc.status_code,
                     ) from exc
-                backoff = BACKOFF_S * 2 ** (attempt - 1)
-                delay = min(backoff if exc.retry_after is None else exc.retry_after, BACKOFF_CAP_S)
+                delay = _wait(attempt, exc.retry_after)
                 log.warning(
                     '%s (attempt %d of %d): %s; retrying in %.0f s',
                     what,
@@ -382,9 +390,13 @@ class DataverseClient:
             '/api/datasets/:persistentId/versions/:draft/files',
             params={'persistentId': persistent_id},
         )
-        files = [entry.get('dataFile') or {} for entry in body.get('data') or []]
-        keys = [_draft_path(f.get('directoryLabel'), f.get('filename')) for f in files]
-        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        entries = body.get('data') or []
+        files = [entry.get('dataFile') or {} for entry in entries]
+        keys = [
+            _draft_path(e.get('directoryLabel') or f.get('directoryLabel'), f.get('filename'))
+            for e, f in zip(entries, files, strict=True)
+        ]
+        dupes = sorted(k for k, n in Counter(keys).items() if n > 1)
         if dupes:
             raise DataverseError(f'draft {persistent_id} lists {dupes} more than once')
         return dict(zip(keys, files, strict=True))
@@ -490,8 +502,9 @@ class DataverseClient:
         """Publish a dataset, making its files publicly downloadable.
 
         The request is sent again only after a reply that shows Dataverse did
-        not process it (the bot-check page or a 429). After any other outcome,
-        including a 2xx, the dataset state is polled until it is RELEASED.
+        not process it (the bot-check page below status 500, or a 429). After
+        any other outcome, including a 2xx, the dataset state is polled until
+        it is RELEASED.
 
         Raises
         ------
@@ -510,8 +523,8 @@ class DataverseClient:
             try:
                 if attempt > 1 and self._released(persistent_id):
                     return
-            except DataverseError:
-                pass
+            except Exception as exc:  # noqa: BLE001 -- a failed check is not RELEASED
+                log.warning('state check of %s failed: %s', persistent_id, exc)
             try:
                 reply = self._post(
                     '/api/datasets/:persistentId/actions/:publish',
@@ -522,14 +535,11 @@ class DataverseClient:
                     return self._await_release(persistent_id, attempt, exc)
                 if attempt == MAX_ATTEMPTS:
                     raise DataversePublishUnconfirmed(
-                        f'{what} not confirmed: sent {attempt} time(s), each answered with '
+                        f'{what} not confirmed: attempted {attempt} time(s), each answered with '
                         f'the bot-check page or a 429; last: {exc}',
                         exc.status_code,
                     ) from exc
-                delay = (
-                    BACKOFF_S * 2 ** (attempt - 1) if exc.retry_after is None else exc.retry_after
-                )
-                delay = min(delay, BACKOFF_CAP_S)
+                delay = _wait(attempt, exc.retry_after)
                 log.warning(
                     '%s (attempt %d of %d): %s; retrying in %.0f s',
                     what,
@@ -557,7 +567,7 @@ class DataverseClient:
         waited, last = 0.0, 'not RELEASED'
         for check in range(1, MAX_ATTEMPTS + 1):
             if check > 1:
-                delay = min(BACKOFF_S * 2 ** (check - 2), BACKOFF_CAP_S)
+                delay = _wait(check - 1)
                 log.warning(
                     'publish of %s not RELEASED yet (check %d of %d); checking again in %.0f s',
                     persistent_id,
@@ -570,11 +580,12 @@ class DataverseClient:
             try:
                 if self._released(persistent_id):
                     return
+                last = 'not RELEASED'
             except Exception as exc:  # noqa: BLE001 -- a failed check is not RELEASED
                 log.warning('state check of %s failed: %s', persistent_id, exc)
                 last = exc
         raise DataversePublishUnconfirmed(
-            f'publish of {persistent_id} not confirmed (request sent {sent} time(s)); '
+            f'publish of {persistent_id} not confirmed (request attempted {sent} time(s)); '
             f'not RELEASED after {waited:.0f} s; reply: {outcome}; last state check: {last}',
             getattr(outcome, 'status_code', None),
         ) from (outcome if isinstance(outcome, BaseException) else None)
@@ -693,9 +704,12 @@ def mirror_to_dataverse(
         rollback deletes the draft; if that fails too, the log names the draft
         to delete by hand. A failed creation leaves no draft to roll back, but a
         creation whose reply was lost can leave one in the collection.
+    DataverseAlreadyPublished
+        If the dataset is already published before the publish request; it is kept.
     DataversePublishUnconfirmed
-        If a publish request got any reply other than a 4xx, or none, so its
-        effect is unknown; the dataset is kept, since it may be public already.
+        If the dataset is not RELEASED after the wait that follows a publish
+        request, or every attempt got the bot-check page or a 429; the dataset
+        is kept, since it may be public already.
     DownloadError
         If a Zenodo file fails its checksum or cannot be downloaded; raised by
         the fetcher (``fwl_io.fetch``) before any Dataverse write.
@@ -781,6 +795,9 @@ def mirror_to_dataverse(
                     persistent_id,
                     cleanup_exc,
                 )
+            except BaseException:
+                log.error('rollback of %s interrupted; check it by hand', persistent_id)
+                raise
             raise
         except BaseException:
             log.error(
@@ -823,12 +840,15 @@ def publish_existing_dataverse_draft(
     ValueError
         If ``persistent_id`` is not of the form ``'doi:<prefix>/<suffix>'``,
         or ``version_type`` is not ``'major'`` or ``'minor'``.
+    DataverseAlreadyPublished
+        If the dataset is already published before the publish request.
     DataverseError
-        If the publish request fails: for example the dataset is already
-        published, does not exist, or the server returns a 4xx status.
+        If the dataset does not exist or Dataverse rejects the publish request
+        with a 4xx status.
     DataversePublishUnconfirmed
-        If the publish request got any reply other than a 4xx, or none, so its
-        effect is unknown; check the dataset's state before trying again.
+        If the dataset is not RELEASED after the wait that follows the publish
+        request, or every attempt got the bot-check page or a 429; check the
+        dataset's state before trying again.
     """
     if version_type not in ('major', 'minor'):
         raise ValueError(

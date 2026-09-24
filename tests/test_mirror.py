@@ -1707,11 +1707,11 @@ def test_a_failed_state_check_rolls_the_draft_back(http_server, dataverse_server
     assert 'not confirmed' not in caplog.text
 
 
-def test_a_rejection_after_a_lost_publish_reply_keeps_the_dataset(
+def test_a_publish_504_is_polled_not_resent_and_the_draft_is_kept(
     http_server, dataverse_server, sleeps, caplog
 ):
     """A 504 is not resent: the state is polled, and a dataset still in DRAFT is kept."""
-    _DataverseHandler.script = {('POST', '/actions/:publish'): [504, 409]}
+    _DataverseHandler.script = {('POST', '/actions/:publish'): [504]}
     with pytest.raises(DataversePublishUnconfirmed, match='504'):
         _mirror(http_server, dataverse_server, publish=True)
     assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
@@ -1802,7 +1802,7 @@ def test_a_publish_reply_other_than_a_4xx_leaves_the_publish_unconfirmed(sleeps,
     orig = requests.request
     requests.request = _publish_route(seen, post_reply)
     try:
-        with pytest.raises(DataversePublishUnconfirmed, match=r'request sent \d time'):
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request attempted \d time'):
             DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
     finally:
         requests.request = orig
@@ -1893,7 +1893,7 @@ def test_an_unconfirmed_publish_says_how_often_it_was_sent(sleeps):
     orig = requests.request
     requests.request = lambda *args, **kwargs: replies.pop(0)
     try:
-        with pytest.raises(DataversePublishUnconfirmed, match=r'request sent 1 time\(s\)'):
+        with pytest.raises(DataversePublishUnconfirmed, match=r'request attempted 1 time\(s\)'):
             DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
     finally:
         requests.request = orig
@@ -1996,7 +1996,7 @@ def test_an_accepted_publish_that_stays_a_draft_is_unconfirmed(sleeps, monkeypat
     seen = []
     route = _publish_route(seen, lambda *args, **kwargs: _fake_response(200, b'{"status": "OK"}'))
     monkeypatch.setattr(requests, 'request', route)
-    with pytest.raises(DataversePublishUnconfirmed, match=r'sent 1 time\(s\).*450 s'):
+    with pytest.raises(DataversePublishUnconfirmed, match=r'attempted 1 time\(s\).*450 s'):
         DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
     assert seen == ['GET', 'POST'] + ['GET'] * 5
 
@@ -2177,3 +2177,96 @@ def test_an_interrupted_mirror_keeps_the_dataset(
     assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
     assert 'doi:10.34894/DEMO01 interrupted' in caplog.text
     assert 'check its state by hand' in caplog.text
+
+
+def _scripted_route(seen, gets, posts):
+    """Answer GETs and POSTs from their own reply lists, in order."""
+
+    def route(method, *args, **kwargs):
+        seen.append(method)
+        return (gets if method == 'GET' else posts).pop(0)
+
+    return route
+
+
+def _page(status):
+    page = _fake_response(status, b'<html><title>Oh noes!</title></html>')
+    page.headers['Content-Type'] = 'text/html'
+    return page
+
+
+@pytest.mark.unit
+def test_the_last_state_check_is_named_even_after_failed_checks(sleeps, monkeypatch):
+    """A DRAFT state after failed checks is what the unconfirmed message names last."""
+    import requests
+
+    gets = [_state('DRAFT')] + [_fake_response(500, b'{}')] * 4 + [_state('DRAFT')]
+    route = _scripted_route([], gets, [_fake_response(200, b'{"status": "OK"}')])
+    monkeypatch.setattr(requests, 'request', route)
+    with pytest.raises(DataversePublishUnconfirmed, match='last state check: not RELEASED$'):
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert gets == []
+
+
+def test_an_interrupt_during_the_rollback_is_logged(
+    http_server, dataverse_server, caplog, monkeypatch
+):
+    """An interrupt while deleting the draft names the draft to check by hand."""
+
+    def interrupt(self, persistent_id):
+        raise KeyboardInterrupt
+
+    _DataverseHandler.fail_on_add = True
+    monkeypatch.setattr(DataverseClient, 'delete_draft', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        _mirror(http_server, dataverse_server)
+    assert 'rollback of doi:10.34894/DEMO01 interrupted; check it by hand' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_bot_check_page_at_a_5xx_status_is_polled_not_resent(sleeps, monkeypatch):
+    """The bot-check page at a 5xx may follow a processed request, so publish is not resent."""
+    import requests
+
+    seen = []
+    gets = [_state('DRAFT'), _state('DRAFT'), _state('RELEASED')]
+    monkeypatch.setattr(requests, 'request', _scripted_route(seen, gets, [_page(503)]))
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'GET']
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+def test_an_unexpected_state_reply_before_a_resend_is_not_fatal(sleeps, monkeypatch, caplog):
+    """A state reply that breaks the parser before a resend counts as not RELEASED."""
+    import requests
+
+    seen = []
+    gets = [_state('DRAFT'), _fake_response(200, b'{"data": [1]}'), _state('RELEASED')]
+    posts = [_fake_response(429, b'{}'), _fake_response(200, b'{"status": "OK"}')]
+    monkeypatch.setattr(requests, 'request', _scripted_route(seen, gets, posts))
+    DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert seen == ['GET', 'POST', 'GET', 'POST', 'GET']
+    assert 'state check of doi:10.34894/DEMO01 failed' in caplog.text
+
+
+@pytest.mark.unit
+def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypatch):
+    """The listing's directoryLabel on the file entry, outside dataFile, keys the path."""
+    import requests
+
+    target = tmp_path / 'a.dat'
+    target.write_bytes(b'AAA\n')
+    data_file = {
+        'filename': 'a.dat',
+        'filesize': 4,
+        'checksum': {'type': 'MD5', 'value': hashlib.md5(b'AAA\n').hexdigest()},
+    }
+    body = json.dumps({'status': 'OK', 'data': [{'directoryLabel': 'sub', 'dataFile': data_file}]})
+    monkeypatch.setattr(
+        requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
+    )
+    with pytest.raises(DataverseError, match=r"not expected \['sub/a.dat'\]"):
+        DataverseClient('http://unused', 'tok').check_draft(
+            'doi:10.34894/DEMO01', {'a.dat': target}
+        )
