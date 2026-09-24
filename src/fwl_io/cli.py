@@ -124,8 +124,8 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     from fwl_io.prune import (
         SHARED_TREE_WARNING,
         _delete_unsupported,
-        _human_bytes,
         apply_prune,
+        human_bytes,
         plan_prune,
     )
 
@@ -146,9 +146,9 @@ def _cmd_prune(args: argparse.Namespace) -> int:
         print('nothing to prune')
         return 0
     total = sum(c.size for c in targets)
-    print(f'\nabout to delete {len(targets)} version directory(ies), {_human_bytes(total)}:')
+    print(f'\nabout to delete {len(targets)} version directory(ies), {human_bytes(total)}:')
     for c in sorted(targets, key=lambda c: c.rel):
-        print(f'  {c.rel}  ({c.state}, {_human_bytes(c.size)})')
+        print(f'  {c.rel}  ({c.state}, {human_bytes(c.size)})')
     print(f'\n{SHARED_TREE_WARNING}\n')
     if not args.yes:
         try:

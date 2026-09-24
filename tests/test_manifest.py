@@ -542,6 +542,8 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
         'observe.exoplanet_reference',
         'observe.mass_radius.zeng_2019',
         'star.tracks.baraffe_2015',
+        'atmos_clim.surface_albedos.hammond_2024',
+        'interior_struct.eos.seager_2007',
     }
 
 

@@ -12,6 +12,7 @@ at a closed port, and the relocation path itself never downloads.
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pytest
 
@@ -44,17 +45,18 @@ TARGET = f'star/tracks/baraffe_2015/r{RECID}'
 CONTENTS = {'BHAC15_tracks.dat': b'0.1 0.2 0.3\n', 'notes.txt': b'9.87\n'}
 
 
-def _digests(names=None):
-    chosen = CONTENTS if names is None else {n: CONTENTS[n] for n in names}
+def _digests(names=None, contents=None):
+    source = CONTENTS if contents is None else contents
+    chosen = source if names is None else {n: source[n] for n in names}
     return {n: f'sha256:{hashlib.sha256(b).hexdigest()}' for n, b in chosen.items()}
 
 
-def _install_manifest(monkeypatch, tmp_path, *, with_registry=True):
+def _install_manifest(monkeypatch, tmp_path, *, with_registry=True, contents=None):
     """Install a manifest declaring the migrated dataset, and its registry."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\n')
     if with_registry:
-        lines = ''.join(f'{n} {d}\n' for n, d in sorted(_digests().items()))
+        lines = ''.join(f'{n} {d}\n' for n, d in sorted(_digests(contents=contents).items()))
         (tmp_path / f'{KEY}.registry.txt').write_text(lines)
 
     class _EP:
@@ -115,12 +117,14 @@ def test_a_file_that_differs_from_the_registry_stops_the_move(tmp_path, monkeypa
     assert not (root / TARGET).exists(), 'no half-move: the target is not created'
 
 
-def test_a_legacy_tree_missing_a_file_is_reported_not_half_moved(tmp_path, monkeypatch):
-    """An incomplete tree is left whole rather than partly relocated.
+def test_a_legacy_tree_missing_a_file_moves_the_present_one_and_reports_the_rest(
+    tmp_path, monkeypatch
+):
+    """A partial legacy tree moves the file it has and leaves the rest to the fetcher.
 
-    The edge case that matters: moving the files that are present would leave
-    the dataset split across two layouts, which is the one state neither the
-    reader nor the fetcher can interpret.
+    Moving only what is present and verified is the common case for a record
+    a model fetches only part of; the fetcher fills in what is absent at the
+    new location afterwards, which is what the module docstring describes.
     """
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -128,9 +132,30 @@ def test_a_legacy_tree_missing_a_file_is_reported_not_half_moved(tmp_path, monke
 
     report = relocate_all(data_root=root)
 
-    assert [e.state for e in report.entries] == [INCOMPLETE]
-    assert '1 of 2 file(s) absent' in report.entries[0].detail
-    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file()
+    assert [e.state for e in report.entries] == [MOVED]
+    assert '1 of 2 file(s) present and verified' in report.entries[0].detail
+    assert '1 absent' in report.entries[0].detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not (root / TARGET / 'notes.txt').exists()
+    assert not (root / LEGACY).exists(), 'the moved file must not leave a half-empty legacy dir'
+
+
+def test_a_present_file_that_mismatches_still_blocks_a_partial_move(tmp_path, monkeypatch):
+    """A present-but-corrupt file blocks the move even though another file is simply absent.
+
+    An absent file must never mask a corrupt one: verifying only the files
+    that happen to be present would let a partial, damaged tree move on the
+    strength of the files it never had a chance to get wrong.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MISMATCH]
+    assert report.faults
+    assert (root / LEGACY / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
     assert not (root / TARGET).exists()
 
 
@@ -191,6 +216,27 @@ def test_nothing_on_disk_is_reported_absent_rather_than_missing(tmp_path, monkey
     assert list(root.iterdir()) == [], 'a relocation must not create the tree it inspects'
 
 
+def test_a_legacy_dir_holding_none_of_the_registry_is_a_fault(tmp_path, monkeypatch):
+    """A legacy directory that exists but has none of the dataset's files is flagged, not ignored.
+
+    This is not the same as never having had a legacy copy: something is there,
+    and a reader needs to know it did not match rather than have it silently
+    counted as nothing to do.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'unrelated_file.txt').write_bytes(b'not a registry file\n')
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [INCOMPLETE]
+    assert report.faults, 'a legacy directory present with none of its files is a fault'
+    assert '0 of 2 file(s) present' in report.entries[0].detail
+    assert (root / LEGACY / 'unrelated_file.txt').is_file()
+    assert not (root / TARGET).exists()
+
+
 def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
     """The plan names what would move, and the tree is untouched afterwards."""
     _install_manifest(monkeypatch, tmp_path)
@@ -210,6 +256,156 @@ def test_a_dry_run_reports_the_move_without_making_it(tmp_path, monkeypatch):
     # assertions above pin the flag and not some other refusal.
     assert relocate_all(data_root=root).moved
     assert (root / TARGET / 'notes.txt').is_file()
+
+
+def test_a_platform_missing_a_safe_move_capability_refuses_that_dataset(tmp_path, monkeypatch):
+    """A platform that cannot move directories safely refuses the affected dataset by name.
+
+    The shared platform guard is checked at plan time for every dataset the
+    hash check found ready, so a platform without a capability the move needs
+    is refused cleanly there, before a move is attempted, rather than crashing
+    part way through. A dry run reports the same refusal, so it never
+    promises a move the real run cannot make.
+    """
+    import fwl_io.relocate as module
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.delattr(module.os, 'O_DIRECTORY', raising=False)
+
+    plan = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root)
+
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'relocation is not supported on this platform' in result.entries[0].detail
+        assert 'O_DIRECTORY' in result.entries[0].detail
+        assert not result.ok
+        assert result.moved == ()
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+def test_a_tidy_tree_is_not_refused_for_a_platform_capability_it_never_needed(
+    tmp_path, monkeypatch
+):
+    """A platform missing a safe-move capability does not refuse a tree with nothing to move.
+
+    The capability is only probed for a dataset the hash check already found
+    ready; a tree where every dataset is absent or already at its current
+    location never reaches that probe, so it is not refused over a
+    limitation moving it would never actually hit.
+    """
+    import fwl_io.relocate as module
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET)
+    monkeypatch.delattr(module.os, 'O_DIRECTORY', raising=False)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ALREADY_CURRENT]
+    assert report.ok
+
+
+LEAF_REASON = 'is a symlink, not a plain directory'
+OPEN_REASON = 'cannot be safely opened'
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_legacy_directory_is_refused_at_plan_time(tmp_path, monkeypatch, dry_run):
+    """A legacy directory that is itself a symlink is refused at the plan step, not the move.
+
+    A symlinked directory whose target is a real, intact copy of the dataset
+    inside the data root would otherwise hash as verified and only fail once
+    the move tries to open it with a no-follow directory handle; refusing it
+    here means the dry run tells the truth about what will happen.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    real = root / 'elsewhere'
+    _populate(real)
+    (root / LEGACY).parent.mkdir(parents=True, exist_ok=True)
+    (root / LEGACY).symlink_to(real, target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert LEAF_REASON in report.entries[0].detail
+    assert not (root / TARGET).exists()
+    assert (real / 'notes.txt').is_file()
+
+
+def test_the_leaf_symlink_check_refuses_on_its_own(tmp_path):
+    """``_classify`` refuses a symlinked legacy directory without the plan's open probe.
+
+    The probe would refuse it anyway, so only a call to ``_classify`` alone
+    can fail when this check is removed.
+    """
+    from fwl_io.relocate import _classify
+
+    real = tmp_path / 'real'
+    _populate(real)
+    link = tmp_path / 'link'
+    link.symlink_to(real, target_is_directory=True)
+
+    state, detail, files = _classify(link, tmp_path / 'target', _digests(), True, tmp_path)
+
+    assert state == UNRESOLVABLE
+    assert LEAF_REASON in detail
+    assert files == ()
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_ancestor_of_the_legacy_directory_is_refused_at_plan_time(
+    tmp_path, monkeypatch, dry_run
+):
+    """A symlink higher up in legacy_dir's path is refused at plan time, not only the leaf.
+
+    ``legacy_dir`` itself not being a symlink is not enough: the leaf check
+    passes an intact-looking directory reached through a symlinked parent,
+    and the same open the move uses is what refuses it, at plan time as well
+    as when the move actually runs.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    real_parent = root / 'bigdisk'
+    _populate(real_parent / 'Baraffe')
+    (root / LEGACY).parent.symlink_to(real_parent, target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert OPEN_REASON in report.entries[0].detail
+    assert LEAF_REASON not in report.entries[0].detail
+    assert not (root / TARGET).exists()
+    assert (real_parent / 'Baraffe' / 'notes.txt').is_file()
+
+
+def test_a_symlinked_registry_file_is_refused_rather_than_moved(tmp_path, monkeypatch):
+    """A registry file that is a symlink is refused, even when its target's content matches.
+
+    Hashing follows a symlink to its target, so a symlinked file would
+    otherwise pass verification. Moving it would move the link itself, not
+    the data it points to, and leave the target's real location untouched.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    elsewhere = root / 'elsewhere.dat'
+    elsewhere.write_bytes(CONTENTS['notes.txt'])
+    (legacy / 'notes.txt').unlink()
+    (legacy / 'notes.txt').symlink_to(elsewhere)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'are symlinks' in report.entries[0].detail
+    assert (legacy / 'notes.txt').is_symlink(), 'nothing was touched'
+    assert (legacy / 'BHAC15_tracks.dat').is_file()
+    assert not (root / TARGET).exists()
 
 
 def test_a_dataset_whose_registry_is_missing_is_reported_not_moved(tmp_path, monkeypatch):
@@ -422,6 +618,22 @@ def test_the_shipped_table_names_only_datasets_and_relative_locations():
         assert location.strip('/') == location, f'{location!r} is not a clean relative path'
 
 
+DECOY = b'a decoy that must be neither moved nor overwritten\n'
+
+
+def _decoys(outside):
+    """Put a decoy under every registry name in ``outside``, a directory a symlink could reach."""
+    outside.mkdir()
+    for name in CONTENTS:
+        (outside / name).write_bytes(DECOY)
+
+
+def _assert_decoys_untouched(outside):
+    assert sorted(p.name for p in outside.iterdir()) == sorted(CONTENTS)
+    for name in CONTENTS:
+        assert (outside / name).read_bytes() == DECOY, f'{name} was moved or overwritten'
+
+
 def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, monkeypatch):
     """When the files cannot be put back, say so rather than call it a failure.
 
@@ -438,10 +650,10 @@ def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, mo
     real_replace = module.os.replace
     calls = []
 
-    def failing_replace(src, dst):
+    def failing_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
         calls.append((str(src), str(dst)))
         if len(calls) == 1:
-            return real_replace(src, dst)
+            return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
         raise OSError(28, 'No space left on device')
 
     monkeypatch.setattr(module.os, 'replace', failing_replace)
@@ -461,15 +673,212 @@ def test_a_rollback_that_cannot_restore_is_reported_as_a_split_tree(tmp_path, mo
     assert len(calls) == 3, 'one move succeeded, one failed, one rollback was attempted'
 
 
-def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monkeypatch):
-    """After a dataset fails to move, the ones behind it are left alone.
+def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, monkeypatch):
+    """A legacy directory swapped for a symlink while rollback is restoring a file is refused.
 
-    Continuing would move more data past a tree somebody already has to look
-    at, and the entries that never ran are reported still ready rather than
-    quietly dropped.
+    The restore goes through the same dir-fd primitive as the forward move, so
+    a legacy directory replaced by a symlink between the first file's move and
+    the rollback attempt is refused rather than followed: nothing is written
+    outside the data root, and the outcome is SPLIT, not a silent FAILED that
+    would read as the tree being back to how it started.
     """
     import fwl_io.relocate as module
-    from fwl_io.relocate import FAILED, RelocationReport
+    from fwl_io.relocate import SPLIT, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    real_move = module._move_below_root
+    calls = []
+
+    def _fail_second_move(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) != 2:
+            # Every call but the one that fails goes to the real primitive, so
+            # a pass means the real dir-fd guard refused the rollback.
+            return real_move(root_, src_parent, dst_parent, filename)
+        for entry in list(legacy.iterdir()):
+            entry.unlink()
+        legacy.rmdir()
+        legacy.symlink_to(outside, target_is_directory=True)
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(module, '_move_below_root', _fail_second_move)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == SPLIT
+    assert list(outside.iterdir()) == [], 'nothing may be written through the swapped-in symlink'
+    assert legacy.is_symlink(), 'the swap itself is not undone; only the restore into it is refused'
+    assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
+
+
+def test_a_symlink_swapped_into_target_dir_during_rollback_is_refused(tmp_path, monkeypatch):
+    """A target directory swapped for a symlink while rollback is reading it back is refused.
+
+    The rollback reads the already-moved file out of target_dir, the same
+    open the forward move used to write it; a target_dir replaced by a
+    symlink before that read is refused rather than followed, so a swap on
+    either side of a partial move is caught the same way.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import SPLIT, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    target = root / TARGET
+    outside = tmp_path / 'outside'
+    _decoys(outside)
+    real_move = module._move_below_root
+    calls = []
+
+    def _fail_second_move(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) != 2:
+            return real_move(root_, src_parent, dst_parent, filename)
+        for entry in list(target.iterdir()):
+            entry.unlink()
+        target.rmdir()
+        target.symlink_to(outside, target_is_directory=True)
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(module, '_move_below_root', _fail_second_move)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=target, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == SPLIT
+    _assert_decoys_untouched(outside)
+    assert all(p.read_bytes() != DECOY for p in legacy.iterdir()), 'a decoy was read out'
+    assert target.is_symlink(), (
+        'the swap itself is not undone; only the restore out of it is refused'
+    )
+    assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
+
+
+def test_a_rollback_restores_every_file_moved_before_the_failure(tmp_path, monkeypatch):
+    """A move failing on the third of three files rolls every earlier one back, not just the first.
+
+    The rollback loop walks everything already moved; a fix that only
+    restored the most recent one would leave earlier files stranded in
+    target_dir with no report naming them.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    names = ('a.dat', 'b.dat', 'c.dat')
+    legacy.mkdir(parents=True)
+    for name in names:
+        (legacy / name).write_bytes(name.encode())
+    real_move = module._move_below_root
+    calls = []
+
+    def _fail_third_move(root_, src_parent, dst_parent, filename):
+        calls.append(filename)
+        if len(calls) == 3:
+            raise OSError(28, 'No space left on device')
+        return real_move(root_, src_parent, dst_parent, filename)
+
+    monkeypatch.setattr(module, '_move_below_root', _fail_third_move)
+    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=names)
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    for name in ('a.dat', 'b.dat'):
+        assert (legacy / name).read_bytes() == name.encode(), f'{name} was not restored'
+    assert list((root / TARGET).iterdir()) == [], 'the target holds nothing after a full rollback'
+
+
+def test_a_registry_file_swapped_for_a_symlink_before_the_move_is_refused(tmp_path):
+    """The move checks each entry is a plain file when it runs, not only when it was planned.
+
+    The link points at a file inside the data root, so the containment check
+    passes and only the recheck against the open directory handle refuses it.
+    Nothing may move, and what moved before it is put back.
+    """
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    elsewhere = root / 'elsewhere.dat'
+    elsewhere.write_bytes(CONTENTS['notes.txt'])
+    (legacy / 'notes.txt').unlink()
+    (legacy / 'notes.txt').symlink_to(elsewhere)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert 'is not a plain file' in result.detail
+    assert (legacy / 'notes.txt').is_symlink()
+    assert (legacy / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not any((root / TARGET / name).exists() for name in CONTENTS)
+
+
+def test_a_symlink_swapped_into_legacy_dir_after_the_check_is_refused(tmp_path, monkeypatch):
+    """A symlink swapped into legacy_dir between the containment check and the move is refused.
+
+    Simulates the legacy directory being replaced by a symlink out of the
+    data root in the window between ``_move_one``'s containment check and the
+    directory-fd open that actually performs the move: the move must refuse
+    rather than follow the swapped-in symlink, and nothing may land in, or be
+    read from, the symlink's target.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import MOVED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    outside = tmp_path / 'outside'
+    _decoys(outside)
+    real_open = module._open_dir_below
+    swapped = []
+
+    def _swap_then_open(root_, parts):
+        if not swapped and parts == tuple(LEGACY.split('/')):
+            swapped.append(True)
+            for entry in list(legacy.iterdir()):
+                entry.unlink()
+            legacy.rmdir()
+            legacy.symlink_to(outside, target_is_directory=True)
+        return real_open(root_, parts)
+
+    monkeypatch.setattr(module, '_open_dir_below', _swap_then_open)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state != MOVED
+    _assert_decoys_untouched(outside)
+    assert not any((root / TARGET / name).exists() for name in CONTENTS)
+
+
+def test_a_failed_move_does_not_stop_the_others_from_being_tried(tmp_path, monkeypatch):
+    """A dataset that fails to move does not keep the ones behind it from being attempted.
+
+    Each dataset's move is independent of every other one, so a tree somebody
+    already has to look at is no reason to leave the rest merely ready when
+    they could just as well be moved too.
+    """
+    import fwl_io.relocate as module
+    from fwl_io.relocate import FAILED, MOVED, RelocationReport
 
     planned = RelocationReport(
         (
@@ -478,16 +887,18 @@ def test_a_failed_move_stops_the_run_rather_than_moving_more_data(tmp_path, monk
         )
     )
     monkeypatch.setattr(module, 'plan_relocations', lambda data_root=None: planned)
-    monkeypatch.setattr(
-        module,
-        '_move_one',
-        lambda entry, root: Relocation(entry.key, FAILED, detail='disk full'),
-    )
+
+    def _fake_move(entry, root):
+        if entry.key == 'a.first':
+            return Relocation(entry.key, FAILED, detail='disk full')
+        return Relocation(entry.key, MOVED)
+
+    monkeypatch.setattr(module, '_move_one', _fake_move)
 
     report = module.relocate_all(data_root=tmp_path)
 
-    assert [e.state for e in report.entries] == [FAILED, READY]
-    assert [e.key for e in report.ready] == ['b.second'], 'the untried one is still ready'
+    assert [e.state for e in report.entries] == [FAILED, MOVED]
+    assert [e.key for e in report.moved] == ['b.second'], 'the second dataset was still attempted'
     assert len(report.faults) == 1
 
 
@@ -723,7 +1134,6 @@ def test_an_archive_dataset_is_refused_rather_than_called_incomplete(tmp_path, m
 
     (entry,) = [e for e in report.entries if e.key == KEY]
     assert entry.state == UNRESOLVABLE, f'archive dataset reported as {entry.state}'
-    assert entry.state != INCOMPLETE
     assert 'archive' in entry.detail
     for name, body in CONTENTS.items():
         assert (legacy_dir / name).read_bytes() == body
@@ -824,3 +1234,826 @@ def test_an_archive_dataset_with_no_legacy_tree_is_absent_not_a_fault(tmp_path, 
     assert entry.state == ABSENT, f'no legacy tree reported as {entry.state}'
     assert entry.state != UNRESOLVABLE
     assert report.ok, 'a machine that never had the old layout must not fail'
+
+
+NESTED = {'x.dat': b'xx\n', 'sub/y.dat': b'yy\n'}
+
+
+def test_a_second_run_after_a_partial_move_reports_no_fault(tmp_path, monkeypatch):
+    """Running the move again after it moved only part of a tree is not a fault.
+
+    The first run moves the one registry file the legacy directory held; a
+    file that is not in the registry keeps the directory standing. On the next
+    run the legacy directory holds none of the registry, but the target holds
+    a verified part of it, so nothing is wrong and nothing is left to move.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['BHAC15_tracks.dat'])
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+
+    first = relocate_all(data_root=root)
+    second = relocate_all(data_root=root)
+    third = relocate_all(data_root=root)
+
+    assert [e.state for e in first.entries] == [MOVED]
+    for later in (second, third):
+        assert [e.state for e in later.entries] == [ABSENT]
+        assert later.ok and not later.faults
+        assert '1 of 2 file(s) already at' in later.entries[0].detail
+    assert (root / LEGACY / 'README').is_file()
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+
+
+def test_a_target_holding_only_a_corrupt_file_and_a_legacy_dir_with_none_is_still_a_fault(
+    tmp_path, monkeypatch
+):
+    """The partial-target exemption needs at least one intact registry file at the target."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [INCOMPLETE]
+    assert not report.ok
+    assert 'notes.txt at' in report.entries[0].detail
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_directory_inside_a_registry_name_is_refused_at_plan_time(
+    tmp_path, monkeypatch, dry_run
+):
+    """A symlinked subdirectory of the legacy tree is refused before the move, not during it.
+
+    The link points at a directory inside the data root, so the containment
+    check passes; the no-follow open the move makes refuses it, so the plan
+    must too, or the dry run promises a move the real run cannot make.
+    """
+    _install_manifest(monkeypatch, tmp_path, contents=NESTED)
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    legacy.mkdir(parents=True)
+    (legacy / 'x.dat').write_bytes(NESTED['x.dat'])
+    (root / 'realsub').mkdir()
+    (root / 'realsub' / 'y.dat').write_bytes(NESTED['sub/y.dat'])
+    (legacy / 'sub').symlink_to(root / 'realsub', target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert OPEN_REASON in report.entries[0].detail
+    assert f'{legacy / "sub"} is a symlink' in report.entries[0].detail
+    assert (legacy / 'x.dat').is_file() and (root / 'realsub' / 'y.dat').is_file()
+    assert not (root / TARGET).exists()
+
+
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(tmp_path, monkeypatch, dry_run):
+    """A symlink on the target side, inside the data root, is refused at plan time as well."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / 'bigdisk_star').mkdir()
+    (root / 'star').symlink_to(root / 'bigdisk_star', target_is_directory=True)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert OPEN_REASON in report.entries[0].detail
+    assert f'{root / "star"} is a symlink' in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file()
+    assert list((root / 'bigdisk_star').iterdir()) == []
+
+
+def test_a_target_file_that_differs_from_the_registry_is_never_overwritten(tmp_path, monkeypatch):
+    """A file already at the target that is not the registry file blocks the dataset.
+
+    The move replaces by name, so a differing target file would be lost, and a
+    rollback after a later failure could not bring it back.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MISMATCH]
+    assert 'not overwritten' in report.entries[0].detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
+    assert (root / LEGACY / 'BHAC15_tracks.dat').read_bytes() == CONTENTS['BHAC15_tracks.dat']
+    assert not (root / TARGET / 'notes.txt').exists()
+
+
+def test_a_target_file_that_matches_the_registry_is_skipped_not_replaced(tmp_path, monkeypatch):
+    """A verified file already at the target counts as present and the rest still moves."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'])
+
+    plan = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root)
+
+    assert plan.entries[0].files == ('notes.txt',)
+    assert [e.state for e in report.entries] == [MOVED]
+    assert (root / TARGET / 'notes.txt').read_bytes() == CONTENTS['notes.txt']
+    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file(), 'the duplicate is left alone'
+
+
+def test_the_move_itself_refuses_to_overwrite_a_target_file(tmp_path):
+    """The move re-checks the target when it runs, so a file that appeared after the plan stays."""
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert (root / TARGET / 'notes.txt').read_bytes() == b'not the recorded contents\n'
+    for name in CONTENTS:
+        assert (legacy / name).read_bytes() == CONTENTS[name], f'{name} was not restored'
+    assert not (root / TARGET / 'BHAC15_tracks.dat').exists()
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+def test_an_unreadable_legacy_parent_refuses_that_dataset_and_does_not_raise(tmp_path, monkeypatch):
+    """A legacy parent this user cannot search is reported for that dataset, not raised."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    parent = root / LEGACY.split('/')[0]
+    parent.chmod(0)
+    try:
+        plan = plan_relocations(data_root=root)
+        report = relocate_all(data_root=root)
+    finally:
+        parent.chmod(0o755)
+
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'cannot read' in result.entries[0].detail
+        assert not result.ok
+    assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_a_platform_without_dir_fd_moves_refuses_that_dataset(tmp_path, monkeypatch):
+    """A platform that lacks directory-relative rename or mkdir is refused at plan time, by name."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr('fwl_io.fs_guard._DIR_FD_OK', False)
+
+    plan = relocate_all(data_root=root, dry_run=True)
+    report = relocate_all(data_root=root)
+
+    for result in (plan, report):
+        assert [e.state for e in result.entries] == [UNRESOLVABLE]
+        assert 'relocation is not supported on this platform' in result.entries[0].detail
+        assert 'dir_fd' in result.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+@pytest.mark.parametrize(
+    ('unsupported_calls', 'state'), [({2}, 'failed'), ({2, 3}, 'split')], ids=['restored', 'split']
+)
+def test_a_move_primitive_the_platform_lacks_is_a_failure_not_a_crash(
+    tmp_path, monkeypatch, unsupported_calls, state
+):
+    """A NotImplementedError from the move, or from the rollback, is reported like an OSError."""
+    import fwl_io.relocate as module
+    from fwl_io.relocate import _move_one
+
+    root = tmp_path / 'data'
+    legacy = root / LEGACY
+    _populate(legacy)
+    real_replace = module.os.replace
+    calls = []
+
+    def _unsupported(*args, **kwargs):
+        calls.append(args)
+        if len(calls) in unsupported_calls:
+            raise NotImplementedError('dir_fd unavailable on this platform')
+        return real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'replace', _unsupported)
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=tuple(sorted(CONTENTS))
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == state
+    assert len(calls) == 3, 'one move, one that failed, one rollback'
+    restored = state == 'failed'
+    assert (legacy / 'BHAC15_tracks.dat').exists() == restored
+
+
+@pytest.mark.parametrize(
+    ('setup', 'state'),
+    [
+        (lambda root: _populate(root / LEGACY, corrupt=['notes.txt']), MISMATCH),
+        (lambda root: (root / LEGACY).mkdir(parents=True), INCOMPLETE),
+        (lambda root: _populate(root / TARGET), ALREADY_CURRENT),
+        (lambda root: None, ABSENT),
+    ],
+    ids=['mismatch', 'incomplete', 'already-current', 'absent'],
+)
+def test_files_is_empty_for_every_state_but_ready(tmp_path, monkeypatch, setup, state):
+    """``Relocation.files`` names what a move would move, so it is empty unless one would."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    setup(root)
+
+    entry = plan_relocations(data_root=root).entries[0]
+
+    assert entry.state == state
+    assert entry.files == ()
+
+
+def test_files_names_the_verified_subset_for_a_ready_dataset(tmp_path, monkeypatch):
+    """A ready dataset lists only the present, verified files, not the whole registry."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['notes.txt'])
+
+    entry = plan_relocations(data_root=root).entries[0]
+
+    assert entry.state == READY
+    assert entry.files == ('notes.txt',)
+
+
+def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_called_absent(
+    tmp_path, monkeypatch
+):
+    """A corrupt file at the target is named with its repair, on the run that moves and after it.
+
+    The legacy tree holds only the other file, so nothing is overwritten and
+    the move goes ahead. Once it has moved there is nothing left to do, so
+    the next run is not a fault, and the detail never calls the file absent.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, names=['notes.txt'])
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+    _populate(root / TARGET, names=['BHAC15_tracks.dat'], corrupt=['BHAC15_tracks.dat'])
+
+    plan = relocate_all(data_root=root, dry_run=True).entries[0]
+    first = relocate_all(data_root=root).entries[0]
+    later = relocate_all(data_root=root)
+    second = later.entries[0]
+
+    assert (plan.state, first.state, second.state) == (READY, MOVED, ABSENT)
+    assert later.ok and not later.faults
+    for entry in (plan, first, second):
+        assert 'BHAC15_tracks.dat at' in entry.detail
+        assert 'differs from the registry' in entry.detail
+        assert 'fwl-io check <model>", then "fwl-io fetch <model>' in entry.detail
+    assert '0 absent' not in plan.detail and 'absent' not in plan.detail
+    assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+def test_an_unsearchable_target_directory_is_refused_not_read_as_empty(tmp_path, monkeypatch):
+    """A target directory this user cannot search is reported, not treated as holding nothing."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    (root / TARGET).chmod(0o644)
+    try:
+        report = relocate_all(data_root=root, dry_run=True)
+    finally:
+        (root / TARGET).chmod(0o755)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'cannot read' in report.entries[0].detail
+
+
+def test_a_digest_algorithm_nobody_supports_refuses_that_dataset_and_does_not_raise(
+    tmp_path, monkeypatch
+):
+    """A registry line with an unknown hash algorithm is reported for its dataset, not raised."""
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text(
+        'notes.txt blake9:abc\nBHAC15_tracks.dat blake9:abc\n'
+    )
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'registry cannot be used' in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_the_target_probe_walks_what_exists_and_needs_the_root(tmp_path):
+    """The probe stops at the first missing component below the root, but the root must exist."""
+    from fwl_io.fs_guard import _probe_dir_below
+
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'b').symlink_to(tmp_path / 'a', target_is_directory=True)
+
+    _probe_dir_below(tmp_path, ('a', 'missing', 'deeper'))
+    with pytest.raises(OSError):
+        _probe_dir_below(tmp_path, ('b', 'x'))
+    with pytest.raises(FileNotFoundError):
+        _probe_dir_below(tmp_path / 'no-such-root', ('a',))
+
+
+def _unreadable_target(kind, target):
+    """Make the target directory or one of its files unreadable; return the undo."""
+    if kind == 'file':
+        path = target / 'notes.txt'
+        path.chmod(0)
+        return lambda: path.chmod(0o644)
+    mode = 0 if kind == 'dir-000' else 0o644
+    target.chmod(mode)
+    return lambda: target.chmod(0o755)
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+@pytest.mark.parametrize('kind', ['dir-000', 'dir-644', 'file'])
+def test_an_unreadable_target_is_no_fault_when_there_is_no_legacy_directory(
+    tmp_path, monkeypatch, kind
+):
+    """A tree with nothing at the old location is tidy, whatever the target's permissions.
+
+    On a shared data root another user's private dataset directory must not
+    make ``fwl-io relocate`` exit 1 on a machine that never had the old
+    layout. With an old directory present the same target is still refused,
+    because a move cannot be judged safe without reading it.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / TARGET)
+    undo = _unreadable_target(kind, root / TARGET)
+    try:
+        tidy = relocate_all(data_root=root)
+        (root / LEGACY).mkdir(parents=True)
+        _populate(root / LEGACY, names=['notes.txt'])
+        blocked = relocate_all(data_root=root, dry_run=True)
+    finally:
+        undo()
+
+    assert [e.state for e in tidy.entries] == [ABSENT]
+    assert tidy.ok and not tidy.faults
+    assert [e.state for e in blocked.entries] == [UNRESOLVABLE]
+    assert not blocked.ok
+    assert (root / LEGACY / 'notes.txt').is_file()
+
+
+def test_a_target_outside_the_root_is_no_fault_when_there_is_no_legacy_directory(
+    tmp_path, monkeypatch
+):
+    """Nothing can move without an old directory, so a target that escapes the root is moot."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    root.mkdir()
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (root / 'star').symlink_to(elsewhere, target_is_directory=True)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ABSENT]
+    assert report.ok
+
+
+def test_a_target_symlink_into_the_legacy_tree_is_not_counted_as_intact(tmp_path, monkeypatch):
+    """A symlink at the target is an entry a move would replace, never a verified file.
+
+    The links point at the legacy copies, which hash correctly, so following
+    them reports the dataset as already current and the old copy as
+    redundant; deleting it would then break the target.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / TARGET).mkdir(parents=True)
+    for name in CONTENTS:
+        (root / TARGET / name).symlink_to(root / LEGACY / name)
+
+    report = relocate_all(data_root=root)
+
+    entry = report.entries[0]
+    assert entry.state == MISMATCH
+    assert 'BHAC15_tracks.dat, notes.txt' in entry.detail
+    assert 'fwl-io check <model>' in entry.detail
+    assert report.redundant == ()
+    assert all((root / TARGET / n).is_symlink() for n in CONTENTS), 'nothing was replaced'
+    assert all((root / LEGACY / n).is_file() for n in CONTENTS)
+
+
+def test_a_target_symlink_to_a_matching_file_elsewhere_blocks_that_file_only(tmp_path, monkeypatch):
+    """A symlink to an in-root file with the right contents still blocks the dataset.
+
+    Skipping it as intact would leave the legacy copy orphaned while the
+    report says that copy stays.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    (root / TARGET).mkdir(parents=True)
+    (root / 'elsewhere.dat').write_bytes(CONTENTS['notes.txt'])
+    (root / TARGET / 'notes.txt').symlink_to(root / 'elsewhere.dat')
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == MISMATCH
+    assert entry.detail.startswith('notes.txt at')
+    assert entry.files == ()
+
+
+def test_a_clash_names_the_blocking_target_file_and_the_repair(tmp_path, monkeypatch):
+    """The refusal to overwrite says which target file blocks and how to repair it."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == MISMATCH
+    assert entry.detail.startswith('notes.txt at ')
+    assert 'not overwritten' in entry.detail
+    assert 'repair with "fwl-io check <model>", then "fwl-io fetch <model>"' in entry.detail
+
+
+def test_a_corrupt_legacy_copy_of_a_file_the_target_holds_is_named_as_such(tmp_path, monkeypatch):
+    """A bad old copy of a file already intact at the target still blocks, and says why.
+
+    Moving the good files past it would leave a stale duplicate behind, so the
+    block stays; the detail says the bad file is only a copy.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY, corrupt=['notes.txt'])
+    _populate(root / TARGET, names=['notes.txt'])
+
+    entry = relocate_all(data_root=root).entries[0]
+
+    assert entry.state == MISMATCH
+    assert 'notes.txt is a copy the target already holds intact' in entry.detail
+    assert (root / LEGACY / 'BHAC15_tracks.dat').is_file(), 'nothing moved'
+
+
+def _open_fds():
+    return len(os.listdir('/dev/fd'))
+
+
+@pytest.mark.parametrize('failing', ['open', 'mkdir'])
+def test_the_directory_helpers_close_their_handle_on_any_exception(monkeypatch, tmp_path, failing):
+    """A NotImplementedError from a dir_fd primitive must not leak the open directory handle."""
+    import fwl_io.fs_guard as guard
+
+    (tmp_path / 'a').mkdir()
+    real_open = os.open
+    calls = []
+
+    def _open_fails_second(path, flags, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 2:
+            raise NotImplementedError('dir_fd unavailable')
+        return real_open(path, flags, *args, **kwargs)
+
+    def _mkdir_unsupported(*args, **kwargs):
+        raise NotImplementedError('dir_fd unavailable')
+
+    if failing == 'open':
+        monkeypatch.setattr(guard.os, 'open', _open_fails_second)
+        helper, parts = guard._open_dir_below, ('a',)
+    else:
+        monkeypatch.setattr(guard.os, 'mkdir', _mkdir_unsupported)
+        helper, parts = guard._open_or_make_dir_below, ('new',)
+    before = _open_fds()
+
+    for _ in range(5):
+        calls.clear()
+        with pytest.raises(NotImplementedError):
+            helper(tmp_path, parts)
+
+    assert _open_fds() == before
+
+
+def test_relocation_does_not_need_the_capabilities_only_deletion_uses(tmp_path, monkeypatch):
+    """A platform without flock or a symlink-safe rmtree can still relocate, not delete.
+
+    A move opens directories with no-follow handles and renames within them;
+    it never removes a tree or probes a fetch lock.
+    """
+    import fwl_io.fs_guard as guard
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr(guard, '_RMTREE_IS_SAFE', False)
+    monkeypatch.setattr(guard, 'fcntl', None)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [MOVED]
+    refusal = guard._delete_unsupported()
+    assert refusal is not None and 'flock' in refusal and 'rmtree' in refusal
+
+
+SUBTREE = {'sub/a.dat': b'aaa\n', 'b.dat': b'bbbb\n'}
+
+
+def _nested_legacy(root):
+    for name, body in SUBTREE.items():
+        path = root / LEGACY / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+
+
+def _link_target_dir(root):
+    """Tree A: the target directory is a symlink to the legacy directory."""
+    (root / TARGET).parent.mkdir(parents=True)
+    (root / TARGET).symlink_to(root / LEGACY, target_is_directory=True)
+
+
+def _link_target_ancestor(root):
+    """Tree C: ``star`` is a symlink, and the leaf directory below it links to legacy."""
+    leaf = root / 'elsewhere' / 'tracks' / 'baraffe_2015' / f'r{RECID}'
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(root / LEGACY, target_is_directory=True)
+    (root / 'star').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+
+def _link_target_subdir(root):
+    """Tree N: ``target/sub`` is a symlink to ``legacy/sub``, below a plain target."""
+    (root / TARGET).mkdir(parents=True)
+    (root / TARGET / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / TARGET / 'sub').symlink_to(root / LEGACY / 'sub', target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    'link',
+    [_link_target_dir, _link_target_ancestor, _link_target_subdir],
+    ids=['A', 'C', 'N'],
+)
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_symlinked_directory_on_the_target_path_is_never_counted_as_held(
+    tmp_path, monkeypatch, link, dry_run
+):
+    """The target files reached through a symlinked directory are the legacy files themselves.
+
+    Each tree resolves to the legacy copies, which hash correctly, so counting
+    them as held reports the dataset as current and the only real copy as
+    redundant; deleting it would then break the target.
+    """
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    _nested_legacy(root)
+    link(root)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    [entry] = report.entries
+    assert entry.state == UNRESOLVABLE, entry.detail
+    assert report.redundant == ()
+    assert 'redundant' not in entry.detail
+    assert all((root / LEGACY / n).is_file() for n in SUBTREE), 'the real copy is untouched'
+
+
+@pytest.mark.parametrize('present', [False, True], ids=['target-empty', 'target-files'])
+def test_an_unusable_digest_with_no_legacy_directory_is_absent(tmp_path, monkeypatch, present):
+    """With nothing to move, a registry digest nobody can hash is not this command's fault.
+
+    ``fetch`` and ``check`` report the registry; failing here on the target
+    files would contradict the rule that no legacy directory means no fault.
+    """
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text(
+        'notes.txt blake9:abc\nBHAC15_tracks.dat blake9:abc\n'
+    )
+    root = tmp_path / 'data'
+    if present:
+        _populate(root / TARGET)
+    root.mkdir(exist_ok=True)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ABSENT]
+    assert report.ok
+
+
+def test_every_differing_file_is_named_in_sorted_order_and_the_verb_agrees(tmp_path, monkeypatch):
+    """Two files in a detail are listed sorted with a plural verb, one with a singular verb."""
+    import shutil
+
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+
+    def detail(legacy=(), target=(), bad_legacy=(), bad_target=()):
+        shutil.rmtree(root, ignore_errors=True)
+        _populate(root / LEGACY, names=legacy, corrupt=bad_legacy)
+        if target:
+            _populate(root / TARGET, names=target, corrupt=bad_target)
+        return relocate_all(data_root=root, dry_run=True).entries[0].detail
+
+    both = tuple(CONTENTS)
+    registry = tmp_path / f'{KEY}.registry.txt'
+    registry.write_text(''.join(reversed(registry.read_text().splitlines(keepends=True))))
+    corrupt_legacy = detail(legacy=both, bad_legacy=both)
+    assert '2 file(s) differ from the registry in ' in corrupt_legacy
+    assert corrupt_legacy.endswith(': BHAC15_tracks.dat, notes.txt')
+
+    clash = detail(legacy=both, target=both, bad_target=both)
+    assert 'BHAC15_tracks.dat, notes.txt at ' in clash
+    assert ' are not the registry files' in clash
+
+    third = {**CONTENTS, 'third.txt': b'3\n'}
+    _install_manifest(monkeypatch, tmp_path, contents=third)
+    shutil.rmtree(root, ignore_errors=True)
+    _populate(root / TARGET)
+    for name in both:
+        (root / LEGACY).mkdir(parents=True, exist_ok=True)
+        (root / LEGACY / name).write_bytes(b'not the recorded contents\n')
+    held = relocate_all(data_root=root, dry_run=True).entries[0].detail
+    assert 'BHAC15_tracks.dat, notes.txt are copies the target already holds intact' in held
+
+    one = detail(legacy=['notes.txt'], target=['notes.txt'], bad_target=['notes.txt'])
+    assert 'notes.txt at ' in one and ' is not the registry file;' in one
+    one = detail(legacy=['notes.txt'], target=['notes.txt'], bad_legacy=['notes.txt'])
+    assert 'notes.txt is a copy the target already holds intact' in one
+
+
+def test_a_leftover_directory_beside_two_differing_target_files_names_both(tmp_path, monkeypatch):
+    """Differing target files are listed sorted, with a plural verb, beside a legacy leftover."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'README').write_bytes(b'not in the registry\n')
+    _populate(root / TARGET, corrupt=list(CONTENTS))
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == INCOMPLETE
+    assert 'BHAC15_tracks.dat, notes.txt at ' in entry.detail
+    assert ' differ from the registry, left alone' in entry.detail
+
+
+def test_a_platform_without_a_no_follow_stat_refuses_that_dataset(tmp_path, monkeypatch):
+    """The move stats without following a final symlink, so a platform lacking it is refused."""
+    _install_manifest(monkeypatch, tmp_path)
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    monkeypatch.setattr('fwl_io.fs_guard._NOFOLLOW_STAT_OK', False)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'a no-follow stat' in report.entries[0].detail
+    assert (root / LEGACY / 'notes.txt').is_file(), 'nothing was touched'
+
+
+def test_a_file_at_the_destination_stops_the_move_and_loses_nothing(tmp_path):
+    """A regular file already at a destination name is not replaced, and the move is undone."""
+    from fwl_io.relocate import FAILED, _move_one
+
+    root = tmp_path / 'data'
+    _populate(root / LEGACY)
+    _populate(root / TARGET, names=['notes.txt'], corrupt=['notes.txt'])
+    entry = Relocation(
+        KEY,
+        READY,
+        legacy_dir=root / LEGACY,
+        target_dir=root / TARGET,
+        files=tuple(sorted(CONTENTS)),
+    )
+
+    result = _move_one(entry, root)
+
+    assert result.state == FAILED
+    assert 'already exists at the destination' in result.detail
+    assert (root / TARGET / 'notes.txt').read_bytes() == b'not the recorded contents\n'
+    assert all((root / LEGACY / n).read_bytes() == CONTENTS[n] for n in CONTENTS)
+    assert not (root / TARGET / 'BHAC15_tracks.dat').exists(), 'the first move was put back'
+
+
+def _real_target(root, shape):
+    """An intact target whose files live behind a symlinked directory, with no legacy tree."""
+    elsewhere = root / 'elsewhere'
+    if shape == 'A':
+        (elsewhere / 'r').mkdir(parents=True)
+        for name, body in SUBTREE.items():
+            path = elsewhere / 'r' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        (root / TARGET).parent.mkdir(parents=True)
+        (root / TARGET).symlink_to(elsewhere / 'r', target_is_directory=True)
+    elif shape == 'C':
+        leaf = elsewhere / 'tracks' / 'baraffe_2015' / f'r{RECID}'
+        for name, body in SUBTREE.items():
+            (leaf / name).parent.mkdir(parents=True, exist_ok=True)
+            (leaf / name).write_bytes(body)
+        (root / 'star').symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (elsewhere / 'sub').mkdir(parents=True)
+        (elsewhere / 'sub' / 'a.dat').write_bytes(SUBTREE['sub/a.dat'])
+        (root / TARGET).mkdir(parents=True)
+        (root / TARGET / 'b.dat').write_bytes(SUBTREE['b.dat'])
+        (root / TARGET / 'sub').symlink_to(elsewhere / 'sub', target_is_directory=True)
+
+
+@pytest.mark.parametrize('shape', ['A', 'C', 'N'])
+def test_an_intact_target_behind_a_symlinked_directory_stays_current_with_no_legacy(
+    tmp_path, monkeypatch, shape
+):
+    """With no legacy tree nothing moves, so an intact target on a second volume stays current."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    _real_target(root, shape)
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [ALREADY_CURRENT]
+    assert report.ok and report.redundant == ()
+
+
+def _link_legacy_dir(root):
+    """(a) The legacy directory is a symlink to the intact target directory."""
+    (root / LEGACY).parent.mkdir(parents=True)
+    (root / LEGACY).symlink_to(root / TARGET, target_is_directory=True)
+
+
+def _link_legacy_ancestor(root):
+    """(b) A legacy ancestor is a symlink to a directory whose leaf links to the target."""
+    (root / 'elsewhere').mkdir()
+    (root / 'elsewhere' / 'Baraffe').symlink_to(root / TARGET, target_is_directory=True)
+    (root / 'stellar_evolution_tracks').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+
+def _link_legacy_subdir(root):
+    """(c) A plain legacy directory whose ``sub`` is a symlink to the target's ``sub``."""
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / LEGACY / 'sub').symlink_to(root / TARGET / 'sub', target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    'link', [_link_legacy_dir, _link_legacy_ancestor, _link_legacy_subdir], ids=['a', 'b', 'c']
+)
+@pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
+def test_a_legacy_copy_that_leads_back_to_the_target_is_never_called_redundant(
+    tmp_path, monkeypatch, link, dry_run
+):
+    """Deleting a legacy copy that is a symlink into the target would delete the target itself."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    for name, body in SUBTREE.items():
+        (root / TARGET / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / TARGET / name).write_bytes(body)
+    link(root)
+
+    report = relocate_all(data_root=root, dry_run=dry_run)
+
+    [entry] = report.entries
+    assert entry.state == UNRESOLVABLE, entry.detail
+    assert report.redundant == ()
+    assert 'redundant' not in entry.detail
+    assert all((root / TARGET / n).read_bytes() == b for n, b in SUBTREE.items())
+
+
+def test_a_name_behind_a_symlinked_target_directory_is_not_counted_absent(tmp_path, monkeypatch):
+    """A file not verified because its directory is a symlink is named, not left to be fetched."""
+    _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
+    root = tmp_path / 'data'
+    (root / LEGACY).mkdir(parents=True)
+    (root / LEGACY / 'b.dat').write_bytes(SUBTREE['b.dat'])
+    (root / 'elsewhere').mkdir()
+    (root / 'elsewhere' / 'a.dat').write_bytes(SUBTREE['sub/a.dat'])
+    (root / TARGET).mkdir(parents=True)
+    (root / TARGET / 'sub').symlink_to(root / 'elsewhere', target_is_directory=True)
+
+    entry = relocate_all(data_root=root, dry_run=True).entries[0]
+
+    assert entry.state == READY
+    assert 'sub/a.dat at ' in entry.detail
+    assert ' is behind a symlinked directory, not verified' in entry.detail
+    assert 'absent' not in entry.detail
+
+
+def test_a_registry_name_with_a_nul_byte_is_refused_not_reported_absent(tmp_path, monkeypatch):
+    """A name that cannot be a path is a registry fault, whether or not a legacy tree exists."""
+    _install_manifest(monkeypatch, tmp_path)
+    (tmp_path / f'{KEY}.registry.txt').write_text('a\0b.dat sha256:aa\n')
+    root = tmp_path / 'data'
+    root.mkdir()
+
+    report = relocate_all(data_root=root)
+
+    assert [e.state for e in report.entries] == [UNRESOLVABLE]
+    assert 'NUL byte' in report.entries[0].detail
