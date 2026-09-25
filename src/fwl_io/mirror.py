@@ -250,6 +250,7 @@ def dataverse_license(rights: dict, licenses: list[dict], source: str) -> dict:
         lic
         for lic in licenses
         if lic.get('active', True)
+        and lic.get('name')
         and ((url and _license_key(lic.get('uri')) == url) or (spdx and spdx in ids(lic)))
     ]
     if len(hits) != 1:
@@ -802,8 +803,9 @@ def mirror_to_dataverse(
         example an unknown subject in the citation metadata), the HTTP transport
         fails (connection error or timeout), or a 2xx response body is not a
         JSON object (a non-empty body that fails to parse, or that parses to
-        something other than a JSON object), or the draft does not hold
-        exactly the Zenodo files. After a failure past the dataset creation the
+        something other than a JSON object), the draft does not hold
+        exactly the Zenodo files, or the draft does not report the license it
+        was given. After a failure past the dataset creation the
         rollback deletes the draft; if that fails too, the log names the draft
         to delete by hand. A failed creation leaves no draft to roll back, but a
         creation whose reply was lost can leave one in the collection.

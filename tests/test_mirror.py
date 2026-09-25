@@ -2454,6 +2454,16 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
             {'id': 'cc-by-4.0'},
             [{'name': 'CC-BY-4.0'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
             None,
+        ),  # an entry without a name cannot be set by name, so it never matches
+        (
+            {'id': 'cc-by-4.0'},
+            [
+                {
+                    'uri': 'http://creativecommons.org/licenses/by/4.0',
+                    'rightsIdentifier': 'CC-BY-4.0',
+                }
+            ],
+            None,
         ),
     ],
     ids=[
@@ -2465,6 +2475,7 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
         'ambiguous',
         'same name',
         'same name, no uri',
+        'nameless',
     ],
 )
 def test_the_license_mapping(rights, licenses, expected):
@@ -2488,37 +2499,25 @@ def test_the_license_list_is_retried_after_a_bot_check_page(http_server, dataver
 
 
 @pytest.mark.unit
-def test_a_dataset_without_an_id_is_reported_before_the_license_put(monkeypatch):
-    """A dataset reply without its numeric id stops before a PUT to a wrong path."""
+@pytest.mark.parametrize('dataset_id', [None, 0], ids=['missing', 'zero'])
+def test_only_a_missing_dataset_id_stops_the_license_put(monkeypatch, dataset_id):
+    """A reply without the numeric id stops before the PUT; id 0 is a real id and is sent."""
     import requests
 
+    lic = {'name': 'CC-BY-4.0', 'uri': 'http://a'}
+    reply = {'latestVersion': {'license': lic}} | ({} if dataset_id is None else {'id': 0})
     seen = []
-
-    def route(method, url, **kwargs):
-        seen.append(method)
-        return _fake_response(200, b'{"status": "OK", "data": {"latestVersion": {}}}')
-
-    monkeypatch.setattr(requests, 'request', route)
-    client = DataverseClient('http://unused', 'tok')
-    with pytest.raises(DataverseError, match='no dataset id'):
-        client.set_license('doi:10.34894/DEMO01', {'name': 'CC-BY-4.0', 'uri': 'http://a'})
-    assert 'PUT' not in seen
-
-
-@pytest.mark.unit
-def test_a_dataset_id_of_zero_is_a_real_id(monkeypatch):
-    """Only a missing id stops the license step; id 0 is sent as is."""
-    import requests
-
-    seen = []
-    reply = {'id': 0, 'latestVersion': {'license': {'name': 'CC-BY-4.0', 'uri': 'http://a'}}}
 
     def route(method, url, **kwargs):
         seen.append((method, url))
         return _fake_response(200, json.dumps({'status': 'OK', 'data': reply}).encode())
 
     monkeypatch.setattr(requests, 'request', route)
-    DataverseClient('http://unused', 'tok').set_license(
-        'doi:10.34894/DEMO01', {'name': 'CC-BY-4.0', 'uri': 'http://a'}
-    )
-    assert ('PUT', 'http://unused/api/datasets/0/license') in seen
+    client = DataverseClient('http://unused', 'tok')
+    if dataset_id is None:
+        with pytest.raises(DataverseError, match='no dataset id'):
+            client.set_license('doi:10.34894/DEMO01', lic)
+        assert not any(method == 'PUT' for method, _ in seen)
+    else:
+        client.set_license('doi:10.34894/DEMO01', lic)
+        assert ('PUT', 'http://unused/api/datasets/0/license') in seen
