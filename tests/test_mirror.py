@@ -2443,8 +2443,22 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
             [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'OTHER', 'uri': 'http://b'}],
             None,
         ),
+        # two listed entries under one name are two matches, not one
+        (
+            {'id': 'cc-by-4.0'},
+            [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
+            None,
+        ),
     ],
-    ids=['url', 'spdx name', 'spdx rightsIdentifier', 'inactive', 'empty', 'ambiguous'],
+    ids=[
+        'url',
+        'spdx name',
+        'spdx rightsIdentifier',
+        'inactive',
+        'empty',
+        'ambiguous',
+        'same name',
+    ],
 )
 def test_the_license_mapping(rights, licenses, expected):
     """The Dataverse license comes from the server list, matched on URL or SPDX id."""
@@ -2455,3 +2469,30 @@ def test_the_license_mapping(rights, licenses, expected):
             dataverse_license(rights, licenses, 'Zenodo record 9')
     else:
         assert dataverse_license(rights, licenses, 'Zenodo record 9')['name'] == expected
+
+
+def test_the_license_list_is_retried_after_a_bot_check_page(http_server, dataverse_server, sleeps):
+    """The license list read uses the same retry as the other Dataverse calls."""
+    _DataverseHandler.script = {('GET', '/api/licenses'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server, publish=False)
+    assert result == 'doi:10.34894/DEMO01'
+    assert [c['path'] for c in calls].count('/api/licenses') == 2
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+def test_a_dataset_without_an_id_is_reported_before_the_license_put(monkeypatch):
+    """A dataset reply without its numeric id stops before a PUT to a wrong path."""
+    import requests
+
+    seen = []
+
+    def route(method, url, **kwargs):
+        seen.append(method)
+        return _fake_response(200, b'{"status": "OK", "data": {"latestVersion": {}}}')
+
+    monkeypatch.setattr(requests, 'request', route)
+    client = DataverseClient('http://unused', 'tok')
+    with pytest.raises(DataverseError, match='no dataset id'):
+        client.set_license('doi:10.34894/DEMO01', {'name': 'CC-BY-4.0', 'uri': 'http://a'})
+    assert 'PUT' not in seen

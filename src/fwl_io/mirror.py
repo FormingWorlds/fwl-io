@@ -253,7 +253,7 @@ def dataverse_license(rights: dict, licenses: list[dict], source: str) -> dict:
         if lic.get('active', True)
         and ((url and _license_key(lic.get('uri')) == url) or (spdx and spdx in ids(lic)))
     ]
-    if len({lic.get('name') for lic in hits}) != 1:
+    if len(hits) != 1:
         raise ValueError(
             f'{source} has license {rights.get("id")!r} ({url or "no URL"}), which matches '
             f'{sorted(lic.get("name") for lic in hits) or "no license"} on the Dataverse server; '
@@ -563,6 +563,8 @@ class DataverseClient:
             return body.get('data') or {}
 
         dataset_id = dataset().get('id')
+        if dataset_id is None:
+            raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}')
         self._retry(
             lambda: self._request(
                 'PUT', f'/api/datasets/{dataset_id}/license', json={'name': license['name']}
