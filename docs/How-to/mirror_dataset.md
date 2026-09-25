@@ -36,7 +36,7 @@ A draft created with **publish** unchecked stays private until it is published. 
 
 ## What the mirror does
 
-For the given Zenodo version DOI, the mirror downloads and checksum-verifies every file, creates a Dataverse dataset whose title, authors, and description come from the Zenodo record (with a note recording the source DOI), uploads the files byte-identically with tabular ingest disabled, and publishes the dataset unless asked not to. A concept DOI is rejected, so the mirror always tracks a specific pinned deposit.
+For the given Zenodo version DOI, the mirror downloads and checksum-verifies every file, creates a Dataverse dataset whose title, authors, and description come from the Zenodo record (with a note recording the source DOI), uploads the files byte-identically with tabular ingest disabled, and publishes the dataset unless asked not to. A concept DOI is rejected, so the mirror always tracks a specific pinned deposit. The dataset gets the license of the Zenodo record: the mirror reads it from the record, picks the license the Dataverse server lists with the same URL or SPDX identifier, and sets it right after creating the draft. A record whose license the server does not list, or that lists no license or several, stops the mirror before any draft is created.
 
 ## Mirroring part of a deposit
 

@@ -201,6 +201,69 @@ def zenodo_record_to_citation(
 _ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
 
 
+def _zenodo_record_rights(recid: str, api_base: str) -> dict:
+    """Return the single license entry of a checked Zenodo record id (InvenioRDM ``rights``).
+
+    The InvenioRDM form gives the SPDX id and the license URL; the legacy
+    record JSON gives CC0 as ``cc-zero``, which no license list knows.
+
+    Raises
+    ------
+    ValueError
+        If the record lists no license or more than one.
+    """
+    response = requests.get(
+        f'{api_base}/{recid}',
+        headers={'Accept': 'application/vnd.inveniordm.v1+json'},
+        timeout=30,
+    )
+    response.raise_for_status()
+    rights = (response.json().get('metadata') or {}).get('rights') or []
+    if len(rights) != 1:
+        raise ValueError(
+            f'Zenodo record {recid} lists {len(rights)} licenses; a mirror copies exactly one'
+        )
+    return rights[0]
+
+
+def _license_key(uri) -> str:
+    """Return a license URL without scheme, ``www.``, trailing ``/legalcode`` or slash."""
+    key = str(uri or '').lower().split('://', 1)[-1].removeprefix('www.').rstrip('/')
+    return key.removesuffix('/legalcode').rstrip('/')
+
+
+def dataverse_license(rights: dict, licenses: list[dict], source: str) -> dict:
+    """Return the one active Dataverse license that matches a Zenodo license entry.
+
+    A license matches on its URL or on its SPDX id (the Dataverse name or
+    rightsIdentifier); there is no default.
+
+    Raises
+    ------
+    ValueError
+        If no active Dataverse license matches, or more than one does.
+    """
+    spdx = str(rights.get('id') or '').lower()
+    url = _license_key((rights.get('props') or {}).get('url'))
+    ids = lambda lic: {str(lic.get(k) or '').lower() for k in ('name', 'rightsIdentifier')}  # noqa: E731
+    hits = [
+        lic
+        for lic in licenses
+        if lic.get('active', True)
+        and lic.get('name')
+        and ((url and _license_key(lic.get('uri')) == url) or (spdx and spdx in ids(lic)))
+    ]
+    if len(hits) != 1:
+        matched = sorted((lic.get('name') or '', lic.get('uri') or '') for lic in hits)
+        raise ValueError(
+            f'{source} has license {rights.get("id")!r} ({url or "no URL"}), which matches '
+            f'{matched or "no license"} '
+            'on the Dataverse server; '
+            'the mirror needs exactly one'
+        )
+    return hits[0]
+
+
 def _draft_path(directory_label, filename) -> str:
     """Return the path of a draft file; the mirror uploads every file with no folder label."""
     return '/'.join(filter(None, (directory_label, filename)))
@@ -478,6 +541,45 @@ class DataverseClient:
             raise DataverseError(f'create dataset returned no persistentId: {body}')
         return persistent_id
 
+    def licenses(self) -> list[dict]:
+        """Return the licenses the server lists (GET /api/licenses)."""
+        body = self._retry(lambda: self._request('GET', '/api/licenses'), 'license list')
+        return body.get('data') or []
+
+    def set_license(self, persistent_id: str, dv_license: dict) -> None:
+        """Set a listed license on a draft and read it back.
+
+        Raises
+        ------
+        DataverseError
+            If the draft does not report the license afterwards.
+        """
+
+        def dataset():
+            body = self._retry(
+                lambda: self._request(
+                    'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
+                ),
+                f'state of {persistent_id}',
+            )
+            return body.get('data') or {}
+
+        reply = dataset()
+        dataset_id = reply.get('id')
+        if dataset_id is None:
+            raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}: {reply}')
+        self._retry(
+            lambda: self._request(
+                'PUT', f'/api/datasets/{dataset_id}/license', json={'name': dv_license['name']}
+            ),
+            f'license of {persistent_id}',
+        )
+        got = (dataset().get('latestVersion') or {}).get('license') or {}
+        if (got.get('name'), got.get('uri')) != (dv_license['name'], dv_license.get('uri')):
+            raise DataverseError(
+                f'draft {persistent_id} reports license {got} after {dv_license["name"]} was set'
+            )
+
     def add_file(self, persistent_id: str, path: Path, *, no_ingest: bool = True) -> None:
         """Upload one file to a dataset, with tabular ingest disabled by default."""
         params = {'persistentId': persistent_id}
@@ -693,14 +795,17 @@ def mirror_to_dataverse(
         Zenodo record lists no files, if ``files`` names a file the record does
         not contain or selects none of them, or if a file name nests below the
         dataset directory (Dataverse flattens on the basename, so it would
-        collide).
+        collide), or if the record lists no license or several, or its license
+        matches no license the Dataverse server lists, or more than one; all
+        before the draft is created.
     DataverseError
         If a Dataverse native-API request fails: the server rejects it (for
         example an unknown subject in the citation metadata), the HTTP transport
         fails (connection error or timeout), or a 2xx response body is not a
         JSON object (a non-empty body that fails to parse, or that parses to
-        something other than a JSON object), or the draft does not hold
-        exactly the Zenodo files. After a failure past the dataset creation the
+        something other than a JSON object), the draft does not hold
+        exactly the Zenodo files, or the draft does not report the license it
+        was given. After a failure past the dataset creation the
         rollback deletes the draft; if that fails too, the log names the draft
         to delete by hand. A failed creation leaves no draft to roll back, but a
         creation whose reply was lost can leave one in the collection.
@@ -759,6 +864,13 @@ def mirror_to_dataverse(
     metadata = zenodo_record_to_citation(
         record, contact_name=contact_name, contact_email=contact_email, subject=subject
     )
+    # A second read of the same record: only the InvenioRDM form names CC0 as cc0-1.0.
+    # fetch_zenodo_record above has already rejected a concept DOI for this recid.
+    rights = _zenodo_record_rights(recid, api_base)
+    log.info('Zenodo record %s license: %s', recid, rights.get('id'))
+    client = None if dry_run else DataverseClient(dataverse_url, token)
+    if client is not None:
+        dv_license = dataverse_license(rights, client.licenses(), f'Zenodo record {recid}')
 
     with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:
         files = _download_zenodo_files(zenodo_doi, registry, Path(tmp), base_urls=base_urls)
@@ -768,12 +880,12 @@ def mirror_to_dataverse(
             log.info('dry run: skipping Dataverse create/upload/publish for %s', recid)
             return None
 
-        client = DataverseClient(dataverse_url, token)
         persistent_id = client.create_dataset(collection, metadata)
         log.warning('created Dataverse dataset %s', persistent_id)
         # From here the draft exists with a real DOI: on a failure, delete it so a
         # failed run leaves no orphaned deposit, unless a publish may have happened.
         try:
+            client.set_license(persistent_id, dv_license)
             for name in sorted(files):
                 client.add_file(persistent_id, files[name])
                 log.info('uploaded %s', name)

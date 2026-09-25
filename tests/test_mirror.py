@@ -33,7 +33,35 @@ from fwl_io.mirror import (
 pytestmark = pytest.mark.integration
 
 
-def _serve_zenodo_record(root, recid, files):
+CC_BY = {
+    'id': 'cc-by-4.0',
+    'props': {'url': 'https://creativecommons.org/licenses/by/4.0/legalcode', 'scheme': 'spdx'},
+}
+CC0 = {
+    'id': 'cc0-1.0',
+    'props': {
+        'url': 'https://creativecommons.org/publicdomain/zero/1.0/legalcode',
+        'scheme': 'spdx',
+    },
+}
+# The license list DataverseNL returns (GET /api/licenses), trimmed to three entries.
+DV_LICENSES = [
+    {
+        'name': 'CC0-1.0',
+        'uri': 'http://creativecommons.org/publicdomain/zero/1.0',
+        'active': True,
+        'rightsIdentifier': 'CC0-1.0',
+    },
+    {'name': 'CC-BY-4.0', 'uri': 'http://creativecommons.org/licenses/by/4.0', 'active': True},
+    {
+        'name': 'CC-BY-SA-4.0',
+        'uri': 'http://creativecommons.org/licenses/by-sa/4.0',
+        'active': True,
+    },
+]
+
+
+def _serve_zenodo_record(root, recid, files, rights=(CC_BY,)):
     """Publish a Zenodo record JSON plus its files; return (record, registry)."""
     registry = {}
     for name, payload in files.items():
@@ -50,6 +78,7 @@ def _serve_zenodo_record(root, recid, files):
                 {'name': 'Roe, Richard'},
             ],
             'description': 'A demo dataset.',
+            'rights': list(rights),
         },
         'files': [{'key': n, 'checksum': h} for n, h in registry.items()],
     }
@@ -73,6 +102,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     draft_files: list = []  # files the fake draft holds, as the listing reports them
     released: bool = False
     deleted: bool = False
+    license: dict | None = None
 
     def log_message(self, *args):  # noqa: D102 -- silence request logging
         pass
@@ -97,6 +127,8 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         for (m, suffix), replies in table.items():
             if m == method and path.endswith(suffix) and replies:
                 reply = replies.pop(0)
+                if reply == 'pass':  # let this request through to the normal reply
+                    return False
                 if isinstance(reply, str):
                     # 'challenge' or 'proxy', with an optional status: 'challenge 403'
                     kind, _, status = reply.partition(' ')
@@ -119,11 +151,27 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.endswith('/versions/:draft/files'):
             self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]})
+        elif parsed.path.endswith('/api/licenses'):
+            self._reply(200, {'status': 'OK', 'data': DV_LICENSES})
         elif self.deleted:
             self._reply(404, {'status': 'ERROR', 'message': 'not found'})
         else:
-            state = 'RELEASED' if self.released else 'DRAFT'
-            self._reply(200, {'status': 'OK', 'data': {'latestVersion': {'versionState': state}}})
+            version = {'versionState': 'RELEASED' if self.released else 'DRAFT'}
+            if self.license is not None:
+                version['license'] = self.license
+            self._reply(200, {'status': 'OK', 'data': {'id': 7, 'latestVersion': version}})
+
+    def do_PUT(self):  # noqa: N802 -- BaseHTTPRequestHandler API
+        parsed = self._record('PUT')
+        if self._scripted('PUT', parsed.path, self.script):
+            return
+        name = json.loads(self.calls[-1]['body'])['name']
+        match = [lic for lic in DV_LICENSES if lic['name'] == name]
+        if not parsed.path.endswith('/api/datasets/7/license') or not match:
+            self._reply(400, {'status': 'ERROR', 'message': 'bad license request'})
+            return
+        _DataverseHandler.license = {'name': name, 'uri': match[0]['uri']}
+        self._reply(200, {'status': 'OK', 'data': {'message': 'license updated'}})
 
     def _reply(self, status, payload):
         self.send_response(status)
@@ -207,6 +255,7 @@ def dataverse_server():
     _DataverseHandler.draft_files = []
     _DataverseHandler.released = False
     _DataverseHandler.deleted = False
+    _DataverseHandler.license = None
     server = ThreadingHTTPServer(('127.0.0.1', 0), _DataverseHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -219,7 +268,8 @@ def dataverse_server():
 def _mirror(http_server, dataverse_server, **overrides):
     base_url, root = http_server
     dv_url, calls = dataverse_server
-    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'})
+    rights = overrides.pop('rights', (CC_BY,))
+    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'}, rights)
     kwargs = dict(
         dataverse_url=dv_url,
         collection='Proteus_Fr',
@@ -405,8 +455,9 @@ def test_create_rejection_aborts_without_upload_or_rollback(http_server, dataver
         _mirror(http_server, dataverse_server, subject='Planetary Science')
     _, calls = dataverse_server
     paths = [c['path'] for c in calls]
-    # Only the create was attempted; no orphan draft, so nothing to clean up.
-    assert paths == ['/api/dataverses/Proteus_Fr/datasets']
+    # The license list was read, then only the create was attempted; no orphan
+    # draft, so nothing to clean up.
+    assert paths == ['/api/licenses', '/api/dataverses/Proteus_Fr/datasets']
     assert not any(c['method'] == 'DELETE' for c in calls)
 
 
@@ -1078,7 +1129,7 @@ def test_publish_requires_contact_email(http_server, dataverse_server):
 def test_download_failure_aborts_before_any_dataverse_write(
     http_server, dataverse_server, monkeypatch
 ):
-    """A failed Zenodo download stops the mirror before any Dataverse call."""
+    """A failed Zenodo download stops the mirror before any Dataverse write."""
     import fwl_io.mirror as mirror_mod
     from fwl_io.fetch import DownloadError
 
@@ -1104,8 +1155,8 @@ def test_download_failure_aborts_before_any_dataverse_write(
             api_base=f'{base_url}api/records',
             base_urls=[base_url],
         )
-    # The download failed, so the Dataverse server was never touched.
-    assert calls == []
+    # The download failed after the license list was read, so nothing was written.
+    assert [(c['method'], c['path']) for c in calls] == [('GET', '/api/licenses')]
 
 
 def test_dry_run_without_contact_email_still_runs(http_server, dataverse_server):
@@ -1657,7 +1708,8 @@ def test_a_failed_deletion_check_is_reported_not_counted_as_deleted(
     _DataverseHandler.fail_on_add = True
     _DataverseHandler.script = {
         ('DELETE', '/api/datasets/:persistentId'): ['challenge'],
-        ('GET', '/api/datasets/:persistentId'): [500],
+        # The two license-setting reads pass; the deletion check gets the 500.
+        ('GET', '/api/datasets/:persistentId'): ['pass', 'pass', 500],
     }
     with pytest.raises(DataverseError, match='400'):
         _mirror(http_server, dataverse_server)
@@ -1699,7 +1751,10 @@ def test_a_failed_state_check_rolls_the_draft_back(http_server, dataverse_server
     """No publish request went out, so the draft is known private and is deleted."""
     from fwl_io.mirror import DataverseRetryableError
 
-    _DataverseHandler.script = {('GET', '/api/datasets/:persistentId'): ['challenge'] * 5}
+    # The two license-setting reads pass; the publish state check gets the pages.
+    _DataverseHandler.script = {
+        ('GET', '/api/datasets/:persistentId'): ['pass', 'pass'] + ['challenge'] * 5
+    }
     with pytest.raises(DataverseRetryableError, match='state check'):
         _mirror(http_server, dataverse_server, publish=True)
     assert not any(c['path'].endswith('/actions/:publish') for c in _DataverseHandler.calls)
@@ -2270,3 +2325,199 @@ def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypa
         DataverseClient('http://unused', 'tok').check_draft(
             'doi:10.34894/DEMO01', {'a.dat': target}
         )
+
+
+# ---------------------------------------------------------------------------
+# The mirror copies the Zenodo source license
+# ---------------------------------------------------------------------------
+
+APACHE = {
+    'id': 'apache-2.0',
+    'props': {'url': 'http://www.apache.org/licenses/LICENSE-2.0', 'scheme': 'spdx'},
+}
+
+
+def _writes(calls):
+    return [(c['method'], c['path']) for c in calls if c['method'] != 'GET']
+
+
+@pytest.mark.parametrize(
+    ('rights', 'name', 'uri'),
+    [
+        (CC_BY, 'CC-BY-4.0', 'http://creativecommons.org/licenses/by/4.0'),
+        (CC0, 'CC0-1.0', 'http://creativecommons.org/publicdomain/zero/1.0'),
+    ],
+    ids=['cc-by-4.0', 'cc0-1.0'],
+)
+def test_the_draft_gets_the_license_of_its_source(http_server, dataverse_server, rights, name, uri):
+    """The draft carries the source license, set right after the create and read back."""
+    _, calls = _mirror(http_server, dataverse_server, rights=(rights,), publish=False)
+    puts = [c for c in calls if c['method'] == 'PUT']
+    assert [c['path'] for c in puts] == ['/api/datasets/7/license']
+    assert json.loads(puts[0]['body']) == {'name': name}
+    assert _DataverseHandler.license == {'name': name, 'uri': uri}
+    writes = _writes(calls)
+    assert writes.index(('PUT', '/api/datasets/7/license')) == 1
+    assert writes[0] == ('POST', '/api/dataverses/Proteus_Fr/datasets')
+
+
+@pytest.mark.parametrize(
+    'rights', [(APACHE,), (), (CC_BY, CC0)], ids=['unlisted license', 'no license', 'two licenses']
+)
+def test_a_license_the_server_cannot_take_stops_before_the_create(
+    http_server, dataverse_server, rights
+):
+    """No draft is created for a source license that does not map to exactly one listed license."""
+    with pytest.raises(ValueError, match='Zenodo record 55'):
+        _mirror(http_server, dataverse_server, rights=rights)
+    assert _writes(_DataverseHandler.calls) == []
+
+
+@pytest.mark.parametrize('put_reply', [200, 400], ids=['read-back differs', 'PUT rejected'])
+def test_a_license_that_does_not_stick_rolls_the_draft_back(
+    http_server, dataverse_server, sleeps, caplog, put_reply
+):
+    """A draft whose license was not set, or not confirmed, is deleted like any failed mirror."""
+    _DataverseHandler.script = {('PUT', '/license'): [put_reply]}
+    with pytest.raises(DataverseError):
+        _mirror(http_server, dataverse_server)
+    assert _DataverseHandler.deleted
+    assert 'rolled back the draft' in caplog.text
+    assert not any(c['path'].endswith('/add') for c in _DataverseHandler.calls)
+
+
+def test_a_dry_run_reads_the_license_but_not_the_server(http_server, dataverse_server, caplog):
+    """A dry run reports the source license and makes no Dataverse call."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger='fwl.fwl_io.mirror'):
+        result, calls = _mirror(http_server, dataverse_server, dry_run=True, rights=(CC0,))
+    assert result is None
+    assert calls == []
+    assert 'license: cc0-1.0' in caplog.text
+
+
+@pytest.mark.unit
+def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
+    """The rights request asks Zenodo for the InvenioRDM JSON, which names CC0 as cc0-1.0."""
+    import requests
+
+    from fwl_io.mirror import _zenodo_record_rights
+
+    seen = []
+
+    def fake_get(url, **kwargs):
+        seen.append((url, kwargs.get('headers')))
+        return _fake_response(200, json.dumps({'metadata': {'rights': [CC0]}}).encode())
+
+    monkeypatch.setattr(requests, 'get', fake_get)
+    assert _zenodo_record_rights('55', 'http://z/api/records') == CC0
+    assert seen == [('http://z/api/records/55', {'Accept': 'application/vnd.inveniordm.v1+json'})]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('rights', 'licenses', 'expected'),
+    [
+        # URL match with scheme, trailing /legalcode and www. differences
+        (
+            {'id': 'x', 'props': {'url': 'https://www.example.org/lic/1.0/legalcode'}},
+            [{'name': 'EX', 'uri': 'http://example.org/lic/1.0'}],
+            'EX',
+        ),
+        # SPDX id match on the name, no URL
+        ({'id': 'cc-by-4.0'}, [{'name': 'CC-BY-4.0', 'uri': 'http://a'}], 'CC-BY-4.0'),
+        # SPDX id match on rightsIdentifier
+        (
+            {'id': 'cc0-1.0'},
+            [{'name': 'CC0', 'uri': 'http://b', 'rightsIdentifier': 'CC0-1.0'}],
+            'CC0',
+        ),
+        # an inactive license is not a match
+        ({'id': 'cc-by-4.0'}, [{'name': 'CC-BY-4.0', 'uri': 'http://a', 'active': False}], None),
+        # no id and no URL match nothing, even an entry without rightsIdentifier
+        ({}, [{'name': 'CC-BY-4.0', 'uri': 'http://a'}], None),
+        # two different licenses matching is not a choice the mirror makes
+        (
+            {'id': 'cc-by-4.0', 'props': {'url': 'http://b'}},
+            [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'OTHER', 'uri': 'http://b'}],
+            None,
+        ),
+        # two listed entries under one name are two matches, not one
+        (
+            {'id': 'cc-by-4.0'},
+            [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
+            None,
+        ),
+        # the same, with one entry lacking a uri: still the ValueError
+        (
+            {'id': 'cc-by-4.0'},
+            [{'name': 'CC-BY-4.0'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
+            None,
+        ),  # an entry without a name cannot be set by name, so it never matches
+        (
+            {'id': 'cc-by-4.0'},
+            [
+                {
+                    'uri': 'http://creativecommons.org/licenses/by/4.0',
+                    'rightsIdentifier': 'CC-BY-4.0',
+                }
+            ],
+            None,
+        ),
+    ],
+    ids=[
+        'url',
+        'spdx name',
+        'spdx rightsIdentifier',
+        'inactive',
+        'empty',
+        'ambiguous',
+        'same name',
+        'same name, no uri',
+        'nameless',
+    ],
+)
+def test_the_license_mapping(rights, licenses, expected):
+    """The Dataverse license comes from the server list, matched on URL or SPDX id."""
+    from fwl_io.mirror import dataverse_license
+
+    if expected is None:
+        with pytest.raises(ValueError, match='record 9'):
+            dataverse_license(rights, licenses, 'Zenodo record 9')
+    else:
+        assert dataverse_license(rights, licenses, 'Zenodo record 9')['name'] == expected
+
+
+def test_the_license_list_is_retried_after_a_bot_check_page(http_server, dataverse_server, sleeps):
+    """The license list read uses the same retry as the other Dataverse calls."""
+    _DataverseHandler.script = {('GET', '/api/licenses'): ['challenge']}
+    result, calls = _mirror(http_server, dataverse_server, publish=False)
+    assert result == 'doi:10.34894/DEMO01'
+    assert [c['path'] for c in calls].count('/api/licenses') == 2
+    assert sleeps == [30.0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('dataset_id', [None, 0], ids=['missing', 'zero'])
+def test_only_a_missing_dataset_id_stops_the_license_put(monkeypatch, dataset_id):
+    """A reply without the numeric id stops before the PUT; id 0 is a real id and is sent."""
+    import requests
+
+    lic = {'name': 'CC-BY-4.0', 'uri': 'http://a'}
+    reply = {'latestVersion': {'license': lic}} | ({} if dataset_id is None else {'id': 0})
+    seen = []
+
+    def route(method, url, **kwargs):
+        seen.append((method, url))
+        return _fake_response(200, json.dumps({'status': 'OK', 'data': reply}).encode())
+
+    monkeypatch.setattr(requests, 'request', route)
+    client = DataverseClient('http://unused', 'tok')
+    if dataset_id is None:
+        with pytest.raises(DataverseError, match='no dataset id'):
+            client.set_license('doi:10.34894/DEMO01', lic)
+        assert not any(method == 'PUT' for method, _ in seen)
+    else:
+        client.set_license('doi:10.34894/DEMO01', lic)
+        assert ('PUT', 'http://unused/api/datasets/0/license') in seen
