@@ -2402,7 +2402,7 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
     """The rights request asks Zenodo for the InvenioRDM JSON, which names CC0 as cc0-1.0."""
     import requests
 
-    from fwl_io.mirror import zenodo_record_rights
+    from fwl_io.mirror import _zenodo_record_rights
 
     seen = []
 
@@ -2411,7 +2411,7 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
         return _fake_response(200, json.dumps({'metadata': {'rights': [CC0]}}).encode())
 
     monkeypatch.setattr(requests, 'get', fake_get)
-    assert zenodo_record_rights('10.5281/zenodo.55', api_base='http://z/api/records') == CC0
+    assert _zenodo_record_rights('55', 'http://z/api/records') == CC0
     assert seen == [('http://z/api/records/55', {'Accept': 'application/vnd.inveniordm.v1+json'})]
 
 

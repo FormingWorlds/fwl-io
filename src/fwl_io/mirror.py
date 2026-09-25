@@ -201,8 +201,8 @@ def zenodo_record_to_citation(
 _ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
 
 
-def zenodo_record_rights(zenodo_doi: str, *, api_base: str = ZENODO_API) -> dict:
-    """Return the single license entry of a Zenodo record (InvenioRDM ``rights``).
+def _zenodo_record_rights(recid: str, api_base: str) -> dict:
+    """Return the single license entry of a checked Zenodo record id (InvenioRDM ``rights``).
 
     The InvenioRDM form gives the SPDX id and the license URL; the legacy
     record JSON gives CC0 as ``cc-zero``, which no license list knows.
@@ -212,7 +212,6 @@ def zenodo_record_rights(zenodo_doi: str, *, api_base: str = ZENODO_API) -> dict
     ValueError
         If the record lists no license or more than one.
     """
-    recid = zenodo_record_id(zenodo_doi)
     response = requests.get(
         f'{api_base}/{recid}',
         headers={'Accept': 'application/vnd.inveniordm.v1+json'},
@@ -256,7 +255,8 @@ def dataverse_license(rights: dict, licenses: list[dict], source: str) -> dict:
     if len(hits) != 1:
         raise ValueError(
             f'{source} has license {rights.get("id")!r} ({url or "no URL"}), which matches '
-            f'{sorted(lic.get("name") for lic in hits) or "no license"} on the Dataverse server; '
+            f'{sorted((lic.get("name"), lic.get("uri")) for lic in hits) or "no license"} '
+            'on the Dataverse server; '
             'the mirror needs exactly one'
         )
     return hits[0]
@@ -544,7 +544,7 @@ class DataverseClient:
         body = self._retry(lambda: self._request('GET', '/api/licenses'), 'license list')
         return body.get('data') or []
 
-    def set_license(self, persistent_id: str, license: dict) -> None:
+    def set_license(self, persistent_id: str, dv_license: dict) -> None:
         """Set a listed license on a draft and read it back.
 
         Raises
@@ -562,19 +562,20 @@ class DataverseClient:
             )
             return body.get('data') or {}
 
-        dataset_id = dataset().get('id')
-        if dataset_id is None:
-            raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}')
+        reply = dataset()
+        dataset_id = reply.get('id')
+        if not dataset_id:
+            raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}: {reply}')
         self._retry(
             lambda: self._request(
-                'PUT', f'/api/datasets/{dataset_id}/license', json={'name': license['name']}
+                'PUT', f'/api/datasets/{dataset_id}/license', json={'name': dv_license['name']}
             ),
             f'license of {persistent_id}',
         )
         got = (dataset().get('latestVersion') or {}).get('license') or {}
-        if (got.get('name'), got.get('uri')) != (license['name'], license.get('uri')):
+        if (got.get('name'), got.get('uri')) != (dv_license['name'], dv_license.get('uri')):
             raise DataverseError(
-                f'draft {persistent_id} reports license {got} after {license["name"]} was set'
+                f'draft {persistent_id} reports license {got} after {dv_license["name"]} was set'
             )
 
     def add_file(self, persistent_id: str, path: Path, *, no_ingest: bool = True) -> None:
@@ -860,11 +861,12 @@ def mirror_to_dataverse(
     metadata = zenodo_record_to_citation(
         record, contact_name=contact_name, contact_email=contact_email, subject=subject
     )
-    rights = zenodo_record_rights(zenodo_doi, api_base=api_base)
+    # A second read of the same record: only the InvenioRDM form names CC0 as cc0-1.0.
+    rights = _zenodo_record_rights(recid, api_base)
     log.info('Zenodo record %s license: %s', recid, rights.get('id'))
     client = None if dry_run else DataverseClient(dataverse_url, token)
     if client is not None:
-        license = dataverse_license(rights, client.licenses(), f'Zenodo record {recid}')
+        dv_license = dataverse_license(rights, client.licenses(), f'Zenodo record {recid}')
 
     with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:
         files = _download_zenodo_files(zenodo_doi, registry, Path(tmp), base_urls=base_urls)
@@ -879,7 +881,7 @@ def mirror_to_dataverse(
         # From here the draft exists with a real DOI: on a failure, delete it so a
         # failed run leaves no orphaned deposit, unless a publish may have happened.
         try:
-            client.set_license(persistent_id, license)
+            client.set_license(persistent_id, dv_license)
             for name in sorted(files):
                 client.add_file(persistent_id, files[name])
                 log.info('uploaded %s', name)
