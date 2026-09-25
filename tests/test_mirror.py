@@ -2449,6 +2449,12 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
             [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
             None,
         ),
+        # the same, with one entry lacking a uri: still the ValueError
+        (
+            {'id': 'cc-by-4.0'},
+            [{'name': 'CC-BY-4.0'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
+            None,
+        ),
     ],
     ids=[
         'url',
@@ -2458,6 +2464,7 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
         'empty',
         'ambiguous',
         'same name',
+        'same name, no uri',
     ],
 )
 def test_the_license_mapping(rights, licenses, expected):
@@ -2496,3 +2503,22 @@ def test_a_dataset_without_an_id_is_reported_before_the_license_put(monkeypatch)
     with pytest.raises(DataverseError, match='no dataset id'):
         client.set_license('doi:10.34894/DEMO01', {'name': 'CC-BY-4.0', 'uri': 'http://a'})
     assert 'PUT' not in seen
+
+
+@pytest.mark.unit
+def test_a_dataset_id_of_zero_is_a_real_id(monkeypatch):
+    """Only a missing id stops the license step; id 0 is sent as is."""
+    import requests
+
+    seen = []
+    reply = {'id': 0, 'latestVersion': {'license': {'name': 'CC-BY-4.0', 'uri': 'http://a'}}}
+
+    def route(method, url, **kwargs):
+        seen.append((method, url))
+        return _fake_response(200, json.dumps({'status': 'OK', 'data': reply}).encode())
+
+    monkeypatch.setattr(requests, 'request', route)
+    DataverseClient('http://unused', 'tok').set_license(
+        'doi:10.34894/DEMO01', {'name': 'CC-BY-4.0', 'uri': 'http://a'}
+    )
+    assert ('PUT', 'http://unused/api/datasets/0/license') in seen

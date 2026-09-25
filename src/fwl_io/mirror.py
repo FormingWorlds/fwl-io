@@ -253,9 +253,10 @@ def dataverse_license(rights: dict, licenses: list[dict], source: str) -> dict:
         and ((url and _license_key(lic.get('uri')) == url) or (spdx and spdx in ids(lic)))
     ]
     if len(hits) != 1:
+        matched = sorted((lic.get('name') or '', lic.get('uri') or '') for lic in hits)
         raise ValueError(
             f'{source} has license {rights.get("id")!r} ({url or "no URL"}), which matches '
-            f'{sorted((lic.get("name"), lic.get("uri")) for lic in hits) or "no license"} '
+            f'{matched or "no license"} '
             'on the Dataverse server; '
             'the mirror needs exactly one'
         )
@@ -564,7 +565,7 @@ class DataverseClient:
 
         reply = dataset()
         dataset_id = reply.get('id')
-        if not dataset_id:
+        if dataset_id is None:
             raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}: {reply}')
         self._retry(
             lambda: self._request(
@@ -862,6 +863,7 @@ def mirror_to_dataverse(
         record, contact_name=contact_name, contact_email=contact_email, subject=subject
     )
     # A second read of the same record: only the InvenioRDM form names CC0 as cc0-1.0.
+    # fetch_zenodo_record above has already rejected a concept DOI for this recid.
     rights = _zenodo_record_rights(recid, api_base)
     log.info('Zenodo record %s license: %s', recid, rights.get('id'))
     client = None if dry_run else DataverseClient(dataverse_url, token)
