@@ -359,7 +359,9 @@ def test_remove_one_refuses_a_path_escaping_the_root(tmp_path):
     outside = tmp_path / 'outside_dataset' / 'r44444444'
     outside.mkdir(parents=True)
     (outside / 'keep.dat').write_bytes(b'safe\n')
-    candidate = PruneCandidate(path=outside, rel='../outside_dataset/r44444444', state=SUPERSEDED)
+    candidate = PruneCandidate(
+        path=outside, rel='../outside_dataset/r44444444', state=SUPERSEDED
+    )
 
     result = _remove_one(candidate, root, referenced=set())
 
@@ -523,7 +525,9 @@ def _skip_if_root():
         pytest.skip('an unreadable directory does not stop root')
 
 
-def test_an_unreadable_subtree_is_reported_as_a_scan_error_not_a_clean_run(tmp_path, monkeypatch):
+def test_an_unreadable_subtree_is_reported_as_a_scan_error_not_a_clean_run(
+    tmp_path, monkeypatch
+):
     """A directory the scan cannot read makes the plan report a scan error, not ok.
 
     A permission error on a shared tree must not read as a clean tree with
@@ -626,7 +630,9 @@ def _write_case_mismatched_manifest(tmp_path):
     return manifest
 
 
-def test_a_case_mismatched_manifest_subdir_still_matches_the_on_disk_version(tmp_path, monkeypatch):
+def test_a_case_mismatched_manifest_subdir_still_matches_the_on_disk_version(
+    tmp_path, monkeypatch
+):
     """A manifest key cased differently from the on-disk subdir is still matched.
 
     APFS is case-insensitive but case-preserving, so a manifest may spell a
@@ -712,7 +718,9 @@ def test_the_cli_refuses_to_delete_orphans_when_the_reference_set_is_empty(
     root = tmp_path / 'data'
     dirs = _make_tree(root)
 
-    exit_code = main(['prune', '--data-root', str(root), '--delete', '--yes', '--include-orphans'])
+    exit_code = main(
+        ['prune', '--data-root', str(root), '--delete', '--yes', '--include-orphans']
+    )
     err = capsys.readouterr().err
 
     assert exit_code == 1
@@ -794,7 +802,9 @@ def test_remove_one_refuses_a_candidate_with_no_matching_stamp(tmp_path):
     assert version.is_dir()
 
 
-def test_a_superseded_dir_containing_a_nested_version_dir_is_unrecognised(tmp_path, monkeypatch):
+def test_a_superseded_dir_containing_a_nested_version_dir_is_unrecognised(
+    tmp_path, monkeypatch
+):
     """A version directory is a leaf; one holding another version dir is not trusted.
 
     A candidate that contains a further ``r<digits>`` directory is downgraded
@@ -874,7 +884,9 @@ def test_a_referenced_symlink_into_a_superseded_dir_blocks_its_removal(tmp_path,
     assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == REFUSED
 
 
-def test_remove_one_refuses_a_candidate_reached_via_a_differently_cased_symlink_target(tmp_path):
+def test_remove_one_refuses_a_candidate_reached_via_a_differently_cased_symlink_target(
+    tmp_path,
+):
     """A referenced symlink target still blocks removal when its path is spelled in another case.
 
     The containment check compares by filesystem identity (device and inode),
@@ -954,7 +966,9 @@ def test_apply_prune_does_not_delete_a_candidate_demoted_to_orphaned_before_appl
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
     result = apply_prune(plan, data_root=root)
 
-    assert dirs['superseded'].is_dir(), 'a candidate demoted to orphaned is not removed by default'
+    assert dirs['superseded'].is_dir(), (
+        'a candidate demoted to orphaned is not removed by default'
+    )
     [kept] = [c for c in result.candidates if c.rel == f'{SUBDIR}/r{OLD_RECID}']
     assert (kept.state, kept.detail) == (REFUSED, 'now orphaned; not removed')
     assert not result.ok
@@ -1069,7 +1083,9 @@ NEW_RECID = '15800000'
 def _write_pinned_manifest(tmp_path, record_id):
     """Write (or rewrite) the manifest so the one dataset pins ``record_id``."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(f'[{KEY}]\nzenodo = "10.5281/zenodo.{record_id}"\nrequired_by = ["mors"]\n')
+    manifest.write_text(
+        f'[{KEY}]\nzenodo = "10.5281/zenodo.{record_id}"\nrequired_by = ["mors"]\n'
+    )
     return manifest
 
 
@@ -1193,7 +1209,9 @@ def test_a_candidate_with_an_unreadable_subdirectory_is_unrecognised_and_kept(
 
         assert _states(report)[f'{SUBDIR}/r{OLD_RECID}'] == UNRECOGNISED
         assert (dirs['superseded'] / _STAMP_FILENAME).is_file(), 'the stamp is not removed'
-        assert (dirs['superseded'] / 'data.dat').is_file(), 'no file of the candidate is removed'
+        assert (dirs['superseded'] / 'data.dat').is_file(), (
+            'no file of the candidate is removed'
+        )
     finally:
         os.chmod(inner, stat.S_IRWXU)
 
@@ -1216,7 +1234,9 @@ def test_an_unreadable_nested_version_dir_is_caught_by_its_name(tmp_path, monkey
         os.chmod(nested, stat.S_IRWXU)
 
 
-def test_a_stamped_copy_outside_its_stamped_subdir_is_unrecognised_and_kept(tmp_path, monkeypatch):
+def test_a_stamped_copy_outside_its_stamped_subdir_is_unrecognised_and_kept(
+    tmp_path, monkeypatch
+):
     """A stamp only vouches for the directory the fetch wrote it into.
 
     A user who copies a fetched version into their own directory carries its
@@ -1482,7 +1502,9 @@ def test_remove_one_refuses_a_candidate_with_a_mount_below_it(tmp_path, monkeypa
     assert (mounted / 'other_fs.dat').is_file()
 
 
-def test_a_symlinked_version_name_inside_a_candidate_makes_it_unrecognised(tmp_path, monkeypatch):
+def test_a_symlinked_version_name_inside_a_candidate_makes_it_unrecognised(
+    tmp_path, monkeypatch
+):
     """A nested ``r<digits>`` entry counts even when it is a symlink the walk never follows."""
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
@@ -1569,7 +1591,9 @@ def test_a_parent_moved_after_its_handle_opened_never_deletes_an_unchecked_dir(
 
     assert swapped, 'the injected move ran'
     assert (result.state, result.detail) == (REFUSED, 'changed during prune; not removed')
-    assert (user_home / 'project' / version.name / 'thesis.tex').read_bytes() == b'my own work\n'
+    assert (
+        user_home / 'project' / version.name / 'thesis.tex'
+    ).read_bytes() == b'my own work\n'
     assert (decoy / 'data.dat').is_file()
 
 
@@ -1874,7 +1898,9 @@ def test_a_symlink_loop_in_a_referenced_version_refuses_without_raising(tmp_path
     assert not report.ok
 
 
-def test_apply_never_deletes_a_planned_reference_through_a_swapped_symlink(tmp_path, monkeypatch):
+def test_apply_never_deletes_a_planned_reference_through_a_swapped_symlink(
+    tmp_path, monkeypatch
+):
     """A planned target replaced by a link to the planned-referenced dir cannot delete that dir.
 
     The pin advances before apply, so the old pin is superseded in the fresh
@@ -1992,7 +2018,9 @@ def test_the_case_insensitive_path_is_exercised_on_every_filesystem(
     case-insensitive one does. Only the older pin exists on disk, spelled
     differently from the manifest and from its own stamp.
     """
-    monkeypatch.setattr('fwl_io.prune._fs_is_case_insensitive', lambda root, **kwargs: insensitive)
+    monkeypatch.setattr(
+        'fwl_io.prune._fs_is_case_insensitive', lambda root, **kwargs: insensitive
+    )
     _install_manifest(monkeypatch, _write_case_mismatched_manifest(tmp_path))
     root = tmp_path / 'data'
     lower_subdir = _CI_SUBDIR.lower()
@@ -2016,7 +2044,9 @@ def test_shadows_known_subdir_folds_case_only_when_asked():
     assert not _shadows_known_subdir('Opacity/R1000', known, case_insensitive=False)
 
 
-def test_the_cli_keeps_an_unstamped_user_directory_and_its_parent(tmp_path, monkeypatch, capsys):
+def test_the_cli_keeps_an_unstamped_user_directory_and_its_parent(
+    tmp_path, monkeypatch, capsys
+):
     """An unstamped version-shaped directory outside every known subdir survives a full prune.
 
     This is a user's own directory that only happens to match the version
@@ -2032,7 +2062,9 @@ def test_the_cli_keeps_an_unstamped_user_directory_and_its_parent(tmp_path, monk
     user_dir.mkdir(parents=True)
     (user_dir / 'notes.txt').write_bytes(b'my own work\n')
 
-    exit_code = main(['prune', '--data-root', str(root), '--delete', '--yes', '--include-orphans'])
+    exit_code = main(
+        ['prune', '--data-root', str(root), '--delete', '--yes', '--include-orphans']
+    )
     out = capsys.readouterr().out
 
     assert exit_code == 0
@@ -2208,7 +2240,9 @@ def test_an_unsearchable_directory_in_a_user_subtree_is_a_scan_error(tmp_path, m
         os.chmod(shut, stat.S_IRWXU)
 
 
-def test_an_unsearchable_directory_inside_a_candidate_makes_it_unrecognised(tmp_path, monkeypatch):
+def test_an_unsearchable_directory_inside_a_candidate_makes_it_unrecognised(
+    tmp_path, monkeypatch
+):
     """A candidate holding an unsearchable directory is kept and reported, without raising."""
     _skip_if_root()
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
@@ -2325,7 +2359,9 @@ def test_a_dry_run_leaves_the_data_root_untouched(tmp_path, monkeypatch):
     (root / '0' / 'r1').mkdir(parents=True)
 
     def _listing():
-        return sorted(str(p.relative_to(root)) for p in root.rglob('*')), os.stat(root).st_mtime_ns
+        return sorted(str(p.relative_to(root)) for p in root.rglob('*')), os.stat(
+            root
+        ).st_mtime_ns
 
     before = _listing()
     plan_prune(data_root=root)
@@ -2334,7 +2370,9 @@ def test_a_dry_run_leaves_the_data_root_untouched(tmp_path, monkeypatch):
     assert _listing() == before
 
 
-def test_deletion_is_refused_early_where_the_platform_lacks_the_fd_features(tmp_path, monkeypatch):
+def test_deletion_is_refused_early_where_the_platform_lacks_the_fd_features(
+    tmp_path, monkeypatch
+):
     """Without no-follow directory handles, deletion is refused up front; the plan still runs."""
     _install_manifest(monkeypatch, _write_manifest(tmp_path))
     root = tmp_path / 'data'
@@ -2711,7 +2749,9 @@ def test_the_cli_refuses_an_unsupported_platform_before_asking(tmp_path, monkeyp
     assert dirs['superseded'].is_dir()
 
 
-def test_a_dry_run_exits_1_where_existing_locks_cannot_be_checked(tmp_path, monkeypatch, capsys):
+def test_a_dry_run_exits_1_where_existing_locks_cannot_be_checked(
+    tmp_path, monkeypatch, capsys
+):
     """With a lock directory and no flock, the plan is printed but does not read as clean."""
     from fwl_io.cli import main
 
@@ -2749,7 +2789,9 @@ def test_a_link_hop_through_an_unsearchable_directory_blocks_deletion(tmp_path, 
     assert dirs['superseded'].is_dir() and not report.removed
 
 
-def test_the_delete_reports_carry_the_unwritable_lock_warning_with_its_count(tmp_path, monkeypatch):
+def test_the_delete_reports_carry_the_unwritable_lock_warning_with_its_count(
+    tmp_path, monkeypatch
+):
     """apply_prune and a deleting prune_versions both return the warning, counted per file."""
     _skip_if_root()
     _install_manifest(monkeypatch, _write_manifest(tmp_path))

@@ -94,7 +94,9 @@ def sync_dataset(dataset: Dataset, api_base: str = ZENODO_API) -> Path:
         raise ValueError(f'dataset {dataset.key!r} has no registry path')
     entries = fetch_zenodo_registry(dataset.zenodo, api_base=api_base)
     if dataset.files is not None:
-        entries = select_files(entries, dataset.files, source=f'Zenodo record of {dataset.key!r}')
+        entries = select_files(
+            entries, dataset.files, source=f'Zenodo record of {dataset.key!r}'
+        )
     write_registry(dataset.registry_path, entries)
     return dataset.registry_path
 

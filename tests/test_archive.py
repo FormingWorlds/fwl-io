@@ -130,7 +130,9 @@ def test_unknown_kind_rejected(tmp_path):
     assert list(dest.iterdir()) == []
 
 
-def _make_tar_typed_member(path: Path, name: str, typeflag: bytes, *, linkname: str = '') -> None:
+def _make_tar_typed_member(
+    path: Path, name: str, typeflag: bytes, *, linkname: str = ''
+) -> None:
     with tarfile.open(path, 'w') as tf:
         info = tarfile.TarInfo(name)
         info.type = typeflag

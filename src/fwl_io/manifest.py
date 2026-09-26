@@ -348,7 +348,9 @@ def _walk_tables(
         has_subtables = any(isinstance(v, dict) for v in value.values())
         if 'zenodo' in value:
             if has_subtables:
-                raise ValueError(f'dataset {dotted!r}: dataset tables must not contain sub-tables')
+                raise ValueError(
+                    f'dataset {dotted!r}: dataset tables must not contain sub-tables'
+                )
             unknown = sorted(set(value) - _DATASET_FIELDS)
             if _SCHEMA_KEY in unknown:
                 raise _misplaced_schema_error(f'dataset {dotted!r} declares {_SCHEMA_KEY!r}')
@@ -361,7 +363,9 @@ def _walk_tables(
                 )
             leaves.append((dotted, value))
         elif has_subtables:
-            leaves.extend(_walk_tables(value, prefix=f'{dotted}.', declared_schema=declared_schema))
+            leaves.extend(
+                _walk_tables(value, prefix=f'{dotted}.', declared_schema=declared_schema)
+            )
         else:
             raise ValueError(
                 f'table {dotted!r} has no "zenodo" key, so it is neither a dataset nor a '
@@ -691,7 +695,9 @@ def fetch_for(
             except Exception as exc:  # noqa: BLE001 -- aggregate and re-raise below
                 failures[ds.key] = str(exc)
     if failures or provider_errors:
-        report = [f'fetching data for model {model!r} failed ({len(fetched)} dataset(s) arrived)']
+        report = [
+            f'fetching data for model {model!r} failed ({len(fetched)} dataset(s) arrived)'
+        ]
         if failures:
             report.append(f'{len(failures)} dataset(s) failed:')
             report += [f'  {key}: {msg}' for key, msg in sorted(failures.items())]

@@ -51,7 +51,9 @@ def _extract_tar(archive: Path, dest: Path) -> None:
                 if m.issym() or m.islnk() or m.isdev() or m.ischr() or m.isblk() or m.isfifo():
                     raise ArchiveError(f'unsafe archive member {m.name!r}: {_MEMBER_TYPE_MSG}')
                 if _escapes(dest_resolved, m.name):
-                    raise ArchiveError(f'unsafe archive member {m.name!r}: escapes the destination')
+                    raise ArchiveError(
+                        f'unsafe archive member {m.name!r}: escapes the destination'
+                    )
             try:
                 # The 'data' filter (Python 3.12, backported to 3.11.4+) is a
                 # second line of defence over the explicit checks above.

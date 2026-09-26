@@ -186,7 +186,9 @@ class RelocationReport:
         if self.manifest_errors:
             # An unloaded or conflict-dropped manifest may declare a dataset this
             # tree still holds, so the counts above are a floor.
-            closing += f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
+            closing += (
+                f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
+            )
         lines.append(closing)
         return '\n'.join(lines)
 
@@ -416,7 +418,9 @@ def _classify(
             f'{len(absent)} absent, to be fetched at the new location'
         )
     if len(moving) < len(present):
-        notes.append(f'{len(present) - len(moving)} already at {target_dir}, so that copy stays')
+        notes.append(
+            f'{len(present) - len(moving)} already at {target_dir}, so that copy stays'
+        )
     notes.extend(differ)
     return READY, '; '.join(notes), moving
 
@@ -484,7 +488,9 @@ def _held(
     return intact, other, skipped
 
 
-def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path) -> str | None:
+def _refusal(
+    legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: Path
+) -> str | None:
     """Why moving these files would be refused, or ``None``, from the opens the move makes.
 
     A symlink anywhere on the way, on either side, is refused by the move
@@ -500,11 +506,15 @@ def _refusal(legacy_dir: Path, target_dir: Path, names: tuple[str, ...], root: P
         try:
             os.close(_open_dir_below(root, legacy_rel + parent))
         except OSError as exc:
-            return f'{legacy_dir} cannot be safely opened: {_why(root, legacy_rel + parent, exc)}'
+            return (
+                f'{legacy_dir} cannot be safely opened: {_why(root, legacy_rel + parent, exc)}'
+            )
         try:
             _probe_dir_below(root, target_rel + parent)
         except OSError as exc:
-            return f'{target_dir} cannot be safely opened: {_why(root, target_rel + parent, exc)}'
+            return (
+                f'{target_dir} cannot be safely opened: {_why(root, target_rel + parent, exc)}'
+            )
     return None
 
 
@@ -540,7 +550,9 @@ def _assess(
     unmovable = _unmovable(ds, registry) if legacy_present else None
     if unmovable is not None:
         return UNRESOLVABLE, unmovable, ()
-    outside = _escaping(legacy_dir, target_dir, tuple(registry), root) if legacy_present else None
+    outside = (
+        _escaping(legacy_dir, target_dir, tuple(registry), root) if legacy_present else None
+    )
     if outside is not None:
         # A symlink is how this happens in a real tree: every joined
         # path looks clean and only resolving one shows it leaves.
@@ -603,7 +615,11 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     (),
                 )
             except ValueError as exc:
-                state, detail, files = UNRESOLVABLE, f'{ds.key} registry cannot be used: {exc}', ()
+                state, detail, files = (
+                    UNRESOLVABLE,
+                    f'{ds.key} registry cannot be used: {exc}',
+                    (),
+                )
             entries.append(
                 Relocation(
                     ds.key,
@@ -783,7 +799,9 @@ def _prune(directory: Path, root: Path) -> None:
         directory = directory.parent
 
 
-def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> RelocationReport:
+def relocate_all(
+    data_root: str | Path | None = None, dry_run: bool = False
+) -> RelocationReport:
     """Move every legacy tree that checks out into the current layout.
 
     Every present file in the legacy location that matches its recorded

@@ -122,7 +122,12 @@ def _primitive(type_name: str, value: str, *, multiple: bool = False) -> dict:
     field, to declare its ``typeClass`` and ``multiple`` flag next to the
     value; a field carrying only a name and value is rejected server-side.
     """
-    return {'typeName': type_name, 'typeClass': 'primitive', 'multiple': multiple, 'value': value}
+    return {
+        'typeName': type_name,
+        'typeClass': 'primitive',
+        'multiple': multiple,
+        'value': value,
+    }
 
 
 def _compound(type_name: str, value: list[dict], *, multiple: bool = True) -> dict:
@@ -132,7 +137,12 @@ def _compound(type_name: str, value: list[dict], *, multiple: bool = True) -> di
     field can be assembled without them; hand-building a raw dict is what let
     the required attributes go missing.
     """
-    return {'typeName': type_name, 'typeClass': 'compound', 'multiple': multiple, 'value': value}
+    return {
+        'typeName': type_name,
+        'typeClass': 'compound',
+        'multiple': multiple,
+        'value': value,
+    }
 
 
 def _controlled(type_name: str, values: list[str], *, multiple: bool = True) -> dict:
@@ -280,7 +290,8 @@ def _same_file(entry: dict, path: Path) -> bool:
         return False
     with path.open('rb') as handle:
         return (
-            hashlib.file_digest(handle, algorithm).hexdigest() == str(checksum.get('value')).lower()
+            hashlib.file_digest(handle, algorithm).hexdigest()
+            == str(checksum.get('value')).lower()
         )
 
 
@@ -357,7 +368,9 @@ class DataverseClient:
                 unprocessed=response.status_code < 500,
             )
         if response.status_code in _RETRY_STATUSES:
-            wait = response.headers.get('Retry-After', '') if response.status_code == 429 else ''
+            wait = (
+                response.headers.get('Retry-After', '') if response.status_code == 429 else ''
+            )
             raise DataverseRetryableError(
                 f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
                 response.status_code,
@@ -501,7 +514,9 @@ class DataverseClient:
         wrong = sorted(n for n, p in files.items() if not _same_file(listed.get(n, {}), p))
         extra = sorted(set(listed) - set(files))
         if wrong or extra:
-            kinds = sorted({str((f.get('checksum') or {}).get('type')) for f in listed.values()})
+            kinds = sorted(
+                {str((f.get('checksum') or {}).get('type')) for f in listed.values()}
+            )
             raise DataverseError(
                 f'draft {persistent_id} does not match the Zenodo files: '
                 f'missing or different {wrong}, not expected {extra} '
@@ -567,7 +582,9 @@ class DataverseClient:
         reply = dataset()
         dataset_id = reply.get('id')
         if dataset_id is None:
-            raise DataverseError(f'Dataverse reported no dataset id for {persistent_id}: {reply}')
+            raise DataverseError(
+                f'Dataverse reported no dataset id for {persistent_id}: {reply}'
+            )
         self._retry(
             lambda: self._request(
                 'PUT', f'/api/datasets/{dataset_id}/license', json={'name': dv_license['name']}
@@ -618,7 +635,9 @@ class DataverseClient:
             If the dataset is not RELEASED after the wait, or every attempt got
             the bot-check page or a 429; its state is then unknown.
         """
-        if self._retry(lambda: self._released(persistent_id), f'state check of {persistent_id}'):
+        if self._retry(
+            lambda: self._released(persistent_id), f'state check of {persistent_id}'
+        ):
             raise DataverseAlreadyPublished(f'{persistent_id} is already published')
         what = f'publish of {persistent_id}'
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -900,7 +919,9 @@ def mirror_to_dataverse(
         except Exception:
             try:
                 client.delete_draft(persistent_id)
-                log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)
+                log.warning(
+                    'rolled back the draft dataset %s after a failed mirror', persistent_id
+                )
             except Exception as cleanup_exc:  # noqa: BLE001 -- surface, do not mask the original
                 log.error(
                     'could not roll back draft %s (delete it manually): %s',

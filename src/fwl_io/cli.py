@@ -281,9 +281,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_prune.set_defaults(func=_cmd_prune)
 
-    p_mirror = sub.add_parser('mirror', help='mirror a Zenodo deposit to a Dataverse collection')
+    p_mirror = sub.add_parser(
+        'mirror', help='mirror a Zenodo deposit to a Dataverse collection'
+    )
     p_mirror.add_argument('zenodo_doi', help='Zenodo version DOI to mirror')
-    p_mirror.add_argument('--collection', required=True, help='target Dataverse collection alias')
+    p_mirror.add_argument(
+        '--collection', required=True, help='target Dataverse collection alias'
+    )
     p_mirror.add_argument(
         '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
     )
@@ -306,7 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
     p_mirror.add_argument(
-        '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'
+        '--dry-run',
+        action='store_true',
+        help='download and map metadata only; no Dataverse writes',
     )
     p_mirror.set_defaults(func=_cmd_mirror)
 

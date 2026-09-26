@@ -174,7 +174,9 @@ def test_a_tree_already_at_its_current_location_is_left_alone(tmp_path, monkeypa
 
     assert [e.state for e in report.entries] == [ALREADY_CURRENT]
     assert not report.faults, 'an already-tidy tree is a success'
-    assert (root / LEGACY / 'notes.txt').is_file(), 'the redundant copy is reported, not deleted'
+    assert (root / LEGACY / 'notes.txt').is_file(), (
+        'the redundant copy is reported, not deleted'
+    )
     assert 'redundant' in report.entries[0].detail
     # The closing line is all some readers see, and on a tree where everything
     # has already been refetched the old copies are the only thing to say.
@@ -426,7 +428,9 @@ def test_a_dataset_whose_registry_is_missing_is_reported_not_moved(tmp_path, mon
     assert not (root / TARGET).exists()
 
 
-def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(tmp_path, monkeypatch):
+def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(
+    tmp_path, monkeypatch
+):
     """An unread manifest may be the one declaring the tree still sitting there.
 
     Nothing moved and nothing was found, which on its own is exactly what a
@@ -509,7 +513,9 @@ def test_a_nested_member_leaves_no_husk_behind(tmp_path, monkeypatch):
     (legacy / 'sub').mkdir(parents=True)
     (legacy / 'sub' / 'nested.dat').write_bytes(CONTENTS['notes.txt'])
     target = root / TARGET
-    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=target, files=('sub/nested.dat',))
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=target, files=('sub/nested.dat',)
+    )
 
     result = _move_one(entry, root)
 
@@ -536,7 +542,9 @@ def test_files_outside_the_data_root_are_never_moved(tmp_path, escape):
     outside.mkdir()
     (outside / 'a.dat').write_bytes(CONTENTS['notes.txt'])
     legacy = root / '../outside_dataset' if escape == 'relative' else outside
-    entry = Relocation(KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=('a.dat',))
+    entry = Relocation(
+        KEY, READY, legacy_dir=legacy, target_dir=root / TARGET, files=('a.dat',)
+    )
 
     result = _move_one(entry, root)
 
@@ -713,8 +721,12 @@ def test_a_symlink_swapped_into_legacy_dir_during_rollback_is_refused(tmp_path, 
     result = _move_one(entry, root)
 
     assert result.state == SPLIT
-    assert list(outside.iterdir()) == [], 'nothing may be written through the swapped-in symlink'
-    assert legacy.is_symlink(), 'the swap itself is not undone; only the restore into it is refused'
+    assert list(outside.iterdir()) == [], (
+        'nothing may be written through the swapped-in symlink'
+    )
+    assert legacy.is_symlink(), (
+        'the swap itself is not undone; only the restore into it is refused'
+    )
     assert len(calls) == 3, 'one move succeeded, one failed, one real rollback was attempted'
 
 
@@ -797,7 +809,9 @@ def test_a_rollback_restores_every_file_moved_before_the_failure(tmp_path, monke
     assert result.state == FAILED
     for name in ('a.dat', 'b.dat'):
         assert (legacy / name).read_bytes() == name.encode(), f'{name} was not restored'
-    assert list((root / TARGET).iterdir()) == [], 'the target holds nothing after a full rollback'
+    assert list((root / TARGET).iterdir()) == [], (
+        'the target holds nothing after a full rollback'
+    )
 
 
 def test_a_registry_file_swapped_for_a_symlink_before_the_move_is_refused(tmp_path):
@@ -882,8 +896,12 @@ def test_a_failed_move_does_not_stop_the_others_from_being_tried(tmp_path, monke
 
     planned = RelocationReport(
         (
-            Relocation('a.first', READY, legacy_dir=tmp_path / 'l1', target_dir=tmp_path / 't1'),
-            Relocation('b.second', READY, legacy_dir=tmp_path / 'l2', target_dir=tmp_path / 't2'),
+            Relocation(
+                'a.first', READY, legacy_dir=tmp_path / 'l1', target_dir=tmp_path / 't1'
+            ),
+            Relocation(
+                'b.second', READY, legacy_dir=tmp_path / 'l2', target_dir=tmp_path / 't2'
+            ),
         )
     )
     monkeypatch.setattr(module, 'plan_relocations', lambda data_root=None: planned)
@@ -898,7 +916,9 @@ def test_a_failed_move_does_not_stop_the_others_from_being_tried(tmp_path, monke
     report = module.relocate_all(data_root=tmp_path)
 
     assert [e.state for e in report.entries] == [FAILED, MOVED]
-    assert [e.key for e in report.moved] == ['b.second'], 'the second dataset was still attempted'
+    assert [e.key for e in report.moved] == ['b.second'], (
+        'the second dataset was still attempted'
+    )
     assert len(report.faults) == 1
 
 
@@ -1111,7 +1131,9 @@ def test_an_archive_dataset_is_refused_rather_than_called_incomplete(tmp_path, m
     the dataset is refused by name instead, and nothing is moved either way.
     """
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n')
+    manifest.write_text(
+        f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n'
+    )
     archive_digest = f'sha256:{hashlib.sha256(b"packed").hexdigest()}'
     (tmp_path / f'{KEY}.registry.txt').write_text(f'bundle.tar.gz {archive_digest}\n')
 
@@ -1148,7 +1170,9 @@ def test_an_archive_dataset_is_refused_rather_than_called_incomplete(tmp_path, m
         ('legacy = [1, 2]\n', 'legacy is an array'),
     ],
 )
-def test_an_unreadable_layout_table_reports_nothing_rather_than_raising(monkeypatch, table, why):
+def test_an_unreadable_layout_table_reports_nothing_rather_than_raising(
+    monkeypatch, table, why
+):
     """A table that will not load leaves no legacy locations, and no traceback.
 
     Every other unreadable input this command meets is carried in the report,
@@ -1173,7 +1197,9 @@ def test_an_unreadable_layout_table_reports_nothing_rather_than_raising(monkeypa
     assert _LAYOUT_RESOURCE in error
 
 
-def test_a_layout_table_that_did_not_load_is_not_reported_as_nothing_to_do(tmp_path, monkeypatch):
+def test_a_layout_table_that_did_not_load_is_not_reported_as_nothing_to_do(
+    tmp_path, monkeypatch
+):
     """An unreadable table is carried into the report, not just logged.
 
     Returning no locations makes the run indistinguishable from a tidy tree
@@ -1212,7 +1238,9 @@ def test_an_archive_dataset_with_no_legacy_tree_is_absent_not_a_fault(tmp_path, 
     a machine that never had the old layout must not fail the command forever.
     """
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n')
+    manifest.write_text(
+        f'[{KEY}]\nzenodo = "{ZENODO}"\nrequired_by = ["mors"]\nextract = "tar"\n'
+    )
     archive_digest = f'sha256:{hashlib.sha256(b"packed").hexdigest()}'
     (tmp_path / f'{KEY}.registry.txt').write_text(f'bundle.tar.gz {archive_digest}\n')
 
@@ -1311,7 +1339,9 @@ def test_a_symlinked_directory_inside_a_registry_name_is_refused_at_plan_time(
 
 
 @pytest.mark.parametrize('dry_run', [True, False], ids=['dry-run', 'real-run'])
-def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(tmp_path, monkeypatch, dry_run):
+def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(
+    tmp_path, monkeypatch, dry_run
+):
     """A symlink on the target side, inside the data root, is refused at plan time as well."""
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -1328,7 +1358,9 @@ def test_a_symlinked_ancestor_of_the_target_is_refused_at_plan_time(tmp_path, mo
     assert list((root / 'bigdisk_star').iterdir()) == []
 
 
-def test_a_target_file_that_differs_from_the_registry_is_never_overwritten(tmp_path, monkeypatch):
+def test_a_target_file_that_differs_from_the_registry_is_never_overwritten(
+    tmp_path, monkeypatch
+):
     """A file already at the target that is not the registry file blocks the dataset.
 
     The move replaces by name, so a differing target file would be lost, and a
@@ -1385,8 +1417,12 @@ def test_the_move_itself_refuses_to_overwrite_a_target_file(tmp_path):
     assert not (root / TARGET / 'BHAC15_tracks.dat').exists()
 
 
-@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
-def test_an_unreadable_legacy_parent_refuses_that_dataset_and_does_not_raise(tmp_path, monkeypatch):
+@pytest.mark.skipif(
+    not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user'
+)
+def test_an_unreadable_legacy_parent_refuses_that_dataset_and_does_not_raise(
+    tmp_path, monkeypatch
+):
     """A legacy parent this user cannot search is reported for that dataset, not raised."""
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -1424,7 +1460,9 @@ def test_a_platform_without_dir_fd_moves_refuses_that_dataset(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    ('unsupported_calls', 'state'), [({2}, 'failed'), ({2, 3}, 'split')], ids=['restored', 'split']
+    ('unsupported_calls', 'state'),
+    [({2}, 'failed'), ({2, 3}, 'split')],
+    ids=['restored', 'split'],
 )
 def test_a_move_primitive_the_platform_lacks_is_a_failure_not_a_crash(
     tmp_path, monkeypatch, unsupported_calls, state
@@ -1522,7 +1560,9 @@ def test_a_differing_target_file_the_legacy_tree_does_not_hold_is_named_not_call
     assert (root / TARGET / 'BHAC15_tracks.dat').read_bytes() == b'not the recorded contents\n'
 
 
-@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+@pytest.mark.skipif(
+    not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user'
+)
 def test_an_unsearchable_target_directory_is_refused_not_read_as_empty(tmp_path, monkeypatch):
     """A target directory this user cannot search is reported, not treated as holding nothing."""
     _install_manifest(monkeypatch, tmp_path)
@@ -1582,7 +1622,9 @@ def _unreadable_target(kind, target):
     return lambda: target.chmod(0o755)
 
 
-@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user')
+@pytest.mark.skipif(
+    not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a non-root user'
+)
 @pytest.mark.parametrize('kind', ['dir-000', 'dir-644', 'file'])
 def test_an_unreadable_target_is_no_fault_when_there_is_no_legacy_directory(
     tmp_path, monkeypatch, kind
@@ -1655,7 +1697,9 @@ def test_a_target_symlink_into_the_legacy_tree_is_not_counted_as_intact(tmp_path
     assert all((root / LEGACY / n).is_file() for n in CONTENTS)
 
 
-def test_a_target_symlink_to_a_matching_file_elsewhere_blocks_that_file_only(tmp_path, monkeypatch):
+def test_a_target_symlink_to_a_matching_file_elsewhere_blocks_that_file_only(
+    tmp_path, monkeypatch
+):
     """A symlink to an in-root file with the right contents still blocks the dataset.
 
     Skipping it as intact would leave the legacy copy orphaned while the
@@ -1690,7 +1734,9 @@ def test_a_clash_names_the_blocking_target_file_and_the_repair(tmp_path, monkeyp
     assert 'repair with "fwl-io check <model>", then "fwl-io fetch <model>"' in entry.detail
 
 
-def test_a_corrupt_legacy_copy_of_a_file_the_target_holds_is_named_as_such(tmp_path, monkeypatch):
+def test_a_corrupt_legacy_copy_of_a_file_the_target_holds_is_named_as_such(
+    tmp_path, monkeypatch
+):
     """A bad old copy of a file already intact at the target still blocks, and says why.
 
     Moving the good files past it would leave a stale duplicate behind, so the
@@ -1713,7 +1759,9 @@ def _open_fds():
 
 
 @pytest.mark.parametrize('failing', ['open', 'mkdir'])
-def test_the_directory_helpers_close_their_handle_on_any_exception(monkeypatch, tmp_path, failing):
+def test_the_directory_helpers_close_their_handle_on_any_exception(
+    monkeypatch, tmp_path, failing
+):
     """A NotImplementedError from a dir_fd primitive must not leak the open directory handle."""
     import fwl_io.fs_guard as guard
 
@@ -1849,7 +1897,9 @@ def test_an_unusable_digest_with_no_legacy_directory_is_absent(tmp_path, monkeyp
     assert report.ok
 
 
-def test_every_differing_file_is_named_in_sorted_order_and_the_verb_agrees(tmp_path, monkeypatch):
+def test_every_differing_file_is_named_in_sorted_order_and_the_verb_agrees(
+    tmp_path, monkeypatch
+):
     """Two files in a detail are listed sorted with a plural verb, one with a singular verb."""
     import shutil
 
@@ -1890,7 +1940,9 @@ def test_every_differing_file_is_named_in_sorted_order_and_the_verb_agrees(tmp_p
     assert 'notes.txt is a copy the target already holds intact' in one
 
 
-def test_a_leftover_directory_beside_two_differing_target_files_names_both(tmp_path, monkeypatch):
+def test_a_leftover_directory_beside_two_differing_target_files_names_both(
+    tmp_path, monkeypatch
+):
     """Differing target files are listed sorted, with a plural verb, beside a legacy leftover."""
     _install_manifest(monkeypatch, tmp_path)
     root = tmp_path / 'data'
@@ -2027,7 +2079,9 @@ def test_a_legacy_copy_that_leads_back_to_the_target_is_never_called_redundant(
     assert all((root / TARGET / n).read_bytes() == b for n, b in SUBTREE.items())
 
 
-def test_a_name_behind_a_symlinked_target_directory_is_not_counted_absent(tmp_path, monkeypatch):
+def test_a_name_behind_a_symlinked_target_directory_is_not_counted_absent(
+    tmp_path, monkeypatch
+):
     """A file not verified because its directory is a symlink is named, not left to be fetched."""
     _install_manifest(monkeypatch, tmp_path, contents=SUBTREE)
     root = tmp_path / 'data'

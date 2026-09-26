@@ -418,7 +418,9 @@ class Fetcher:
         for entry in staging.iterdir():
             try:
                 if entry.stat().st_mtime < cutoff:
-                    shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() else entry.unlink()
+                    shutil.rmtree(
+                        entry, ignore_errors=True
+                    ) if entry.is_dir() else entry.unlink()
             except OSError:  # another process may be pruning concurrently
                 continue
         return staging
@@ -517,7 +519,9 @@ class Fetcher:
                 return got, mirror
             if not retriable:
                 break
-        raise DownloadError(f'could not obtain {fname!r} from any mirror:\n' + '\n'.join(errors))
+        raise DownloadError(
+            f'could not obtain {fname!r} from any mirror:\n' + '\n'.join(errors)
+        )
 
     def _download(self, fname: str, known_hash: str, target: Path) -> Path:
         staging = self._staging_dir()
@@ -786,7 +790,10 @@ class Fetcher:
         existing = self._read_stamp(directory)
         if existing is None:
             return False
-        return existing.get('record_id') == self.record_id and existing.get('zenodo') == self.zenodo
+        return (
+            existing.get('record_id') == self.record_id
+            and existing.get('zenodo') == self.zenodo
+        )
 
     def _write_stamp(self) -> None:
         """Write a self-describing provenance stamp into the version directory.

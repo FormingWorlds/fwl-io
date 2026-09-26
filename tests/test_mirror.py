@@ -135,7 +135,9 @@ class _DataverseHandler(BaseHTTPRequestHandler):
                     page = b'<!doctype html><html><head><title>Not Found</title></head></html>'
                     if kind == 'challenge':
                         page = b'<!doctype html><html><head><title>Oh noes!</title>'
-                        page += b'<link href="/.within.website/x/xess/xess.min.css"></head></html>'
+                        page += (
+                            b'<link href="/.within.website/x/xess/xess.min.css"></head></html>'
+                        )
                     self.send_response(int(status or 200))
                     self.send_header('Content-Type', 'text/html; charset=utf-8')
                     self.end_headers()
@@ -150,7 +152,9 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         if self._scripted('GET', parsed.path, self.script):
             return
         if parsed.path.endswith('/versions/:draft/files'):
-            self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]})
+            self._reply(
+                200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]}
+            )
         elif parsed.path.endswith('/api/licenses'):
             self._reply(200, {'status': 'OK', 'data': DV_LICENSES})
         elif self.deleted:
@@ -199,7 +203,10 @@ class _DataverseHandler(BaseHTTPRequestHandler):
                 # unknown subject), which the live server returns as a 400.
                 self._reply(
                     400,
-                    {'status': 'ERROR', 'message': "Value 'X' does not exist in type 'subject'"},
+                    {
+                        'status': 'ERROR',
+                        'message': "Value 'X' does not exist in type 'subject'",
+                    },
                 )
                 return
             data = {} if self.omit_persistent_id else {'persistentId': 'doi:10.34894/DEMO01'}
@@ -790,7 +797,9 @@ def test_publish_existing_draft_rejects_a_malformed_persistent_id(persistent_id)
     raises ValueError even with an unreachable dataverse_url.
     """
     with pytest.raises(ValueError, match='Dataverse persistent id'):
-        publish_existing_dataverse_draft(persistent_id, dataverse_url='http://unused', token='tok')
+        publish_existing_dataverse_draft(
+            persistent_id, dataverse_url='http://unused', token='tok'
+        )
 
 
 @pytest.mark.unit
@@ -1261,7 +1270,9 @@ def test_cli_mirror_forwards_no_publish(monkeypatch):
     from fwl_io.cli import main
 
     captured = {}
-    monkeypatch.setattr(mirror_mod, 'mirror_to_dataverse', lambda doi, **k: captured.update(**k))
+    monkeypatch.setattr(
+        mirror_mod, 'mirror_to_dataverse', lambda doi, **k: captured.update(**k)
+    )
     monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
 
     main(['mirror', '10.5281/zenodo.55', '--collection', 'C', '--no-publish'])
@@ -1282,7 +1293,9 @@ def test_cli_mirror_forwards_subject_and_contact_email(monkeypatch):
     from fwl_io.cli import main
 
     captured = {}
-    monkeypatch.setattr(mirror_mod, 'mirror_to_dataverse', lambda doi, **k: captured.update(**k))
+    monkeypatch.setattr(
+        mirror_mod, 'mirror_to_dataverse', lambda doi, **k: captured.update(**k)
+    )
     monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
 
     main(
@@ -1336,7 +1349,9 @@ def test_cli_mirror_prints_manifest_ready_dataverse_doi(monkeypatch, capsys):
     import fwl_io.mirror as mirror_mod
     from fwl_io.cli import main
 
-    monkeypatch.setattr(mirror_mod, 'mirror_to_dataverse', lambda *a, **k: 'doi:10.34894/DEMO01')
+    monkeypatch.setattr(
+        mirror_mod, 'mirror_to_dataverse', lambda *a, **k: 'doi:10.34894/DEMO01'
+    )
     monkeypatch.setenv('DATAVERSE_TOKEN', 'tok')
 
     rc = main(['mirror', '10.5281/zenodo.55', '--collection', 'Proteus_Fr'])
@@ -1484,13 +1499,17 @@ def test_a_different_file_of_the_same_name_in_the_draft_stops_the_upload(
     _DataverseHandler.draft_files = [
         {'filename': 'a.dat', 'filesize': 4, 'checksum': {'type': 'MD5', 'value': '0' * 32}}
     ]
-    with pytest.raises(DataverseError, match='holds a file named a.dat that is not the same file'):
+    with pytest.raises(
+        DataverseError, match='holds a file named a.dat that is not the same file'
+    ):
         _mirror(http_server, dataverse_server)
     assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 1
     assert _DataverseHandler.deleted
 
 
-def test_a_gateway_error_is_retried_but_a_rejection_is_not(http_server, dataverse_server, sleeps):
+def test_a_gateway_error_is_retried_but_a_rejection_is_not(
+    http_server, dataverse_server, sleeps
+):
     """A 504 on upload is repeated; a 400 fails at once and rolls the draft back."""
     _DataverseHandler.script = {('POST', '/add'): [504]}
     result, calls = _mirror(http_server, dataverse_server)
@@ -1514,7 +1533,9 @@ def test_retries_run_out_with_a_message_naming_the_bot_check_page(
     from fwl_io.mirror import DataverseRetryableError
 
     _DataverseHandler.script = {('POST', '/add'): ['challenge'] * 5}
-    with pytest.raises(DataverseRetryableError, match='sent 5 time.*in 5 attempts.*bot-check page'):
+    with pytest.raises(
+        DataverseRetryableError, match='sent 5 time.*in 5 attempts.*bot-check page'
+    ):
         _mirror(http_server, dataverse_server)
     assert sleeps == [30.0, 60.0, 120.0, 240.0]
     assert len(_adds(_DataverseHandler.calls, 'a.dat')) == 5
@@ -1727,7 +1748,9 @@ def test_publish_refuses_an_already_published_dataset(dataverse_server, sleeps):
     assert not any(c['path'].endswith('/actions/:publish') for c in calls)
 
 
-def test_an_unconfirmed_publish_keeps_the_dataset(http_server, dataverse_server, sleeps, caplog):
+def test_an_unconfirmed_publish_keeps_the_dataset(
+    http_server, dataverse_server, sleeps, caplog
+):
     """When no publish reply gets through, the dataset may be public, so it is not deleted."""
     _DataverseHandler.script = {('POST', '/actions/:publish'): ['challenge'] * 5}
     with pytest.raises(DataversePublishUnconfirmed, match='publish of doi:10.34894/DEMO01'):
@@ -1747,7 +1770,9 @@ def test_an_extra_file_in_the_draft_stops_the_mirror(http_server, dataverse_serv
     assert _DataverseHandler.deleted
 
 
-def test_a_failed_state_check_rolls_the_draft_back(http_server, dataverse_server, sleeps, caplog):
+def test_a_failed_state_check_rolls_the_draft_back(
+    http_server, dataverse_server, sleeps, caplog
+):
     """No publish request went out, so the draft is known private and is deleted."""
     from fwl_io.mirror import DataverseRetryableError
 
@@ -1825,7 +1850,8 @@ def test_a_draft_file_in_a_folder_or_without_a_name_counts_as_extra(
         {'filesize': 1},
     ]
     with pytest.raises(
-        DataverseError, match=r"not expected \['', 'sub/a.dat'\].*types listed: \['MD5', 'None'\]"
+        DataverseError,
+        match=r"not expected \['', 'sub/a.dat'\].*types listed: \['MD5', 'None'\]",
     ):
         _mirror(http_server, dataverse_server)
     assert _DataverseHandler.deleted
@@ -2049,7 +2075,9 @@ def test_an_accepted_publish_that_stays_a_draft_is_unconfirmed(sleeps, monkeypat
     import requests
 
     seen = []
-    route = _publish_route(seen, lambda *args, **kwargs: _fake_response(200, b'{"status": "OK"}'))
+    route = _publish_route(
+        seen, lambda *args, **kwargs: _fake_response(200, b'{"status": "OK"}')
+    )
     monkeypatch.setattr(requests, 'request', route)
     with pytest.raises(DataversePublishUnconfirmed, match=r'attempted 1 time\(s\).*450 s'):
         DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
@@ -2317,7 +2345,9 @@ def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypa
         'filesize': 4,
         'checksum': {'type': 'MD5', 'value': hashlib.md5(b'AAA\n').hexdigest()},
     }
-    body = json.dumps({'status': 'OK', 'data': [{'directoryLabel': 'sub', 'dataFile': data_file}]})
+    body = json.dumps(
+        {'status': 'OK', 'data': [{'directoryLabel': 'sub', 'dataFile': data_file}]}
+    )
     monkeypatch.setattr(
         requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
     )
@@ -2349,7 +2379,9 @@ def _writes(calls):
     ],
     ids=['cc-by-4.0', 'cc0-1.0'],
 )
-def test_the_draft_gets_the_license_of_its_source(http_server, dataverse_server, rights, name, uri):
+def test_the_draft_gets_the_license_of_its_source(
+    http_server, dataverse_server, rights, name, uri
+):
     """The draft carries the source license, set right after the create and read back."""
     _, calls = _mirror(http_server, dataverse_server, rights=(rights,), publish=False)
     puts = [c for c in calls if c['method'] == 'PUT']
@@ -2362,7 +2394,9 @@ def test_the_draft_gets_the_license_of_its_source(http_server, dataverse_server,
 
 
 @pytest.mark.parametrize(
-    'rights', [(APACHE,), (), (CC_BY, CC0)], ids=['unlisted license', 'no license', 'two licenses']
+    'rights',
+    [(APACHE,), (), (CC_BY, CC0)],
+    ids=['unlisted license', 'no license', 'two licenses'],
 )
 def test_a_license_the_server_cannot_take_stops_before_the_create(
     http_server, dataverse_server, rights
@@ -2412,7 +2446,9 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
 
     monkeypatch.setattr(requests, 'get', fake_get)
     assert _zenodo_record_rights('55', 'http://z/api/records') == CC0
-    assert seen == [('http://z/api/records/55', {'Accept': 'application/vnd.inveniordm.v1+json'})]
+    assert seen == [
+        ('http://z/api/records/55', {'Accept': 'application/vnd.inveniordm.v1+json'})
+    ]
 
 
 @pytest.mark.unit
@@ -2434,7 +2470,11 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
             'CC0',
         ),
         # an inactive license is not a match
-        ({'id': 'cc-by-4.0'}, [{'name': 'CC-BY-4.0', 'uri': 'http://a', 'active': False}], None),
+        (
+            {'id': 'cc-by-4.0'},
+            [{'name': 'CC-BY-4.0', 'uri': 'http://a', 'active': False}],
+            None,
+        ),
         # no id and no URL match nothing, even an entry without rightsIdentifier
         ({}, [{'name': 'CC-BY-4.0', 'uri': 'http://a'}], None),
         # two different licenses matching is not a choice the mirror makes
@@ -2446,7 +2486,10 @@ def test_the_source_license_is_read_in_the_inveniordm_form(monkeypatch):
         # two listed entries under one name are two matches, not one
         (
             {'id': 'cc-by-4.0'},
-            [{'name': 'CC-BY-4.0', 'uri': 'http://a'}, {'name': 'CC-BY-4.0', 'uri': 'http://b'}],
+            [
+                {'name': 'CC-BY-4.0', 'uri': 'http://a'},
+                {'name': 'CC-BY-4.0', 'uri': 'http://b'},
+            ],
             None,
         ),
         # the same, with one entry lacking a uri: still the ValueError
@@ -2489,7 +2532,9 @@ def test_the_license_mapping(rights, licenses, expected):
         assert dataverse_license(rights, licenses, 'Zenodo record 9')['name'] == expected
 
 
-def test_the_license_list_is_retried_after_a_bot_check_page(http_server, dataverse_server, sleeps):
+def test_the_license_list_is_retried_after_a_bot_check_page(
+    http_server, dataverse_server, sleeps
+):
     """The license list read uses the same retry as the other Dataverse calls."""
     _DataverseHandler.script = {('GET', '/api/licenses'): ['challenge']}
     result, calls = _mirror(http_server, dataverse_server, publish=False)

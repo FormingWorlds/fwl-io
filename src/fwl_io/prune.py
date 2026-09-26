@@ -290,7 +290,9 @@ def _existing_root(data_root: str | Path | None) -> Path:
     return root
 
 
-def _matches_subdir(parent_subdir: str, known_subdirs: set[str], case_insensitive: bool) -> bool:
+def _matches_subdir(
+    parent_subdir: str, known_subdirs: set[str], case_insensitive: bool
+) -> bool:
     """True when ``parent_subdir`` names a subdir a manifest declares."""
     if parent_subdir in known_subdirs:
         return True
@@ -539,7 +541,9 @@ def _build(root: Path, *, for_delete: bool = False) -> _Build:
         candidates.append(
             PruneCandidate(path=path, rel=rel.as_posix(), state=state, size=_dir_size(path))
         )
-    lock_problem, lock_warnings = _lock_scan(root, lock_dirname=_LOCK_DIRNAME, operation='prune')
+    lock_problem, lock_warnings = _lock_scan(
+        root, lock_dirname=_LOCK_DIRNAME, operation='prune'
+    )
     symlink_targets: set[Path] = set()
     if for_delete:
         symlink_targets, symlink_error = _referenced_symlink_targets(referenced)
@@ -748,7 +752,11 @@ def _remove_checked(
 
 
 def _unchanged(
-    path: Path, before: os.stat_result, parent_fd: int, root: Path, parent_parts: tuple[str, ...]
+    path: Path,
+    before: os.stat_result,
+    parent_fd: int,
+    root: Path,
+    parent_parts: tuple[str, ...],
 ) -> bool:
     """True when ``path`` and its held parent are still the entries the checks read.
 
@@ -941,7 +949,8 @@ def apply_prune(
     stray = next((c for c in report.candidates if not _inside(c.path, root)), None)
     if stray is not None:
         return _refused(
-            report, f'the plan lists {stray.path}, outside {root}; it was built for another root'
+            report,
+            f'the plan lists {stray.path}, outside {root}; it was built for another root',
         )
     build = _build(root, for_delete=True)
     current = build.report()

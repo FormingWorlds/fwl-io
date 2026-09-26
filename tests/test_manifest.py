@@ -107,7 +107,9 @@ def test_a_table_named_subdir_is_an_ordinary_directory_level(tmp_path):
     """The rejection is about a declared location, not about the word itself."""
     at_root = load_manifest(_write(tmp_path, '[subdir.demo]\nzenodo = "10.5281/zenodo.1"\n'))
     assert at_root[0].subdir == 'subdir/demo'
-    nested = load_manifest(_write(tmp_path, '[g.d]\n[g.d.subdir]\nzenodo = "10.5281/zenodo.1"\n'))
+    nested = load_manifest(
+        _write(tmp_path, '[g.d]\n[g.d.subdir]\nzenodo = "10.5281/zenodo.1"\n')
+    )
     assert nested[0].subdir == 'g/d/subdir'
     # Discrimination: the same word as a field, not a table, is still refused.
     with pytest.raises(ValueError, match='"subdir" is not a manifest field'):
@@ -277,7 +279,9 @@ def test_unusable_name_rejected(tmp_path, value):
         load_manifest(_write(tmp_path, bad))
     # An absent name falls back to the key rather than to an empty string, and a
     # name with text in it is kept as written.
-    assert load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\n'))[0].name == 'g.d'
+    assert (
+        load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\n'))[0].name == 'g.d'
+    )
     named = '[g.d]\nname = "Demo tracks"\nzenodo = "10.5281/zenodo.1"\n'
     assert load_manifest(_write(tmp_path, named))[0].name == 'Demo tracks'
 
@@ -418,9 +422,9 @@ def test_files_and_extract_cannot_be_combined(tmp_path):
 
 def test_registry_must_match_the_files_list(tmp_path):
     """A registry naming other files than ``files`` is refused, in either direction."""
-    ds = load_manifest(_write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat"]\n'))[
-        0
-    ]
+    ds = load_manifest(
+        _write(tmp_path, '[g.d]\nzenodo = "10.5281/zenodo.1"\nfiles = ["a.dat"]\n')
+    )[0]
     ds.registry_path.write_text('a.dat sha256:aa\n')
     assert ds.registry() == {'a.dat': 'sha256:aa'}
     ds.registry_path.write_text('a.dat sha256:aa\nb.dat sha256:bb\n')
@@ -466,7 +470,10 @@ def test_fetch_for_fetches_only_the_listed_files(http_server, tmp_path, monkeypa
         'required_by = ["mymodel"]\nfiles = ["a.dat", "b.dat"]\n',
     )
     written = sync_manifest(manifest_path, api_base=f'{base_url}api/records')
-    assert load_registry(written[0]) == {'a.dat': checksums['a.dat'], 'b.dat': checksums['b.dat']}
+    assert load_registry(written[0]) == {
+        'a.dat': checksums['a.dat'],
+        'b.dat': checksums['b.dat'],
+    }
 
     ds = load_manifest(manifest_path)[0]
     data_root = tmp_path / 'data'
@@ -694,7 +701,9 @@ def test_case_only_difference_across_providers_conflicts(tmp_path, monkeypatch):
 def test_three_providers_claiming_one_location_are_all_named(tmp_path, monkeypatch):
     """A three-way location collision drops and names every claimant."""
     eps = [
-        _FakeEntryPoint(f'package-{x}', lambda x=x: _provider_manifest(tmp_path, x, _SHARED_EOS))
+        _FakeEntryPoint(
+            f'package-{x}', lambda x=x: _provider_manifest(tmp_path, x, _SHARED_EOS)
+        )
         for x in 'abc'
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
@@ -762,7 +771,9 @@ def test_check_for_an_uninvolved_model_ignores_the_conflict(tmp_path, monkeypatc
     assert report.ok
 
 
-def test_check_for_a_model_that_needs_a_dropped_dataset_reports_the_conflict(tmp_path, monkeypatch):
+def test_check_for_a_model_that_needs_a_dropped_dataset_reports_the_conflict(
+    tmp_path, monkeypatch
+):
     """A conflict that drops a dataset the model reads fails its check."""
     from fwl_io.check import check_for
 
@@ -808,7 +819,9 @@ def test_plan_relocations_survives_a_provider_conflict(tmp_path, monkeypatch):
     assert set(plan.manifest_errors) == {'package-a', 'package-b'}
 
 
-def test_fetch_for_a_model_that_needs_a_dropped_dataset_names_the_conflict(tmp_path, monkeypatch):
+def test_fetch_for_a_model_that_needs_a_dropped_dataset_names_the_conflict(
+    tmp_path, monkeypatch
+):
     """A model served by a dropped provider fails with the conflict in the message."""
     _colliding_providers(tmp_path, monkeypatch)
 
@@ -946,7 +959,9 @@ def test_three_entries_with_one_name_are_all_dropped_and_named(tmp_path, monkeyp
         assert all(f'data-{x}' in message for x in 'abc')
 
 
-def test_duplicate_name_without_metadata_still_says_which_entries_collided(tmp_path, monkeypatch):
+def test_duplicate_name_without_metadata_still_says_which_entries_collided(
+    tmp_path, monkeypatch
+):
     """With no distribution metadata the entry-point targets identify the entries."""
     eps = [
         _FakeEntryPoint(
@@ -1085,7 +1100,9 @@ def test_broken_provider_does_not_block_a_working_namesake(tmp_path, monkeypatch
 
     _stub_check_layer(tmp_path, monkeypatch)
     report = check_for('mors', data_root=tmp_path / 'data')
-    assert set(report.datasets) == {'star.tracks.baraffe'}, 'the working namesake is still checked'
+    assert set(report.datasets) == {'star.tracks.baraffe'}, (
+        'the working namesake is still checked'
+    )
     assert set(report.manifest_errors) == {'manifest'}, 'the broken namesake is still reported'
     assert not report.ok, 'a load failure that may have served the model fails the check'
 
@@ -1149,7 +1166,8 @@ def test_fetch_for_prints_a_shared_conflict_message_once(tmp_path, monkeypatch):
 def test_fetch_for_reports_an_unreadable_manifest_instead_of_nothing(tmp_path, monkeypatch):
     """An empty result while a manifest is unreadable names that manifest."""
     stale = _write(
-        tmp_path, '[star.tracks.demo]\nsubdir = "star/tracks/demo"\nzenodo = "10.5281/zenodo.1"\n'
+        tmp_path,
+        '[star.tracks.demo]\nsubdir = "star/tracks/demo"\nzenodo = "10.5281/zenodo.1"\n',
     )
     monkeypatch.setattr(
         'fwl_io.manifest.entry_points',
@@ -1171,7 +1189,9 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
     )
     monkeypatch.setattr(
         'fwl_io.manifest._discover_all',
-        lambda: manifest._Discovery({'shared': [wanted]}, {'mymodel': 'unreadable manifest'}, {}),
+        lambda: manifest._Discovery(
+            {'shared': [wanted]}, {'mymodel': 'unreadable manifest'}, {}
+        ),
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
 
@@ -1181,7 +1201,8 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
     assert '1 dataset(s) arrived' in str(excinfo.value)
     # Discrimination: the same call without the broken provider returns the data.
     monkeypatch.setattr(
-        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'shared': [wanted]}, {}, {})
+        'fwl_io.manifest._discover_all',
+        lambda: manifest._Discovery({'shared': [wanted]}, {}, {}),
     )
     fetched = fetch_for('mymodel', data_root=data_root)
     assert [p.name for p in fetched[wanted.key]] == ['a.dat']
@@ -1197,7 +1218,9 @@ def test_fetch_for_reports_a_dataset_failure_and_an_unreadable_manifest_together
     broken.registry_path.unlink()  # the dataset now fails on its missing registry
     monkeypatch.setattr(
         'fwl_io.manifest._discover_all',
-        lambda: manifest._Discovery({'shared': [broken]}, {'mymodel': 'unreadable manifest'}, {}),
+        lambda: manifest._Discovery(
+            {'shared': [broken]}, {'mymodel': 'unreadable manifest'}, {}
+        ),
     )
     with pytest.raises(RuntimeError) as excinfo:
         fetch_for('mymodel', data_root=tmp_path / 'data')
@@ -1249,7 +1272,9 @@ def test_fetch_for_resolves_an_archive_dataset_at_the_key_derived_path(
     fetched = fetch_for('demo', data_root=data_root)
 
     version_dir = data_root / 'star/tracks/demo/r1234567'
-    assert sorted(p.relative_to(version_dir).as_posix() for p in fetched['star.tracks.demo']) == [
+    assert sorted(
+        p.relative_to(version_dir).as_posix() for p in fetched['star.tracks.demo']
+    ) == [
         'm0p1.txt',
         'nested/m1p0.txt',
     ]
@@ -1529,7 +1554,9 @@ def test_declaring_the_implemented_schema_makes_an_unknown_field_a_typo(tmp_path
 
 def test_the_sharper_message_reaches_nested_and_grouping_tables(tmp_path):
     """The declaration sharpens every unknown-field message, at any depth."""
-    nested = 'manifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_bye = ["p"]\n'
+    nested = (
+        'manifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\nrequired_bye = ["p"]\n'
+    )
     with pytest.raises(ManifestSchemaError, match='misspelt') as deep:
         load_manifest(_write(tmp_path, nested))
     assert 'upgrade fwl-io' not in str(deep.value), (
@@ -1571,9 +1598,7 @@ def test_the_schema_key_below_the_root_is_misplaced_rather_than_misspelt(tmp_pat
     with pytest.raises(ManifestSchemaError, match='move the line above the first table'):
         load_manifest(_write(tmp_path, in_dataset))
 
-    in_grouping = (
-        'manifest_schema = 1\n[grp]\nmanifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\n'
-    )
+    in_grouping = 'manifest_schema = 1\n[grp]\nmanifest_schema = 1\n[grp.demo]\nzenodo = "10.5281/zenodo.1"\n'
     with pytest.raises(ManifestSchemaError, match='move the line above the first table') as grp:
         load_manifest(_write(tmp_path, in_grouping))
     assert 'misspelt' not in str(grp.value)
@@ -1601,8 +1626,12 @@ def test_older_schema_refusal_names_both_numbers(tmp_path, monkeypatch):
     with pytest.raises(ManifestSchemaError) as excinfo:
         load_manifest(_write(tmp_path, f'manifest_schema = 1\n{DEMO}'))
     message = str(excinfo.value)
-    assert 'manifest_schema 1' in message, 'the refusal must name the schema the manifest declares'
-    assert 'manifest schema 3' in message, 'the refusal must name the schema the reader implements'
+    assert 'manifest_schema 1' in message, (
+        'the refusal must name the schema the manifest declares'
+    )
+    assert 'manifest schema 3' in message, (
+        'the refusal must name the schema the reader implements'
+    )
     assert 'schema versions table' in message, 'the refusal must say where to look'
     # It is not the upgrade case: the reader is newer, not older.
     assert 'upgrade fwl-io' not in message
@@ -1675,7 +1704,9 @@ def test_fetch_for_drops_progress_without_stderr(tmp_path, monkeypatch, caplog):
     assert 'fwl-io[progress]' not in caplog.text
 
 
-def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(tmp_path, monkeypatch, caplog):
+def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(
+    tmp_path, monkeypatch, caplog
+):
     """Missing tqdm is still named when stderr is also gone; logging never falls back to stdout."""
     seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
     monkeypatch.setattr('pooch.downloaders.tqdm', None)
@@ -1688,7 +1719,9 @@ def test_fetch_for_names_tqdm_when_both_tqdm_and_stderr_are_missing(tmp_path, mo
     assert 'fwl-io[progress]' in caplog.text
 
 
-def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(tmp_path, monkeypatch, caplog):
+def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(
+    tmp_path, monkeypatch, caplog
+):
     """Without pooch's private tqdm binding the bar is dropped, but tqdm is not named."""
     seen = _fetch_for_progress_probe(tmp_path, monkeypatch)
     monkeypatch.delattr('pooch.downloaders.tqdm', raising=False)

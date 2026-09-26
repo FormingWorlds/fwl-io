@@ -302,9 +302,9 @@ def test_two_pinned_versions_coexist(sample_files, tmp_path):
     base_url, registry = sample_files
     other_recid = '15729115'
     first = _fetcher(base_url, registry, tmp_path, zenodo=ZENODO).fetch('alpha.dat')
-    second = _fetcher(base_url, registry, tmp_path, zenodo=f'10.5281/zenodo.{other_recid}').fetch(
-        'alpha.dat'
-    )
+    second = _fetcher(
+        base_url, registry, tmp_path, zenodo=f'10.5281/zenodo.{other_recid}'
+    ).fetch('alpha.dat')
     assert first.parent == tmp_path / SUBDIR / f'r{RECID}'
     assert second.parent == tmp_path / SUBDIR / f'r{other_recid}'
     assert first != second
@@ -437,7 +437,9 @@ def test_shared_cache_lookup_uses_version_directory(sample_files, tmp_path, monk
     assert path.read_bytes() == b'0.1 0.2 0.3\n'
 
 
-def test_cache_at_bare_subdir_is_ignored_for_pinned_dataset(sample_files, tmp_path, monkeypatch):
+def test_cache_at_bare_subdir_is_ignored_for_pinned_dataset(
+    sample_files, tmp_path, monkeypatch
+):
     """A cache populated at the legacy bare path is not used by a pinned fetch."""
     base_url, registry = sample_files
     cache_root = tmp_path / 'shared_cache'
@@ -617,7 +619,11 @@ def test_a_plain_stamp_does_not_pass_for_an_extracted_tree(http_server, tmp_path
     base_url, root = http_server
     registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
     plain = create_fetcher(
-        subdir=SUBDIR, registry=registry, base_urls=[base_url], zenodo=ZENODO, data_root=tmp_path
+        subdir=SUBDIR,
+        registry=registry,
+        base_urls=[base_url],
+        zenodo=ZENODO,
+        data_root=tmp_path,
     )
     plain.fetch_all()
     version_dir = tmp_path / VERSIONED
@@ -759,7 +765,9 @@ def test_a_stamp_that_is_not_an_object_is_healed_not_raised(
     # make the dataset unservable. Pointing this at an empty root instead would
     # raise the same error whatever the stamp reader did.
     (version_dir / '.fwl-io.json').write_text(stamp_body)
-    assert (version_dir / 'm0p1.txt').is_file(), 'the tree must be intact, or this proves nothing'
+    assert (version_dir / 'm0p1.txt').is_file(), (
+        'the tree must be intact, or this proves nothing'
+    )
     with pytest.raises(OfflineDataError):
         _archive_fetcher(base_url, registry, tmp_path, 'tar').fetch_all(offline=True)
 
@@ -823,7 +831,9 @@ def test_a_rebuild_rechecks_the_tree_under_the_lock(http_server, tmp_path, monke
     paths = fetcher.fetch_all(offline=True)
 
     assert sorted(p.name for p in paths) == ['m0p1.txt', 'm1p0.txt']
-    assert fetcher.provenance()[0]['source'] == 'local', 'it served the tree, it did not rebuild'
+    assert fetcher.provenance()[0]['source'] == 'local', (
+        'it served the tree, it did not rebuild'
+    )
 
 
 def test_an_archive_fetch_proceeds_when_the_lock_manager_is_unavailable(
@@ -850,7 +860,9 @@ def test_an_archive_fetch_proceeds_when_the_lock_manager_is_unavailable(
     assert (tmp_path / VERSIONED / '.fwl-io.json').is_file(), 'the stamp is still written'
 
 
-def test_a_stamp_at_an_unknown_schema_costs_a_refetch_and_says_so(http_server, tmp_path, caplog):
+def test_a_stamp_at_an_unknown_schema_costs_a_refetch_and_says_so(
+    http_server, tmp_path, caplog
+):
     """An unreadable schema means the whole dataset comes down again, loudly.
 
     This is the price of refusing to read a stamp written to rules this

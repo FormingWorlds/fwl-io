@@ -255,9 +255,7 @@ def _lock_scan(
         and the warning lines for the report.
     """
     lock_dir = root / lock_dirname
-    unlocked = (
-        f'runs without a lock, which {operation} cannot see; do not fetch while {operation} runs'
-    )
+    unlocked = f'runs without a lock, which {operation} cannot see; do not fetch while {operation} runs'
     warnings: list[str] = []
     unwritable = 0
 
@@ -307,7 +305,9 @@ def _lock_scan(
         except OSError as exc:
             return _result(f'cannot test lock file {path}: {exc}')
         if not stat.S_ISREG(entry.st_mode):
-            return _result(f'lock file {path} is not a regular file; fetch locks cannot be checked')
+            return _result(
+                f'lock file {path} is not a regular file; fetch locks cannot be checked'
+            )
         try:
             fd = _open_lock_fd(path)
         except FileNotFoundError:

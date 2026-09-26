@@ -43,7 +43,9 @@ def test_non_zenodo_doi_rejected():
 def test_registry_fetched_from_version_doi(http_server):
     base_url, root = http_server
     _serve_record(root, 1234567, VERSION_RECORD)
-    registry = fetch_zenodo_registry('10.5281/zenodo.1234567', api_base=f'{base_url}api/records')
+    registry = fetch_zenodo_registry(
+        '10.5281/zenodo.1234567', api_base=f'{base_url}api/records'
+    )
     assert registry == {'alpha.dat': 'md5:aaa111', 'beta.dat': 'md5:bbb222'}
 
 

@@ -136,7 +136,9 @@ def test_list_shows_declared_name_but_not_the_key_fallback(tmp_path, capsys, mon
     assert lines[key_line + 1].strip() == name
     # The undeclared dataset falls back to its key, so its key line is not
     # followed by a repeat of the key.
-    fallback_line = next(i for i, line in enumerate(lines) if line.strip().startswith('unlabelled'))
+    fallback_line = next(
+        i for i, line in enumerate(lines) if line.strip().startswith('unlabelled')
+    )
     following = lines[fallback_line + 1] if fallback_line + 1 < len(lines) else ''
     assert following.strip() != 'unlabelled'
     assert out.count('unlabelled') == 1
@@ -148,7 +150,9 @@ def test_list_shows_declared_name_but_not_the_key_fallback(tmp_path, capsys, mon
     ['\\n', '\\t', '\\r', '\\u2028'],
     ids=['newline', 'tab', 'cr', 'line-separator'],
 )
-def test_list_strips_control_characters_from_a_declared_name(escape, tmp_path, capsys, monkeypatch):
+def test_list_strips_control_characters_from_a_declared_name(
+    escape, tmp_path, capsys, monkeypatch
+):
     """A name carrying a control character cannot inject an extra line into the listing."""
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(
@@ -289,7 +293,9 @@ def test_check_unknown_module_exits_nonzero(capsys, monkeypatch):
     assert code == 1
     err = capsys.readouterr()
     assert 'no datasets' in err.err
-    assert 'all data present' not in err.out, 'nothing was checked, so nothing may be declared ok'
+    assert 'all data present' not in err.out, (
+        'nothing was checked, so nothing may be declared ok'
+    )
 
 
 @pytest.mark.unit
@@ -391,7 +397,9 @@ def test_check_exits_zero_and_says_which_verdict_it_reached(tmp_path, capsys, mo
 
 
 @pytest.mark.unit
-def test_relocate_exits_nonzero_when_a_manifest_could_not_be_read(tmp_path, capsys, monkeypatch):
+def test_relocate_exits_nonzero_when_a_manifest_could_not_be_read(
+    tmp_path, capsys, monkeypatch
+):
     """A run that could not read a manifest is not a clean run.
 
     Nothing moved and nothing was found, which on its own is what a finished
@@ -700,7 +708,9 @@ def test_fetch_reports_both_conflicting_providers_as_not_used(tmp_path, capsys, 
 
 
 @pytest.mark.unit
-def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, capsys, monkeypatch):
+def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(
+    tmp_path, capsys, monkeypatch
+):
     """A real cross-provider conflict, driven through main(), reads as NOT USED."""
     monkeypatch.setattr(
         'fwl_io.manifest.entry_points', lambda group: _conflicting_providers(tmp_path, 'demo')

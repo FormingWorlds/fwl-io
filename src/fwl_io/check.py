@@ -273,7 +273,9 @@ def check_dataset(fetcher: Fetcher, key: str = '') -> DatasetCheck:
             # rather than as zero items, which would read as complete.
             archive_name = next(iter(fetcher.registry))
             files = (FileCheck(archive_name, fetcher.target_dir / archive_name, MISSING),)
-            return DatasetCheck(key, fetcher.subdir, fetcher.target_dir, files, verifiable=False)
+            return DatasetCheck(
+                key, fetcher.subdir, fetcher.target_dir, files, verifiable=False
+            )
         checks = [
             FileCheck(name, fetcher.target_dir / name, _member_state(fetcher.target_dir / name))
             for name in sorted(members)
