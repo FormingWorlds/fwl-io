@@ -36,7 +36,7 @@ class ArchiveError(RuntimeError):
 
 def _escapes(dest_resolved: Path, member_name: str) -> bool:
     """True when ``member_name`` would resolve outside ``dest_resolved``."""
-    if member_name.startswith('/') or member_name.startswith('\\'):
+    if member_name.startswith(('/', '\\')):
         return True
     target = (dest_resolved / member_name).resolve()
     return target != dest_resolved and not target.is_relative_to(dest_resolved)

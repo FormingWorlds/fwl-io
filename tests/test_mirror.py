@@ -277,15 +277,15 @@ def _mirror(http_server, dataverse_server, **overrides):
     dv_url, calls = dataverse_server
     rights = overrides.pop('rights', (CC_BY,))
     _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'}, rights)
-    kwargs = dict(
-        dataverse_url=dv_url,
-        collection='Proteus_Fr',
-        token='secret-token',
-        contact_name='PROTEUS',
-        contact_email='contact@example.org',
-        api_base=f'{base_url}api/records',
-        base_urls=[base_url],
-    )
+    kwargs = {
+        'dataverse_url': dv_url,
+        'collection': 'Proteus_Fr',
+        'token': 'secret-token',
+        'contact_name': 'PROTEUS',
+        'contact_email': 'contact@example.org',
+        'api_base': f'{base_url}api/records',
+        'base_urls': [base_url],
+    }
     kwargs.update(overrides)
     result = mirror_to_dataverse('10.5281/zenodo.55', **kwargs)
     return result, calls
