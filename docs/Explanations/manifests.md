@@ -92,8 +92,8 @@ FWL_DATA/
     refractive/<dataset>/r<recid>/
   atmos_chem/                        # chemistry networks and cross-sections
   interior/
-    eos/<dataset>/r<recid>/
     eos/dk09_1tpa_elec_free/<set>/r<recid>/
+    eos/<dataset>/r<recid>/
     mass_radius/zeng_2019/r<recid>/
     melting_curves/<dataset>/r<recid>/
   star/
