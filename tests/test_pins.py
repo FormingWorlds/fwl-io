@@ -546,14 +546,8 @@ def test_shared_manifest_pins_are_consistent():
     assert all(len(dois) == 1 for dois in by_record.values())
 
 
-def test_only_phoenix_and_the_new_318_band_files_are_unpinned():
-    """Every shared dataset has a DataverseNL mirror except PHOENIX and four 318-band files."""
+def test_only_phoenix_is_unpinned_in_the_shared_manifest():
+    """Every shared dataset has a DataverseNL mirror except the PHOENIX spectra."""
     datasets = load_manifest(shared_manifest_path())
-    assert {ds.key for ds in datasets if not ds.dataverse} == {
-        'star.spectra.phoenix',
-        'atmos_clim.spectral_files.legacy.318',
-        'atmos_clim.spectral_files.mallard.318',
-        'atmos_clim.spectral_files.reach.318',
-        'atmos_clim.spectral_files.kynesgrove.318',
-    }
+    assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
     assert len(datasets) > 1
