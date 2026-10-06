@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has seven subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has nine subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when a server could not be read. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -113,6 +113,16 @@ DATAVERSE_TOKEN=... fwl-io mirror-publish <persistent-id> \
 ```
 
 Publishes an existing Dataverse draft by its persistent id: it never creates a dataset, so it is the second step of a create-draft-then-publish workflow, run once a draft created by `fwl-io mirror --no-publish` has been reviewed. `<persistent-id>` must be of the form `doi:<prefix>/<suffix>`, for example `doi:10.34894/EXAMPLE`. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. `--version-type` is `major` by default and accepts only `major` or `minor`. Fails clearly if the dataset is already published or the persistent id does not resolve to a draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
+
+## fwl-io check-mirrors
+
+```bash
+fwl-io check-mirrors [--dataverse-url URL]
+```
+
+Checks every dataset with a `dataverse` pin in the installed manifests. The pinned DOI must name a released Dataverse dataset whose description carries the note every mirror has, "Mirror of Zenodo deposit <doi>" with the dataset's Zenodo DOI, and which holds every file of the registry once and unrestricted: with the registry checksum where the server uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A same-size change of content passes this check; the fetch still verifies each downloaded file against the registry. The command reads only published data and needs no token, and it reads each Zenodo record once, also when that read fails.
+
+It prints one line per wrong pin (FAIL), one per pin that could not be read for a transient reason (UNREACHABLE), the counts, and the datasets without a pin, which a fallback never reaches; a manifest that fails to load is a FAIL. A transient reason is, from either server, an HTTP 408, 429 or 5xx, a lost connection, a timeout, or a cut body; from DataverseNL also the bot-check page or another HTML page in place of the API answer, and from Zenodo a non-JSON body. A certificate failure on either read is tried again up to twice, 30 s apart: a pin served after such a retry is listed with a WARNING line, and one that fails on every attempt is a FAIL. Once a host has failed every attempt, later reads of it in the same run are tried once, without the waits, and their WARNING line says so. A pin may be written with or without a `doi:` prefix. Any other failure makes the pin a FAIL. Exit is 1 when a pin is wrong, a manifest fails to load or no pin was checked, 3 when no pin is wrong but some could not be checked, and 0 when every pin is served. The weekly nightly runs the same check on the shared manifest: it skips when some pins could not be checked, and fails when no pin was served, also in a full outage.
 
 ## fwl-io --version
 

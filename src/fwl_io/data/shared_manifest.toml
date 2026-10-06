@@ -35,82 +35,102 @@ manifest_schema = 1
 [atmos_clim.spectral_files.frostflow.16]
 name = "SOCRATES spectral files Frostflow, 16 bands"
 zenodo = "10.5281/zenodo.15799743"
+dataverse = "10.34894/DX7CDY"
 
 [atmos_clim.spectral_files.frostflow.48]
 name = "SOCRATES spectral files Frostflow, 48 bands"
 zenodo = "10.5281/zenodo.15696415"
+dataverse = "10.34894/MFHZIN"
 
 [atmos_clim.spectral_files.frostflow.256]
 name = "SOCRATES spectral files Frostflow, 256 bands"
 zenodo = "10.5281/zenodo.15799754"
+dataverse = "10.34894/V9KQKY"
 
 [atmos_clim.spectral_files.frostflow.4096]
 name = "SOCRATES spectral files Frostflow, 4096 bands"
 zenodo = "10.5281/zenodo.15799776"
+dataverse = "10.34894/NATTTQ"
 
 [atmos_clim.spectral_files.dayspring.16]
 name = "SOCRATES spectral files Dayspring, 16 bands"
 zenodo = "10.5281/zenodo.15799318"
+dataverse = "10.34894/VRDDRJ"
 
 [atmos_clim.spectral_files.dayspring.48]
 name = "SOCRATES spectral files Dayspring, 48 bands"
 zenodo = "10.5281/zenodo.15721749"
+dataverse = "10.34894/ES4SKG"
 
 [atmos_clim.spectral_files.dayspring.256]
 name = "SOCRATES spectral files Dayspring, 256 bands"
 zenodo = "10.5281/zenodo.15799474"
+dataverse = "10.34894/9FGULL"
 
 [atmos_clim.spectral_files.dayspring.4096]
 name = "SOCRATES spectral files Dayspring, 4096 bands"
 zenodo = "10.5281/zenodo.15799495"
+dataverse = "10.34894/JXMS4R"
 
 [atmos_clim.spectral_files.honeyside.16]
 name = "SOCRATES spectral files Honeyside, 16 bands"
 zenodo = "10.5281/zenodo.15799607"
+dataverse = "10.34894/WDE4CC"
 
 [atmos_clim.spectral_files.honeyside.48]
 name = "SOCRATES spectral files Honeyside, 48 bands"
 zenodo = "10.5281/zenodo.15799652"
+dataverse = "10.34894/UBSSB2"
 
 [atmos_clim.spectral_files.honeyside.256]
 name = "SOCRATES spectral files Honeyside, 256 bands"
 zenodo = "10.5281/zenodo.15799731"
+dataverse = "10.34894/1KKSYT"
 
 [atmos_clim.spectral_files.honeyside.4096]
 name = "SOCRATES spectral files Honeyside, 4096 bands"
 zenodo = "10.5281/zenodo.15696457"
+dataverse = "10.34894/2WO9EC"
 
 [atmos_clim.spectral_files.oak.318]
 name = "SOCRATES spectral files Oak, 318 bands"
 zenodo = "10.5281/zenodo.15743843"
+dataverse = "10.34894/K3UKBX"
 
 [interior.eos.dk09_1tpa_elec_free.mgsio3_wolf_bower_2018]
 name = "MgSiO3 lookup tables, Wolf & Bower (2018), 1TPa-dK09-elec-free"
 zenodo = "10.5281/zenodo.15877374"
+dataverse = "10.34894/QYFQYJ"
 
 [interior.eos.dk09_1tpa_elec_free.mgsio3_wolf_bower_2018_400gpa]
 name = "MgSiO3 lookup tables, Wolf & Bower (2018), 400 GPa, 1TPa-dK09-elec-free"
 zenodo = "10.5281/zenodo.15877424"
+dataverse = "10.34894/S12CQG"
 
 [interior.eos.dk09_1tpa_elec_free.mgsio3_wolf_bower_2018_1tpa]
 name = "MgSiO3 P-S lookup tables, Wolf & Bower (2018), 1 TPa"
 zenodo = "10.5281/zenodo.19473625"
+dataverse = "10.34894/CAPTKK"
 
 [interior.melting_curves.monteux_plus_600]
 name = "Melting curves, Monteux+600"
 zenodo = "10.5281/zenodo.15728091"
+dataverse = "10.34894/ES4HFM"
 
 [interior.melting_curves.monteux_minus_600]
 name = "Melting curves, Monteux-600"
 zenodo = "10.5281/zenodo.15728138"
+dataverse = "10.34894/Q1PIJ2"
 
 [interior.melting_curves.wolf_bower_2018]
 name = "Melting curves, Wolf & Bower (2018)"
 zenodo = "10.5281/zenodo.15728072"
+dataverse = "10.34894/6VJ51M"
 
 [star.spectra.named]
 name = "Stellar spectra of named stars"
 zenodo = "10.5281/zenodo.15721440"
+dataverse = "10.34894/BC1DEH"
 
 [star.spectra.phoenix]
 name = "PHOENIX stellar spectra"
@@ -119,39 +139,48 @@ zenodo = "10.5281/zenodo.17674612"
 [star.spectra.muscles]
 name = "MUSCLES stellar spectra"
 zenodo = "10.5281/zenodo.17802209"
+dataverse = "10.34894/FZ9G3L"
 
 [star.spectra.solar]
 name = "Solar spectra"
 zenodo = "10.5281/zenodo.17981836"
+dataverse = "10.34894/37SUKC"
 
 [interior.eos.wolf_bower_2018_1tpa]
 name = "MgSiO3 equation of state, Wolf & Bower (2018), 1 TPa"
 zenodo = "10.5281/zenodo.17417017"
+dataverse = "10.34894/CWHRCE"
 
 [interior.eos.rtpress_melt_100tpa]
 name = "MgSiO3 melt equation of state, RTPress, 100 TPa"
 zenodo = "10.5281/zenodo.18819027"
+dataverse = "10.34894/HJ7YIP"
 
 [interior.eos.paleos_mgsio3]
 name = "PALEOS MgSiO3 two-phase equation of state"
 zenodo = "10.5281/zenodo.19680050"
+dataverse = "10.34894/JXV4EJ"
 
 [interior.eos.paleos_iron]
 name = "PALEOS iron equation of state"
 zenodo = "10.5281/zenodo.22776069"
+dataverse = "10.34894/P5RKBY"
 files = ["paleos_iron_eos_table_pt.dat"]
 
 [interior.eos.paleos_mgsio3_unified]
 name = "PALEOS MgSiO3 unified equation of state"
 zenodo = "10.5281/zenodo.22776069"
+dataverse = "10.34894/P5RKBY"
 files = ["paleos_mgsio3_eos_table_pt.dat"]
 
 [interior.eos.paleos_h2o]
 name = "PALEOS water equation of state"
 zenodo = "10.5281/zenodo.22776069"
+dataverse = "10.34894/P5RKBY"
 files = ["paleos_water_eos_table_pt.dat"]
 
 [interior.eos.chabrier_2021_hhe]
 name = "Chabrier H/He equation of state tables"
 zenodo = "10.5281/zenodo.19135021"
+dataverse = "10.34894/VFKWLJ"
 extract = "tar"

@@ -195,6 +195,14 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_mirrors(args: argparse.Namespace) -> int:
+    from fwl_io.pins import check_mirrors
+
+    report = check_mirrors(args.dataverse_url)
+    print(report.summary())
+    return report.exit_code
+
+
 def _cmd_mirror_publish(args: argparse.Namespace) -> int:
     from fwl_io.mirror import publish_existing_dataverse_draft
 
@@ -323,6 +331,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Dataverse publish version bump: 'major' or 'minor'",
     )
     p_mirror_publish.set_defaults(func=_cmd_mirror_publish)
+
+    p_check_mirrors = sub.add_parser(
+        'check-mirrors',
+        help='check that every pinned Dataverse mirror serves its registry; list unpinned datasets '
+        '(exit 1 wrong pin, 3 a pin could not be read)',
+    )
+    p_check_mirrors.add_argument(
+        '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
+    )
+    p_check_mirrors.set_defaults(func=_cmd_check_mirrors)
 
     args = parser.parse_args(argv)
     try:

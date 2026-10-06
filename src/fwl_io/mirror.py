@@ -294,7 +294,8 @@ class DataverseClient:
 
     @property
     def _headers(self) -> dict:
-        return {'X-Dataverse-key': self.token}
+        # Published data needs no token; an empty key would be refused as invalid.
+        return {'X-Dataverse-key': self.token} if self.token else {}
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         """Call one Dataverse native-API endpoint and return its decoded body.
@@ -383,12 +384,14 @@ class DataverseClient:
         except ValueError:
             raise DataverseError(
                 f'Dataverse {method} {path} returned {response.status_code} with a '
-                f'non-JSON body: {response.text[:500]}'
+                f'non-JSON body: {response.text[:500]}',
+                response.status_code,
             ) from None
         if not isinstance(body, dict):
             raise DataverseError(
                 f'Dataverse {method} {path} returned {response.status_code} with a '
-                f'non-object JSON body: {response.text[:500]}'
+                f'non-object JSON body: {response.text[:500]}',
+                response.status_code,
             )
         return body
 
