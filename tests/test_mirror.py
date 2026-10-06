@@ -2608,12 +2608,21 @@ def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path,
 
 
 def _zip_bytes() -> bytes:
-    """Return a small zip archive with two members."""
+    """Return a small zip archive with two members, the same bytes on every call."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w') as archive:
-        archive.writestr('a/one.txt', 'one\n')
-        archive.writestr('two.txt', 'two\n')
+        archive.writestr(zipfile.ZipInfo('a/one.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'one\n')
+        archive.writestr(zipfile.ZipInfo('two.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'two\n')
     return buf.getvalue()
+
+
+@pytest.mark.unit
+def test_the_zip_helper_gives_the_same_bytes_at_any_time(monkeypatch):
+    """The zip tests build the archive more than once, so its bytes must not follow the clock."""
+    first = _zip_bytes()
+    monkeypatch.setattr('time.time', lambda: 2e9)
+    assert _zip_bytes() == first
+    assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ['a/one.txt', 'two.txt']
 
 
 def test_a_record_with_a_zip_mirrors_to_a_draft_holding_the_zip(http_server, dataverse_server):
