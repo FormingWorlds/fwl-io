@@ -96,12 +96,14 @@ FWL_DATA/
     eos/<dataset>/r<recid>/
     mass_radius/zeng_2019/r<recid>/
     melting_curves/<dataset>/r<recid>/
+  interior_struct/
+    eos/seager_2007/r<recid>/        # the PROTEUS copy of interior/eos/seager_2007
   star/
     tracks/<dataset>/r<recid>/
     spectra/<dataset>/r<recid>/
   observe/
     exoplanet_reference/r<recid>/
-    mass_radius/zeng_2019/r<recid>/
+    mass_radius/zeng_2019/r<recid>/  # the PROTEUS copy of interior/mass_radius/zeng_2019
   outgas/  escape/  orbit/           # created when their first dataset lands
 ```
 
