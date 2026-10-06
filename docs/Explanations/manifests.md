@@ -75,7 +75,7 @@ For every requested file:
 
 This section is the target layout specification: new datasets and migrating models use it; existing trees keep their legacy directory names until their consumers migrate, so both forms coexist during the transition. A flat copy left by a pre-versioning fetch is re-fetched rather than adopted; `fwl-io relocate` moves such a tree into its current location instead, once its files have been checked against the registry.
 
-The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both.
+The target tree is organized by physical domain, mirroring the package structure of the PROTEUS source tree (`src/proteus/`), with one deliberate exception: the two interior packages (`interior_struct`, `interior_energetics`) share a single `interior/` data domain, because the equation-of-state tables serve both. The `interior_struct/` and `observe/mass_radius/` entries are the locations of the PROTEUS copies of two shared interior datasets; new consumers use the `interior/` ones.
 
 Naming rules for dataset directories: all lowercase snake_case; for datasets identified by a publication, author tag first and year second, then any descriptor (`baraffe_2015`, `zeng_2019`, `dk09_1tpa_elec_free`); datasets without a citation use their plain source or product name (`solar`, `phoenix`, `muscles`).
 

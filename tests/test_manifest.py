@@ -1725,17 +1725,16 @@ def _layout_patterns() -> list[str]:
 def test_every_known_dataset_fits_the_documented_layout():
     """Each shared dataset, and each model dataset that relocate targets, sits at a location
     the layout tree in the docs names."""
-    import tomllib
+    from fwl_io.relocate import _legacy_locations
 
     patterns = _layout_patterns()
     tops = {'atmos_clim', 'interior', 'interior_struct', 'star', 'observe'}
     assert {p.split('/', 1)[0] for p in patterns} == tops
-    assert r'atmos_clim/scattering/[a-z0-9_]+' in patterns
-    layout = tomllib.loads(
-        (pathlib.Path(manifest.__file__).parent / 'data' / 'legacy_layout.toml').read_text()
-    )
-    subdirs = [ds.subdir for ds in load_manifest(shared_manifest_path())]
-    subdirs += [key.replace('.', '/') for table in layout.values() for key in table]
-    subdirs.append('atmos_clim/scattering/socrates_aerosols')
-    misfits = [s for s in subdirs if not any(re.fullmatch(p, s) for p in patterns)]
-    assert len(subdirs) > 40 and misfits == []
+    assert {r'atmos_clim/scattering/[a-z0-9_]+', 'interior/mass_radius/zeng_2019'} <= set(patterns)
+    locations, error = _legacy_locations()
+    assert error is None
+    subdirs = {ds.subdir for ds in load_manifest(shared_manifest_path())}
+    subdirs |= {Dataset(key=k, name=k, zenodo=None).subdir for k in locations}
+    subdirs.add('atmos_clim/scattering/socrates_aerosols')
+    assert {'interior_struct/eos/seager_2007', 'observe/mass_radius/zeng_2019'} <= subdirs
+    assert [s for s in sorted(subdirs) if not any(re.fullmatch(p, s) for p in patterns)] == []
