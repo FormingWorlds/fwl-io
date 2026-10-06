@@ -567,3 +567,13 @@ def test_only_phoenix_is_unpinned_in_the_shared_manifest():
     datasets = load_manifest(shared_manifest_path())
     assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
     assert len(datasets) > 1
+
+
+def test_seager_and_zeng_are_shared_at_locations_proteus_does_not_claim():
+    """The two datasets PROTEUS and Zalmoxis both read sit at their own shared locations, so
+    a PROTEUS manifest that still declares its own copies does not collide with them."""
+    datasets = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
+    assert datasets['interior.eos.seager_2007'].zenodo == '10.5281/zenodo.15727998'
+    assert datasets['interior.mass_radius.zeng_2019'].zenodo == '10.5281/zenodo.15727899'
+    claimed = {ds.subdir.lower() for ds in datasets.values()}
+    assert claimed.isdisjoint({'interior_struct/eos/seager_2007', 'observe/mass_radius/zeng_2019'})
