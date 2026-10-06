@@ -2608,11 +2608,11 @@ def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path,
 
 
 def _zip_bytes() -> bytes:
-    """Return a small zip archive with two members."""
+    """Return a small zip archive with two members, the same bytes on every call."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w') as archive:
-        archive.writestr('a/one.txt', 'one\n')
-        archive.writestr('two.txt', 'two\n')
+        for name, text in (('a/one.txt', 'one\n'), ('two.txt', 'two\n')):
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), text)
     return buf.getvalue()
 
 
