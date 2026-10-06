@@ -7,11 +7,8 @@ pin whose server or Zenodo record cannot be read is reported apart from a pin th
 
 from __future__ import annotations
 
-import functools
 import re
 from dataclasses import dataclass, field
-
-import requests
 
 from fwl_io.manifest import Dataset, _discover
 from fwl_io.mirror import _ALGORITHMS, DataverseClient, DataverseError, DataverseRetryableError
@@ -36,7 +33,7 @@ class MirrorReport:
     @property
     def ok(self) -> bool:
         """Whether at least one pin was checked and every checked pin is served by its mirror."""
-        return bool(self.passed) and not (self.failed or self.unreachable or self.manifest_errors)
+        return self.exit_code == 0
 
     @property
     def exit_code(self) -> int:
@@ -47,14 +44,16 @@ class MirrorReport:
         return 3 if self.unreachable else 0
 
     def summary(self) -> str:
-        """Return one line per failed or unreachable pin, the counts, and the unpinned datasets."""
+        """Return one line per failed manifest and failed or unreachable pin, the counts, and the
+        unpinned datasets."""
         lines = [f'FAIL manifest {key}: {why}' for key, why in sorted(self.manifest_errors.items())]
         lines += [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
         lines += [f'UNREACHABLE {key}: {why}' for key, why in sorted(self.unreachable.items())]
         lines.append(
             f'pins served by their mirror: {len(self.passed)}, wrong: {len(self.failed)}, '
             f'not checked (server unreachable): {len(self.unreachable)}, '
-            f'datasets without a pin: {len(self.unpinned)}'
+            f'datasets without a pin: {len(self.unpinned)}, '
+            f'manifests that failed to load: {len(self.manifest_errors)}'
         )
         lines += [f'unpinned {key}' for key in sorted(self.unpinned)]
         return '\n'.join(lines)
@@ -69,11 +68,12 @@ def zenodo_sizes(doi: str) -> dict[str, int]:
 
 
 def _transient(exc: Exception) -> bool:
-    """Return whether a Zenodo read failed on a lost connection, a timeout, a 429 or a 5xx."""
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout, ConnectionError, TimeoutError)):
-        return True
+    """Return whether a Zenodo read failed in transit: an HTTP 408, 429 or 5xx, or a network or
+    decoding error without a status (a lost connection, a timeout, a cut or non-JSON body)."""
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
-    return status == 429 or (isinstance(status, int) and status >= 500)
+    if isinstance(status, int):
+        return status in (408, 429) or status >= 500
+    return isinstance(exc, OSError)
 
 
 def _descriptions(version: dict) -> str:
@@ -134,7 +134,7 @@ def pin_problem(dataset: Dataset, client: DataverseClient, sizes=zenodo_sizes) -
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
         return f'doi:{dataset.dataverse} latest version is {version.get("versionState")!r}'
-    note = r'Mirror of Zenodo deposit ' + re.escape(dataset.zenodo) + r'(?!\d)'
+    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(dataset.zenodo) + r'(?!\d)'
     if not re.search(note, _descriptions(version), re.IGNORECASE):
         return f'doi:{dataset.dataverse} does not name Zenodo {dataset.zenodo} as its source'
     files: dict[str, dict] = {}
@@ -194,7 +194,17 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
         datasets = [ds for group in found.values() for ds in group]
         report.manifest_errors.update(errors)
     client = DataverseClient(dataverse_url, token='')
-    cached_sizes = functools.cache(zenodo_sizes)
+    outcomes: dict[str, dict[str, int] | Exception] = {}
+
+    def cached_sizes(doi: str) -> dict[str, int]:
+        if doi not in outcomes:
+            try:
+                outcomes[doi] = zenodo_sizes(doi)
+            except Exception as exc:  # noqa: BLE001 -- a failure is read once, like a success
+                outcomes[doi] = exc
+        if isinstance(outcomes[doi], Exception):
+            raise outcomes[doi]
+        return outcomes[doi]
 
     for ds in datasets:
         if not ds.dataverse:

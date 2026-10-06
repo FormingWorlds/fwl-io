@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import requests
@@ -11,7 +12,12 @@ import requests
 from fwl_io import pins
 from fwl_io.cli import main
 from fwl_io.manifest import Dataset, load_manifest, shared_manifest_path
-from fwl_io.mirror import DataverseClient, DataverseError, DataverseRetryableError
+from fwl_io.mirror import (
+    DataverseClient,
+    DataverseError,
+    DataverseRetryableError,
+    zenodo_record_to_citation,
+)
 from fwl_io.pins import MirrorReport, Unreachable, check_mirrors, pin_problem, zenodo_sizes
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
@@ -42,10 +48,13 @@ def _file(name, kind, value, size, restricted=False):
 class FakeClient:
     """Answers the dataset read in the DataverseNL shape, or raises an error."""
 
-    def __init__(self, state='RELEASED', files=None, error=None, source=SOURCE, extra=None):
+    def __init__(
+        self, state='RELEASED', files=None, error=None, source=SOURCE, extra=None, note=None
+    ):
         self.error = error
         listed = [_file('a.dat', 'SHA-1', 'f' * 40, 10)] if files is None else files
-        description = [{'dsDescriptionValue': {'value': f'Mirror of Zenodo deposit {source}.'}}]
+        note = note or f'Mirror of Zenodo deposit {source}.'
+        description = [{'dsDescriptionValue': {'value': note}}]
         fields = [{'typeName': 'dsDescription', 'value': description}] + (extra or [])
         self.body = {
             'data': {
@@ -81,11 +90,25 @@ def test_a_released_mirror_with_every_registry_file_passes(tmp_path):
     assert pin_problem(_dataset(tmp_path), md5, sizes=lambda doi: pytest.fail('no lookup')) is None
     upper = _dataset(tmp_path, files={'a.dat': 'MD5:' + 'A' * 32})
     assert pin_problem(upper, md5, sizes=lambda doi: pytest.fail('no lookup')) is None
-    lower_note = FakeClient(source=SOURCE)
-    lower_note.body['data']['latestVersion']['metadataBlocks']['citation']['fields'][0]['value'] = [
-        {'dsDescriptionValue': {'value': f'mirror of zenodo deposit {SOURCE}'}}
-    ]
-    assert pin_problem(_dataset(tmp_path), lower_note, sizes=_sizes) is None
+    for note in (f'mirror of zenodo deposit {SOURCE}', f'Mirror of Zenodo\n deposit {SOURCE}'):
+        assert pin_problem(_dataset(tmp_path), FakeClient(note=note), sizes=_sizes) is None
+
+
+def test_the_note_written_by_mirror_passes_the_source_check(tmp_path):
+    """The description a mirror is created with (record text, then the source note) names its
+    own Zenodo DOI and no other."""
+    citation = zenodo_record_to_citation(
+        {'doi': SOURCE, 'metadata': {'title': 't', 'description': 'Cites 10.5281/zenodo.2.'}},
+        contact_name='c',
+        contact_email='c@x',
+        subject='Other',
+    )
+    fields = citation['datasetVersion']['metadataBlocks']['citation']['fields']
+    client = FakeClient()
+    client.body['data']['latestVersion']['metadataBlocks']['citation']['fields'] = fields
+    assert pin_problem(_dataset(tmp_path), client, sizes=_sizes) is None
+    other = _dataset(tmp_path, zenodo='10.5281/zenodo.2')
+    assert 'does not name Zenodo 10.5281/zenodo.2' in pin_problem(other, client, sizes=_sizes)
 
 
 @pytest.mark.parametrize(
@@ -113,6 +136,7 @@ def test_a_released_mirror_with_every_registry_file_passes(tmp_path):
         (FakeClient(files=[_file('a.dat', 'SHA-1', 'f' * 40, None)]), 'a.dat size differs'),
         (FakeClient(files=[_file('a.dat', 'SHA-1', 'f' * 40, 10)] * 2), 'holds a.dat twice'),
         (FakeClient(files=[_file('a.dat', 'SHA-1', 'f' * 40, 10, True)]), 'a.dat restricted'),
+        (FakeClient(files=[_file('a.dat', 'MD5', 'a' * 32, 10, True)]), 'a.dat restricted'),
         (FakeClient(error=DataverseError('404 not found')), 'cannot read doi:10.34894/ABCDEF'),
     ],
 )
@@ -146,40 +170,52 @@ def test_an_empty_registry_is_not_a_pass(tmp_path):
     assert pin_problem(_dataset(tmp_path), FakeClient(), sizes=_sizes) is None
 
 
-def test_a_transient_server_or_zenodo_error_is_unreachable(tmp_path):
-    """A bot-check page or gateway error, and an unreadable Zenodo record, raise Unreachable
-    instead of reporting the pin as wrong."""
+def _http(status):
+    return requests.HTTPError(f'HTTP {status}', response=SimpleNamespace(status_code=status))
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        requests.ConnectionError('down'),
+        requests.Timeout('down'),
+        requests.exceptions.ChunkedEncodingError('down'),
+        requests.exceptions.JSONDecodeError('down', '<html>', 0),
+        ConnectionError('down'),
+        TimeoutError('down'),
+        _http(408),
+        _http(429),
+        _http(500),
+        _http(503),
+    ],
+)
+def test_a_transient_zenodo_error_is_unreachable(tmp_path, error):
+    """A network, timeout or decoding error, or an HTTP 408, 429 or 5xx from Zenodo, raises
+    Unreachable instead of reporting the pin as wrong."""
+    with pytest.raises(Unreachable, match='Zenodo 10.5281/zenodo.1 file sizes: '):
+        pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
     with pytest.raises(Unreachable, match='doi:10.34894/ABCDEF: bot check'):
         pin_problem(_dataset(tmp_path), FakeClient(error=DataverseRetryableError('bot check')))
 
-    for error in (
-        ConnectionError('zenodo down'),
-        requests.Timeout('zenodo down'),
-        requests.HTTPError('zenodo down', response=SimpleNamespace(status_code=503)),
-        requests.HTTPError('zenodo down', response=SimpleNamespace(status_code=429)),
-    ):
-        with pytest.raises(Unreachable, match='Zenodo 10.5281/zenodo.1 file sizes: zenodo down'):
-            pin_problem(_dataset(tmp_path), FakeClient(), sizes=lambda doi, e=error: _raise(e))
+
+@pytest.mark.parametrize(
+    ('error', 'text'),
+    [(_http(404), 'HTTP 404'), (_http(499), 'HTTP 499'), (ValueError('concept'), 'concept')],
+)
+def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error, text):
+    """A 4xx other than 408 and 429, or a concept DOI, makes the pin wrong."""
+    why = pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
+    assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {text}'
 
 
-def _raise(error):
-    raise error
-
-
-def test_a_permanent_zenodo_error_or_a_found_problem_is_a_reason(tmp_path):
-    """A 404 or a concept DOI is a wrong pin, and an outage after a checksum mismatch still
-    reports the mismatch."""
-    gone = requests.HTTPError('404 gone', response=SimpleNamespace(status_code=404))
-    for error in (gone, ValueError('concept DOI')):
-        why = pin_problem(_dataset(tmp_path), FakeClient(), sizes=lambda doi, e=error: _raise(e))
-        assert why.startswith('Zenodo 10.5281/zenodo.1 file sizes:')
+def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
+    """A checksum mismatch found before the Zenodo read is reported when that read fails."""
     files = {'a.dat': MD5_A, 'b.dat': MD5_B}
     client = FakeClient(
         files=[_file('a.dat', 'SHA-1', 'f' * 40, 10), _file('b.dat', 'MD5', 'c' * 32, 7)]
     )
-    why = pin_problem(
-        _dataset(tmp_path, files=files), client, sizes=lambda doi: _raise(ConnectionError('down'))
-    )
+    down = Mock(side_effect=ConnectionError('down'))
+    why = pin_problem(_dataset(tmp_path, files=files), client, sizes=down)
     assert why == 'b.dat checksum differs; Zenodo 10.5281/zenodo.1 file sizes: down'
 
 
@@ -213,30 +249,39 @@ def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
     assert report.summary().splitlines()[0] == 'FAIL manifest other: cannot load'
     assert report.summary().splitlines()[-2:] == [
         'pins served by their mirror: 1, wrong: 2, not checked (server unreachable): 0, '
-        'datasets without a pin: 1',
+        'datasets without a pin: 1, manifests that failed to load: 1',
         'unpinned group.loose',
     ]
 
 
 def test_an_unexpected_error_fails_one_dataset_only(tmp_path, monkeypatch):
     """An error of any type in one dataset is a FAIL for it, and the run goes on."""
+    broken = _dataset(tmp_path, 'g.one', pin='10.34894/BROKEN')
 
     class Broken(FakeClient):
         def _request(self, method, path, **kwargs):
-            raise AttributeError('no body')
+            if kwargs['params']['persistentId'].endswith('BROKEN'):
+                raise AttributeError('no body')
+            return super()._request(method, path, **kwargs)
 
-    _patch(monkeypatch, [_dataset(tmp_path, 'g.one')], client=Broken())
-    assert check_mirrors('https://example.org').failed == {'g.one': 'AttributeError: no body'}
+    _patch(monkeypatch, [broken, _dataset(tmp_path, 'g.two')], client=Broken())
+    report = check_mirrors('https://example.org')
+    assert report.failed == {'g.one': 'AttributeError: no body'}
+    assert report.passed == ['g.two']
 
 
 def test_check_mirrors_reads_each_zenodo_record_once(tmp_path, monkeypatch):
     """Datasets that share a Zenodo record (one deposit split in several datasets) read its
-    file sizes once."""
+    file sizes once, also when the read fails."""
     asked = []
     _patch(monkeypatch, [_dataset(tmp_path, 'g.one'), _dataset(tmp_path, 'g.two')])
     monkeypatch.setattr(pins, 'zenodo_sizes', lambda doi: asked.append(doi) or _sizes(doi))
     assert check_mirrors('https://example.org').passed == ['g.one', 'g.two']
     assert asked == [SOURCE]
+    down = Mock(side_effect=ConnectionError('down'))
+    monkeypatch.setattr(pins, 'zenodo_sizes', down)
+    assert sorted(check_mirrors('https://example.org').unreachable) == ['g.one', 'g.two']
+    down.assert_called_once_with(SOURCE)
 
 
 @pytest.mark.parametrize(

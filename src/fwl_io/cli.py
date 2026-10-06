@@ -334,7 +334,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_check_mirrors = sub.add_parser(
         'check-mirrors',
-        help='check that every pinned Dataverse mirror serves its registry; list unpinned datasets',
+        help='check that every pinned Dataverse mirror serves its registry; list unpinned datasets '
+        '(exit 1 wrong pin, 3 server unreachable)',
     )
     p_check_mirrors.add_argument(
         '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
