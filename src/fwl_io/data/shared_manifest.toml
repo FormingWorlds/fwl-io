@@ -50,6 +50,7 @@ dataverse = "10.34894/V9KQKY"
 [atmos_clim.spectral_files.frostflow.4096]
 name = "SOCRATES spectral files Frostflow, 4096 bands"
 zenodo = "10.5281/zenodo.15799776"
+dataverse = "10.34894/NATTTQ"
 
 [atmos_clim.spectral_files.dayspring.16]
 name = "SOCRATES spectral files Dayspring, 16 bands"
@@ -84,6 +85,7 @@ dataverse = "10.34894/UBSSB2"
 [atmos_clim.spectral_files.honeyside.256]
 name = "SOCRATES spectral files Honeyside, 256 bands"
 zenodo = "10.5281/zenodo.15799731"
+dataverse = "10.34894/1KKSYT"
 
 [atmos_clim.spectral_files.honeyside.4096]
 name = "SOCRATES spectral files Honeyside, 4096 bands"
