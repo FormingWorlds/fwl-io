@@ -598,3 +598,12 @@ def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
     found, errors = {'fwl-io': list(shared.values()), 'proteus': proteus}, {}
     _drop_conflicting_datasets(found, errors)
     assert (sorted(found), errors) == (['fwl-io', 'proteus'], {})
+
+
+def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
+    """A zip the mirror holds as its members fails the pin; the zip held as one file passes."""
+    dataset = _dataset(tmp_path, files={'p.zip': MD5_A})
+    unpacked = FakeClient(files=[_file('one.txt', 'SHA-1', 'e' * 40, 4)])
+    assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
+    kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
+    assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None
