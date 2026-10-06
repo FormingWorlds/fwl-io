@@ -114,6 +114,14 @@ DATAVERSE_TOKEN=... fwl-io mirror-publish <persistent-id> \
 
 Publishes an existing Dataverse draft by its persistent id: it never creates a dataset, so it is the second step of a create-draft-then-publish workflow, run once a draft created by `fwl-io mirror --no-publish` has been reviewed. `<persistent-id>` must be of the form `doi:<prefix>/<suffix>`, for example `doi:10.34894/EXAMPLE`. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. `--version-type` is `major` by default and accepts only `major` or `minor`. Fails clearly if the dataset is already published or the persistent id does not resolve to a draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
 
+## fwl-io check-mirrors
+
+```bash
+fwl-io check-mirrors [--dataverse-url URL]
+```
+
+Checks every dataset with a `dataverse` pin in the installed manifests: the pinned DOI must name a released Dataverse dataset that names the dataset's Zenodo deposit as its source and holds every file of the registry, with the registry checksum where the server uses the same algorithm and otherwise with the file size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A fetch still verifies each downloaded file against the registry. The command reads only published data and needs no token. It prints one line per pin that fails, the counts, and the datasets without a pin, which a fallback never reaches. Exit is 1 when a pin fails and 0 otherwise; an unpinned dataset does not change the exit code. The weekly nightly runs the same check on the shared manifest.
+
 ## fwl-io --version
 
 Prints the installed version.

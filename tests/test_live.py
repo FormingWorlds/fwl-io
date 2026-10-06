@@ -24,3 +24,13 @@ def test_committed_registries_match_live_zenodo_records():
         assert live == ds.registry(), (
             f'{ds.key}: committed registry has drifted from Zenodo record {ds.zenodo}'
         )
+
+
+def test_shared_manifest_pins_are_served_by_their_dataverse_mirrors():
+    """Every pin resolves to a released DataverseNL dataset holding the registry files with
+    their checksums, so the fallback download path works when Zenodo is down."""
+    from fwl_io.pins import check_mirrors
+
+    report = check_mirrors('https://dataverse.nl', load_manifest(shared_manifest_path()))
+    assert report.passed, 'the shared manifest pins no dataset'
+    assert report.ok, report.summary()

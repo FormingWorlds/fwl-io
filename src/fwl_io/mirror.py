@@ -294,7 +294,8 @@ class DataverseClient:
 
     @property
     def _headers(self) -> dict:
-        return {'X-Dataverse-key': self.token}
+        # Published data needs no token; an empty key would be refused as invalid.
+        return {'X-Dataverse-key': self.token} if self.token else {}
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         """Call one Dataverse native-API endpoint and return its decoded body.
