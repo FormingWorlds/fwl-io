@@ -120,7 +120,9 @@ Publishes an existing Dataverse draft by its persistent id: it never creates a d
 fwl-io check-mirrors [--dataverse-url URL]
 ```
 
-Checks every dataset with a `dataverse` pin in the installed manifests: the pinned DOI must name a released Dataverse dataset that names the dataset's Zenodo deposit as its source and holds every file of the registry, with the registry checksum where the server uses the same algorithm and otherwise with the file size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A fetch still verifies each downloaded file against the registry. The command reads only published data and needs no token. It prints one line per pin that fails, the counts, and the datasets without a pin, which a fallback never reaches. Exit is 1 when a pin fails and 0 otherwise; an unpinned dataset does not change the exit code. The weekly nightly runs the same check on the shared manifest.
+Checks every dataset with a `dataverse` pin in the installed manifests. The pinned DOI must name a released Dataverse dataset whose description names the dataset's Zenodo DOI (the note every mirror carries) and which holds every file of the registry once: with the registry checksum where the server uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A same-size change of content passes this check; the fetch still verifies each downloaded file against the registry. The command reads only published data and needs no token, and it reads each Zenodo record once.
+
+It prints one line per wrong pin (FAIL), one per pin whose server or Zenodo record could not be read (UNREACHABLE), the counts, and the datasets without a pin, which a fallback never reaches; a manifest that fails to load is a FAIL. Exit is 1 when a pin is wrong or no pin was checked, 2 when no pin is wrong but some could not be checked, and 0 when every pin is served. The weekly nightly runs the same check on the shared manifest and skips it when a server is unreachable.
 
 ## fwl-io --version
 

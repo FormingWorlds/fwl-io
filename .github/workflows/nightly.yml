@@ -17,5 +17,5 @@ jobs:
           python-version: '3.12'
       - name: Install package
         run: pip install -e ".[develop]"
-      - name: Run slow tier (live Zenodo checks)
+      - name: Run slow tier (live Zenodo and DataverseNL checks)
         run: pytest -m slow

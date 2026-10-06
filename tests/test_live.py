@@ -32,5 +32,7 @@ def test_shared_manifest_pins_are_served_by_their_dataverse_mirrors():
     from fwl_io.pins import check_mirrors
 
     report = check_mirrors('https://dataverse.nl', load_manifest(shared_manifest_path()))
-    assert report.passed, 'the shared manifest pins no dataset'
+    assert not report.failed, report.summary()
+    if report.unreachable:
+        pytest.skip('DataverseNL or Zenodo unreachable:\n' + report.summary())
     assert report.ok, report.summary()
