@@ -230,6 +230,85 @@ def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error):
     assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {error}'
 
 
+@pytest.fixture
+def waits(monkeypatch):
+    """Record the waits between certificate retries instead of sleeping."""
+    slept = []
+    monkeypatch.setattr(pins.time, 'sleep', slept.append)
+    return slept
+
+
+def _cert_dataverse_error():
+    error = DataverseError('Dataverse GET failed: certificate verify failed')
+    error.__cause__ = CERT
+    return error
+
+
+class FlakyClient(FakeClient):
+    """Fails the dataset read with a certificate error ``failures`` times, then answers."""
+
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    def _request(self, method, path, **kwargs):
+        if len(self.calls) < self.failures:
+            self.calls.append((method, path, kwargs.get('params')))
+            raise _cert_dataverse_error()
+        return super()._request(method, path, **kwargs)
+
+
+@pytest.mark.parametrize('failures', [1, 2])
+def test_a_certificate_error_that_clears_is_served_with_a_warning(
+    tmp_path, monkeypatch, waits, failures
+):
+    """A certificate failure on the Zenodo or the Dataverse read is retried 30 s later; a pin
+    whose read then succeeds is served and the summary warns about the recovery."""
+    sizes = Mock(side_effect=[CERT] * failures + [_sizes(SOURCE)])
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one')])
+    monkeypatch.setattr(pins, 'zenodo_sizes', sizes)
+    report = check_mirrors('https://example.org')
+    note = f'certificate error, recovered after {failures + 1} attempts'
+    assert report.passed == ['g.one'] and report.exit_code == 0
+    assert report.warnings == {'g.one': f'Zenodo {SOURCE}: {note}'}
+    assert f'WARNING g.one: Zenodo {SOURCE}: {note}' in report.summary().splitlines()
+    assert waits == [30.0] * failures and sizes.call_count == failures + 1
+
+    waits.clear()
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.two')], client=FlakyClient(failures))
+    report = check_mirrors('https://example.org')
+    assert report.passed == ['g.two']
+    assert report.warnings == {'g.two': f'doi:10.34894/ABCDEF: {note}'}
+    assert waits == [30.0] * failures
+
+
+def test_a_certificate_error_on_every_attempt_fails_the_pin(tmp_path, monkeypatch, waits):
+    """Three certificate failures in a row make the pin wrong (exit 1), on either server."""
+    sizes = Mock(side_effect=CERT)
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one')])
+    monkeypatch.setattr(pins, 'zenodo_sizes', sizes)
+    report = check_mirrors('https://example.org')
+    assert report.failed == {'g.one': f'Zenodo {SOURCE} file sizes: {CERT}'}
+    assert report.exit_code == 1 and not report.warnings
+    assert waits == [30.0, 30.0] and sizes.call_count == 3
+
+    waits.clear()
+    client = FlakyClient(failures=3)
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.two')], client=client)
+    report = check_mirrors('https://example.org')
+    assert report.failed['g.two'].startswith('cannot read doi:10.34894/ABCDEF:')
+    assert len(client.calls) == 3 and waits == [30.0, 30.0]
+
+
+def test_only_a_certificate_error_is_retried(tmp_path, monkeypatch, waits):
+    """A lost connection is not retried within the run; it is reported as unreachable."""
+    sizes = Mock(side_effect=ConnectionError('down'))
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one')])
+    monkeypatch.setattr(pins, 'zenodo_sizes', sizes)
+    assert sorted(check_mirrors('https://example.org').unreachable) == ['g.one']
+    assert waits == [] and sizes.call_count == 1
+
+
 def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
     """A checksum mismatch found before the Zenodo read is reported when that read fails."""
     files = {'a.dat': MD5_A, 'b.dat': MD5_B}
