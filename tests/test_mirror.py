@@ -2523,32 +2523,77 @@ def test_only_a_missing_dataset_id_stops_the_license_put(monkeypatch, dataset_id
         assert ('PUT', 'http://unused/api/datasets/0/license') in seen
 
 
+def _capture_posts(client):
+    """Record the multipart name, bytes and query of each upload ``client`` sends."""
+    sent = []
+
+    def post(path, **kwargs):
+        sent_name, handle, _ = kwargs['files']['file']
+        sent.append((sent_name, handle.read(), kwargs['params']))
+
+    client._post = post
+    return sent
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize('name', ['p.zip', 'P.ZIP'])
 def test_add_file_sends_a_zip_inside_a_second_zip(tmp_path, name):
-    """Dataverse unpacks an uploaded zip, so a zip goes inside an uncompressed second zip
-    whose one member is the archive under its own name, byte for byte; a .dat goes as is."""
+    """A zip goes in an uncompressed second zip holding it by name, even with a pre-1980 mtime."""
     import io
+    import os
     import zipfile
 
-    sent = []
     client = DataverseClient('http://unused', 'tok')
-
-    def post(path, **kwargs):
-        name, handle, _ = kwargs['files']['file']
-        sent.append((name, handle.read()))
-
-    client._post = post
+    sent = _capture_posts(client)
     archive = tmp_path / name
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('a/one.txt', 'one\n')
-    plain = tmp_path / 'f.dat'
-    plain.write_bytes(b'data')
+    os.utime(archive, (0, 0))
+    original = archive.read_bytes()
     client.add_file('doi:10.34894/DEMO01', archive)
-    client.add_file('doi:10.34894/DEMO01', plain)
-    (wrap_name, wrapped), (plain_name, plain_bytes) = sent
-    assert (wrap_name, plain_name, plain_bytes) == (f'{name}.zip', 'f.dat', b'data')
+    ((_, wrapped, params),) = sent
+    assert params == {'persistentId': 'doi:10.34894/DEMO01', 'noVarDetect': 'true'}
     with zipfile.ZipFile(io.BytesIO(wrapped)) as wrapper:
         (member,) = wrapper.infolist()
         assert (member.filename, member.compress_type) == (name, zipfile.ZIP_STORED)
-        assert wrapper.read(name) == archive.read_bytes()
+        assert wrapper.read(name) == original == archive.read_bytes()
+
+
+@pytest.mark.unit
+def test_add_file_sends_another_file_as_it_is(tmp_path):
+    """A file that is not a zip goes under its own name with its own bytes."""
+    client = DataverseClient('http://unused', 'tok')
+    sent = _capture_posts(client)
+    plain = tmp_path / 'f.dat'
+    plain.write_bytes(b'data')
+    client.add_file('doi:10.34894/DEMO01', plain)
+    assert [(n, b) for n, b, _ in sent] == [('f.dat', b'data')]
+
+
+@pytest.mark.unit
+def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path, monkeypatch):
+    """After a failed response the draft is checked for the archive itself, not its wrapper."""
+    import zipfile
+
+    import fwl_io.mirror as mirror
+    from fwl_io.mirror import DataverseRetryableError
+
+    monkeypatch.setattr(mirror, '_sleep', lambda s: None)
+    archive = tmp_path / 'p.zip'
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('one.txt', 'one\n')
+    entry = {
+        'filesize': archive.stat().st_size,
+        'checksum': {'type': 'MD5', 'value': hashlib.md5(archive.read_bytes()).hexdigest()},
+    }
+    client = DataverseClient('http://unused', 'tok')
+    posts = []
+
+    def post(path, **kwargs):
+        posts.append(path)
+        raise DataverseRetryableError('bot-check page', 403, unprocessed=True)
+
+    client._post = post
+    client._draft_files = lambda pid: {'p.zip': entry}
+    client.add_file('doi:10.34894/DEMO01', archive)
+    assert posts == ['/api/datasets/:persistentId/add']
