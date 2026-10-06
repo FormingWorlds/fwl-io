@@ -576,16 +576,10 @@ def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
 
     shared = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
     seager, zeng = shared['interior.eos.seager_2007'], shared['interior.mass_radius.zeng_2019']
-    assert (seager.subdir, seager.zenodo, seager.dataverse) == (
-        'interior/eos/seager_2007',
-        '10.5281/zenodo.15727998',
-        '10.34894/QZZGHW',
-    )
-    assert (zeng.subdir, zeng.zenodo, zeng.dataverse) == (
-        'interior/mass_radius/zeng_2019',
-        '10.5281/zenodo.15727899',
-        '10.34894/ZGZA6I',
-    )
+    assert [(d.subdir, d.zenodo, d.dataverse) for d in (seager, zeng)] == [
+        ('interior/eos/seager_2007', '10.5281/zenodo.15727998', '10.34894/QZZGHW'),
+        ('interior/mass_radius/zeng_2019', '10.5281/zenodo.15727899', '10.34894/ZGZA6I'),
+    ]
     proteus = [
         _dataset(tmp_path, key='interior_struct.eos.seager_2007'),
         _dataset(tmp_path, key='observe.mass_radius.zeng_2019'),
@@ -594,5 +588,6 @@ def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
     _drop_conflicting_datasets(found, errors)
     assert (sorted(found), errors) == (['fwl-io', 'proteus'], {})
     clash = {'fwl-io': list(shared.values()), 'proteus': [_dataset(tmp_path, key=seager.key)]}
-    _drop_conflicting_datasets(clash, errors)
-    assert clash == {} and sorted(errors) == ['fwl-io', 'proteus']
+    clash_errors = {}
+    _drop_conflicting_datasets(clash, clash_errors)
+    assert clash == {} and sorted(clash_errors) == ['fwl-io', 'proteus']
