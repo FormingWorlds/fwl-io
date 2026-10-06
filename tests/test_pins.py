@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import ssl
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -171,7 +172,16 @@ def test_an_empty_registry_is_not_a_pass(tmp_path):
 
 
 def _http(status):
-    return requests.HTTPError(f'HTTP {status}', response=SimpleNamespace(status_code=status))
+    response = requests.Response()
+    response.status_code, response.url = status, 'https://zenodo.org/api/records/1'
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        return exc
+    raise AssertionError(f'status {status} raised nothing')
+
+
+CERT = requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'certificate verify failed'))
 
 
 @pytest.mark.parametrize(
@@ -183,29 +193,41 @@ def _http(status):
         requests.exceptions.JSONDecodeError('down', '<html>', 0),
         ConnectionError('down'),
         TimeoutError('down'),
-        _http(408),
-        _http(429),
-        _http(500),
-        _http(503),
+        *(_http(status) for status in (408, 429, 500, 501, 503, 599)),
     ],
 )
 def test_a_transient_zenodo_error_is_unreachable(tmp_path, error):
-    """A network, timeout or decoding error, or an HTTP 408, 429 or 5xx from Zenodo, raises
-    Unreachable instead of reporting the pin as wrong."""
-    with pytest.raises(Unreachable, match='Zenodo 10.5281/zenodo.1 file sizes: '):
+    """A lost connection, a timeout, a cut or non-JSON body, or an HTTP 408, 429 or 5xx from
+    Zenodo raises Unreachable instead of reporting the pin as wrong."""
+    with pytest.raises(Unreachable) as raised:
         pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
-    with pytest.raises(Unreachable, match='doi:10.34894/ABCDEF: bot check'):
+    assert str(raised.value) == f'Zenodo 10.5281/zenodo.1 file sizes: {error}'
+
+
+def test_a_transient_dataverse_error_is_unreachable(tmp_path):
+    """A bot-check page or gateway error from the Dataverse server raises Unreachable."""
+    with pytest.raises(Unreachable) as raised:
         pin_problem(_dataset(tmp_path), FakeClient(error=DataverseRetryableError('bot check')))
+    assert str(raised.value) == 'doi:10.34894/ABCDEF: bot check'
 
 
 @pytest.mark.parametrize(
-    ('error', 'text'),
-    [(_http(404), 'HTTP 404'), (_http(499), 'HTTP 499'), (ValueError('concept'), 'concept')],
+    'error',
+    [
+        *(_http(status) for status in (404, 407, 409, 499)),
+        ValueError('concept DOI'),
+        CERT,
+        requests.exceptions.InvalidURL('bad url'),
+        requests.exceptions.TooManyRedirects('redirect loop'),
+        FileNotFoundError('no file'),
+        KeyError('size'),
+    ],
 )
-def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error, text):
-    """A 4xx other than 408 and 429, or a concept DOI, makes the pin wrong."""
+def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error):
+    """A 4xx other than 408 and 429, a concept DOI, a certificate failure, a bad URL, a
+    redirect loop or a malformed record makes the pin wrong."""
     why = pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
-    assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {text}'
+    assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {error}'
 
 
 def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
@@ -248,7 +270,7 @@ def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
     assert not report.ok
     assert report.summary().splitlines()[0] == 'FAIL manifest other: cannot load'
     assert report.summary().splitlines()[-2:] == [
-        'pins served by their mirror: 1, wrong: 2, not checked (server unreachable): 0, '
+        'pins served by their mirror: 1, wrong: 2, not checked (could not be read): 0, '
         'datasets without a pin: 1, manifests that failed to load: 1',
         'unpinned group.loose',
     ]

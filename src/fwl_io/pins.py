@@ -10,8 +10,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import requests
+
 from fwl_io.manifest import Dataset, _discover
-from fwl_io.mirror import _ALGORITHMS, DataverseClient, DataverseError, DataverseRetryableError
+from fwl_io.mirror import (
+    _ALGORITHMS,
+    DataverseClient,
+    DataverseError,
+    DataverseRetryableError,
+    _cert_failure,
+)
 from fwl_io.sync import fetch_zenodo_record
 
 
@@ -44,14 +52,13 @@ class MirrorReport:
         return 3 if self.unreachable else 0
 
     def summary(self) -> str:
-        """Return one line per failed manifest and failed or unreachable pin, the counts, and the
-        unpinned datasets."""
+        """Return a line per problem, the counts, and the unpinned datasets."""
         lines = [f'FAIL manifest {key}: {why}' for key, why in sorted(self.manifest_errors.items())]
         lines += [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
         lines += [f'UNREACHABLE {key}: {why}' for key, why in sorted(self.unreachable.items())]
         lines.append(
             f'pins served by their mirror: {len(self.passed)}, wrong: {len(self.failed)}, '
-            f'not checked (server unreachable): {len(self.unreachable)}, '
+            f'not checked (could not be read): {len(self.unreachable)}, '
             f'datasets without a pin: {len(self.unpinned)}, '
             f'manifests that failed to load: {len(self.manifest_errors)}'
         )
@@ -67,13 +74,23 @@ def zenodo_sizes(doi: str) -> dict[str, int]:
     return {entry['key']: entry['size'] for entry in files or []}
 
 
+_TRANSIENT = (
+    requests.ConnectionError,
+    requests.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.JSONDecodeError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
 def _transient(exc: Exception) -> bool:
-    """Return whether a Zenodo read failed in transit: an HTTP 408, 429 or 5xx, or a network or
-    decoding error without a status (a lost connection, a timeout, a cut or non-JSON body)."""
+    """Return whether a Zenodo read failed in transit: an HTTP 408, 429 or 5xx, or a lost
+    connection, a timeout, or a cut or non-JSON body. A certificate failure is permanent."""
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
     if isinstance(status, int):
         return status in (408, 429) or status >= 500
-    return isinstance(exc, OSError)
+    return isinstance(exc, _TRANSIENT) and not _cert_failure(exc)
 
 
 def _descriptions(version: dict) -> str:
@@ -197,13 +214,14 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
     outcomes: dict[str, dict[str, int] | Exception] = {}
 
     def cached_sizes(doi: str) -> dict[str, int]:
+        """Return the sizes of a Zenodo DOI, or raise its failure, reading it once per run."""
         if doi not in outcomes:
             try:
                 outcomes[doi] = zenodo_sizes(doi)
             except Exception as exc:  # noqa: BLE001 -- a failure is read once, like a success
                 outcomes[doi] = exc
         if isinstance(outcomes[doi], Exception):
-            raise outcomes[doi]
+            raise outcomes[doi].with_traceback(None)
         return outcomes[doi]
 
     for ds in datasets:
