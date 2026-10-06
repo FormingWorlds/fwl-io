@@ -97,6 +97,10 @@ name = "SOCRATES spectral files Oak, 318 bands"
 zenodo = "10.5281/zenodo.15743843"
 dataverse = "10.34894/K3UKBX"
 
+[atmos_clim.spectral_files.legacy.318]
+name = "SOCRATES spectral files Legacy, 318 bands"
+zenodo = "10.5281/zenodo.15806343"
+
 [interior.eos.dk09_1tpa_elec_free.mgsio3_wolf_bower_2018]
 name = "MgSiO3 lookup tables, Wolf & Bower (2018), 1TPa-dK09-elec-free"
 zenodo = "10.5281/zenodo.15877374"
