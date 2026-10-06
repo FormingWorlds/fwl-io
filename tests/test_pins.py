@@ -546,7 +546,7 @@ def test_shared_manifest_pins_are_consistent():
     assert all(len(dois) == 1 for dois in by_record.values())
 
 
-def test_only_phoenix_and_legacy_are_unpinned_in_the_shared_manifest():
+def test_only_phoenix_and_the_new_318_band_files_are_unpinned():
     """Every shared dataset has a DataverseNL mirror except PHOENIX and four 318-band files."""
     datasets = load_manifest(shared_manifest_path())
     assert {ds.key for ds in datasets if not ds.dataverse} == {
