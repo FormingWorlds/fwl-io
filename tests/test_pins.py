@@ -546,6 +546,22 @@ def test_shared_manifest_pins_are_consistent():
     assert all(len(dois) == 1 for dois in by_record.values())
 
 
+def test_spectral_file_entries_match_their_key():
+    """Each spectral-file entry names its set as its key does and holds <Set>.sf and <Set>.sf_k."""
+    datasets = load_manifest(shared_manifest_path())
+    spectral = [ds for ds in datasets if ds.key.startswith('atmos_clim.spectral_files.')]
+    assert len(spectral) == 17
+    for ds in spectral:
+        set_name, bands = ds.key.split('.')[2:]
+        stem = set_name.capitalize()
+        assert ds.name == f'SOCRATES spectral files {stem}, {bands} bands'
+        names = set(ds.registry())
+        if set_name == 'legacy':
+            assert {'sp_b318_HITRAN_a16_no_spectrum', 'sp_b318_HITRAN_a16_no_spectrum_k'} <= names
+        else:
+            assert {f'{stem}.sf', f'{stem}.sf_k'} <= names
+
+
 def test_only_phoenix_is_unpinned_in_the_shared_manifest():
     """Every shared dataset has a DataverseNL mirror except the PHOENIX spectra."""
     datasets = load_manifest(shared_manifest_path())
