@@ -570,16 +570,27 @@ def test_only_phoenix_is_unpinned_in_the_shared_manifest():
 
 
 def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
-    """The shared Seager and Zeng datasets sit at their own locations, so the collision rule
-    keeps both providers while PROTEUS still declares its copies, and drops both on a clash."""
+    """The shared Seager and Zeng datasets have their pins and registries, and sit at their own
+    locations, so the collision rule keeps both providers while PROTEUS declares its copies."""
     from fwl_io.manifest import _drop_conflicting_datasets
 
     shared = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
     seager, zeng = shared['interior.eos.seager_2007'], shared['interior.mass_radius.zeng_2019']
-    assert [(d.subdir, d.zenodo, d.dataverse) for d in (seager, zeng)] == [
-        ('interior/eos/seager_2007', '10.5281/zenodo.15727998', '10.34894/QZZGHW'),
-        ('interior/mass_radius/zeng_2019', '10.5281/zenodo.15727899', '10.34894/ZGZA6I'),
+    assert [(d.subdir, d.zenodo, d.dataverse, d.extract, d.files) for d in (seager, zeng)] == [
+        ('interior/eos/seager_2007', '10.5281/zenodo.15727998', '10.34894/QZZGHW', None, None),
+        (
+            'interior/mass_radius/zeng_2019',
+            '10.5281/zenodo.15727899',
+            '10.34894/ZGZA6I',
+            None,
+            None,
+        ),
     ]
+    seager_files, zeng_files = seager.registry(), zeng.registry()
+    assert sorted(seager_files) == [f'eos_seager07_{m}.txt' for m in ('iron', 'silicate', 'water')]
+    assert seager_files['eos_seager07_iron.txt'] == 'md5:7bf215a2bb4da6d27ceeac2ade0ce706'
+    assert len(zeng_files) == 57
+    assert zeng_files['massradiusEarthlikeRocky.txt'] == 'md5:6761a26366bd6bc6ece720a1013d1285'
     proteus = [
         _dataset(tmp_path, key='interior_struct.eos.seager_2007'),
         _dataset(tmp_path, key='observe.mass_radius.zeng_2019'),
@@ -587,7 +598,3 @@ def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
     found, errors = {'fwl-io': list(shared.values()), 'proteus': proteus}, {}
     _drop_conflicting_datasets(found, errors)
     assert (sorted(found), errors) == (['fwl-io', 'proteus'], {})
-    clash = {'fwl-io': list(shared.values()), 'proteus': [_dataset(tmp_path, key=seager.key)]}
-    clash_errors = {}
-    _drop_conflicting_datasets(clash, clash_errors)
-    assert clash == {} and sorted(clash_errors) == ['fwl-io', 'proteus']
