@@ -1730,7 +1730,7 @@ def test_every_known_dataset_fits_the_documented_layout():
     patterns = _layout_patterns()
     tops = {'atmos_clim', 'interior', 'interior_struct', 'star', 'observe'}
     assert {p.split('/', 1)[0] for p in patterns} == tops
-    assert {r'atmos_clim/scattering/[a-z0-9_]+', 'interior/mass_radius/zeng_2019'} <= set(patterns)
+    assert {r'atmos_clim/scattering/[a-z0-9_]+', 'interior/mass_radius/[a-z0-9_]+'} <= set(patterns)
     locations, error = _legacy_locations()
     assert error is None
     subdirs = {ds.subdir for ds in load_manifest(shared_manifest_path())}

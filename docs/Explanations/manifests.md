@@ -94,7 +94,7 @@ FWL_DATA/
   interior/
     eos/dk09_1tpa_elec_free/<set>/r<recid>/
     eos/<dataset>/r<recid>/
-    mass_radius/zeng_2019/r<recid>/
+    mass_radius/<dataset>/r<recid>/
     melting_curves/<dataset>/r<recid>/
   interior_struct/
     eos/seager_2007/r<recid>/        # the PROTEUS copy of interior/eos/seager_2007
