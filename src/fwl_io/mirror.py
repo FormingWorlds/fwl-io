@@ -603,9 +603,8 @@ class DataverseClient:
             upload = path
             if path.suffix.lower() == '.zip':
                 upload = Path(tmp, 'upload.zip')
-                with zipfile.ZipFile(
-                    upload, 'w', zipfile.ZIP_STORED, strict_timestamps=False
-                ) as wrapper:
+                # strict_timestamps=False: a pre-1980 mtime sets only the wrapper's header.
+                with zipfile.ZipFile(upload, 'w', strict_timestamps=False) as wrapper:
                     wrapper.write(path, path.name)
 
             def send():

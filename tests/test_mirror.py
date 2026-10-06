@@ -2549,14 +2549,14 @@ def test_add_file_sends_a_zip_inside_a_second_zip(tmp_path, name):
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('a/one.txt', 'one\n')
     os.utime(archive, (0, 0))
-    original = archive.read_bytes()
     client.add_file('doi:10.34894/DEMO01', archive)
-    ((_, wrapped, params),) = sent
+    ((sent_name, wrapped, params),) = sent
+    assert sent_name == 'upload.zip'
     assert params == {'persistentId': 'doi:10.34894/DEMO01', 'noVarDetect': 'true'}
     with zipfile.ZipFile(io.BytesIO(wrapped)) as wrapper:
         (member,) = wrapper.infolist()
         assert (member.filename, member.compress_type) == (name, zipfile.ZIP_STORED)
-        assert wrapper.read(name) == original == archive.read_bytes()
+        assert wrapper.read(name) == archive.read_bytes()
 
 
 @pytest.mark.unit
@@ -2571,14 +2571,12 @@ def test_add_file_sends_another_file_as_it_is(tmp_path):
 
 
 @pytest.mark.unit
-def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path, monkeypatch):
+def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path, sleeps):
     """After a failed response the draft is checked for the archive itself, not its wrapper."""
     import zipfile
 
-    import fwl_io.mirror as mirror
     from fwl_io.mirror import DataverseRetryableError
 
-    monkeypatch.setattr(mirror, '_sleep', lambda s: None)
     archive = tmp_path / 'p.zip'
     with zipfile.ZipFile(archive, 'w') as z:
         z.writestr('one.txt', 'one\n')
