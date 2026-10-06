@@ -594,6 +594,8 @@ class DataverseClient:
         DataverseError
             If the upload fails after its retries, or the draft holds another file of
             that name.
+        OSError
+            If the wrapper of a zip cannot be written, for example with no temp space.
         """
         params = {'persistentId': persistent_id}
         if no_ingest:
