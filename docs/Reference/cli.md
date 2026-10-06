@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has seven subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has nine subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when a server could not be read. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -122,7 +122,7 @@ fwl-io check-mirrors [--dataverse-url URL]
 
 Checks every dataset with a `dataverse` pin in the installed manifests. The pinned DOI must name a released Dataverse dataset whose description names the dataset's Zenodo DOI (the note every mirror carries) and which holds every file of the registry once: with the registry checksum where the server uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A same-size change of content passes this check; the fetch still verifies each downloaded file against the registry. The command reads only published data and needs no token, and it reads each Zenodo record once.
 
-It prints one line per wrong pin (FAIL), one per pin whose server or Zenodo record could not be read (UNREACHABLE), the counts, and the datasets without a pin, which a fallback never reaches; a manifest that fails to load is a FAIL. Exit is 1 when a pin is wrong or no pin was checked, 2 when no pin is wrong but some could not be checked, and 0 when every pin is served. The weekly nightly runs the same check on the shared manifest and skips it when a server is unreachable.
+It prints one line per wrong pin (FAIL), one per pin whose server or Zenodo record could not be read (UNREACHABLE), the counts, and the datasets without a pin, which a fallback never reaches; a manifest that fails to load is a FAIL. Exit is 1 when a pin is wrong, a manifest fails to load or no pin was checked, 3 when no pin is wrong but some could not be checked, and 0 when every pin is served. The weekly nightly runs the same check on the shared manifest and skips it when a server is unreachable.
 
 ## fwl-io --version
 

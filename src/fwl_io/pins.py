@@ -7,8 +7,11 @@ pin whose server or Zenodo record cannot be read is reported apart from a pin th
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
+
+import requests
 
 from fwl_io.manifest import Dataset, _discover
 from fwl_io.mirror import _ALGORITHMS, DataverseClient, DataverseError, DataverseRetryableError
@@ -21,21 +24,32 @@ class Unreachable(Exception):
 
 @dataclass
 class MirrorReport:
-    """Outcome of :func:`check_mirrors`: passed, failed, unreachable and unpinned datasets."""
+    """Outcome of :func:`check_mirrors`: passed, failed, unreachable and unpinned datasets,
+    and the manifests that failed to load."""
 
     passed: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     unreachable: dict[str, str] = field(default_factory=dict)
     unpinned: list[str] = field(default_factory=list)
+    manifest_errors: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
         """Whether at least one pin was checked and every checked pin is served by its mirror."""
-        return bool(self.passed) and not (self.failed or self.unreachable)
+        return bool(self.passed) and not (self.failed or self.unreachable or self.manifest_errors)
+
+    @property
+    def exit_code(self) -> int:
+        """Return 1 for a wrong pin, a manifest error or nothing checked, 3 when the only
+        problem is an unreachable server, and 0 when every pin is served."""
+        if self.failed or self.manifest_errors or not (self.passed or self.unreachable):
+            return 1
+        return 3 if self.unreachable else 0
 
     def summary(self) -> str:
         """Return one line per failed or unreachable pin, the counts, and the unpinned datasets."""
-        lines = [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
+        lines = [f'FAIL manifest {key}: {why}' for key, why in sorted(self.manifest_errors.items())]
+        lines += [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
         lines += [f'UNREACHABLE {key}: {why}' for key, why in sorted(self.unreachable.items())]
         lines.append(
             f'pins served by their mirror: {len(self.passed)}, wrong: {len(self.failed)}, '
@@ -54,6 +68,14 @@ def zenodo_sizes(doi: str) -> dict[str, int]:
     return {entry['key']: entry['size'] for entry in files or []}
 
 
+def _transient(exc: Exception) -> bool:
+    """Return whether a Zenodo read failed on a lost connection, a timeout, a 429 or a 5xx."""
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout, ConnectionError, TimeoutError)):
+        return True
+    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+    return status == 429 or (isinstance(status, int) and status >= 500)
+
+
 def _descriptions(version: dict) -> str:
     """Return the dsDescription values of a dataset version's citation block, one per line."""
     fields = ((version.get('metadataBlocks') or {}).get('citation') or {}).get('fields') or []
@@ -69,11 +91,12 @@ def pin_problem(dataset: Dataset, client: DataverseClient, sizes=zenodo_sizes) -
     """Return why the pin of ``dataset`` does not serve its registry, or None when it does.
 
     A pin serves its dataset when the DOI names a released dataset whose description names
-    the dataset's Zenodo DOI (the note every mirror carries, which tells apart two mirrors
-    whose files share names and sizes) and which holds every registry file once: with the
-    registry checksum where the server uses the same algorithm, otherwise with the file size
-    of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). A fetch still
-    verifies each downloaded file against the registry.
+    the dataset's Zenodo DOI in the note every mirror carries ("Mirror of Zenodo deposit
+    <doi>", which tells apart two mirrors whose files share names and sizes) and which holds
+    every registry file once and unrestricted: with the registry checksum where the server
+    uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL
+    stores SHA-1, the registries MD5). A fetch still verifies each downloaded file against
+    the registry.
 
     Parameters
     ----------
@@ -92,7 +115,8 @@ def pin_problem(dataset: Dataset, client: DataverseClient, sizes=zenodo_sizes) -
     Raises
     ------
     Unreachable
-        If the server answers with a transient error or the Zenodo sizes cannot be read.
+        If the server answers with a transient error, or a transient error stops the Zenodo
+        size read before any other problem was found.
     """
     registry = dataset.registry()
     if not registry:
@@ -110,32 +134,39 @@ def pin_problem(dataset: Dataset, client: DataverseClient, sizes=zenodo_sizes) -
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
         return f'doi:{dataset.dataverse} latest version is {version.get("versionState")!r}'
-    if not re.search(re.escape(dataset.zenodo) + r'(?!\d)', _descriptions(version)):
+    note = r'Mirror of Zenodo deposit ' + re.escape(dataset.zenodo) + r'(?!\d)'
+    if not re.search(note, _descriptions(version), re.IGNORECASE):
         return f'doi:{dataset.dataverse} does not name Zenodo {dataset.zenodo} as its source'
     files: dict[str, dict] = {}
     for entry in version.get('files') or []:
         meta = (entry or {}).get('dataFile') or {}
         name = meta.get('filename')
-        if name in files:
+        if name in files and name in registry:
             return f'doi:{dataset.dataverse} holds {name} twice'
-        files[name] = meta
-    problems, zenodo = [], None
+        files[name] = {**meta, 'restricted': (entry or {}).get('restricted')}
+    problems, by_size = [], []
     for name, digest in sorted(registry.items()):
         meta = files.get(name)
         checksum = (meta or {}).get('checksum') or {}
         algorithm = _ALGORITHMS.get(checksum.get('type'))
         if meta is None:
             problems.append(f'{name} missing')
-        elif algorithm == digest.partition(':')[0]:
+        elif meta['restricted']:
+            problems.append(f'{name} restricted')
+        elif algorithm == digest.partition(':')[0].lower():
             if f'{algorithm}:{str(checksum.get("value")).lower()}' != digest.lower():
                 problems.append(f'{name} checksum differs')
         else:
-            if zenodo is None:
-                try:
-                    zenodo = sizes(dataset.zenodo)
-                except Exception as exc:  # noqa: BLE001 -- any read failure is unreachable
-                    raise Unreachable(f'Zenodo {dataset.zenodo} file sizes: {exc}') from exc
-            size = meta.get('filesize')
+            by_size.append(name)
+    if by_size:
+        try:
+            zenodo = sizes(dataset.zenodo)
+        except Exception as exc:  # noqa: BLE001 -- a non-transient failure is a reason
+            if problems or not _transient(exc):
+                return '; '.join([*problems, f'Zenodo {dataset.zenodo} file sizes: {exc}'])
+            raise Unreachable(f'Zenodo {dataset.zenodo} file sizes: {exc}') from exc
+        for name in by_size:
+            size = files[name].get('filesize')
             if not isinstance(size, int) or size != zenodo.get(name):
                 problems.append(f'{name} size differs from Zenodo')
     return '; '.join(problems) or None
@@ -150,7 +181,7 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
         Base URL of the Dataverse server the pins live on.
     datasets : list of Dataset, optional
         Datasets to check; defaults to those of every installed manifest, and a manifest
-        that fails to load is reported as failed.
+        that fails to load is reported in ``manifest_errors``.
 
     Returns
     -------
@@ -161,14 +192,9 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
     if datasets is None:
         found, errors = _discover()
         datasets = [ds for group in found.values() for ds in group]
-        report.failed.update({f'manifest {name}': why for name, why in errors.items()})
+        report.manifest_errors.update(errors)
     client = DataverseClient(dataverse_url, token='')
-    cache: dict[str, dict[str, int]] = {}
-
-    def cached_sizes(doi: str) -> dict[str, int]:
-        if doi not in cache:
-            cache[doi] = zenodo_sizes(doi)
-        return cache[doi]
+    cached_sizes = functools.cache(zenodo_sizes)
 
     for ds in datasets:
         if not ds.dataverse:
@@ -179,7 +205,7 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
         except Unreachable as exc:
             report.unreachable[ds.key] = str(exc)
             continue
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001 -- one bad dataset must not stop the run
             why = f'{type(exc).__name__}: {exc}'
         if why is None:
             report.passed.append(ds.key)

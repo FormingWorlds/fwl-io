@@ -28,11 +28,13 @@ def test_committed_registries_match_live_zenodo_records():
 
 def test_shared_manifest_pins_are_served_by_their_dataverse_mirrors():
     """Every pin resolves to a released DataverseNL dataset holding the registry files with
-    their checksums, so the fallback download path works when Zenodo is down."""
+    their checksums, so the fallback download path works when Zenodo is down. A run where no
+    pin is served fails even in an outage, so a check that can never pass does not skip."""
     from fwl_io.pins import check_mirrors
 
     report = check_mirrors('https://dataverse.nl', load_manifest(shared_manifest_path()))
     assert not report.failed, report.summary()
+    assert report.passed, 'no pin was served:\n' + report.summary()
     if report.unreachable:
-        pytest.skip('DataverseNL or Zenodo unreachable:\n' + report.summary())
+        pytest.skip('DataverseNL or Zenodo partly unreachable:\n' + report.summary())
     assert report.ok, report.summary()

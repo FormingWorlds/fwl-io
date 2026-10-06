@@ -200,9 +200,7 @@ def _cmd_check_mirrors(args: argparse.Namespace) -> int:
 
     report = check_mirrors(args.dataverse_url)
     print(report.summary())
-    if report.failed or not (report.passed or report.unreachable):
-        return 1
-    return 2 if report.unreachable else 0
+    return report.exit_code
 
 
 def _cmd_mirror_publish(args: argparse.Namespace) -> int:
