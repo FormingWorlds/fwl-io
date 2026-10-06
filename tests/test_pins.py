@@ -551,3 +551,12 @@ def test_only_phoenix_is_unpinned_in_the_shared_manifest():
     datasets = load_manifest(shared_manifest_path())
     assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
     assert len(datasets) > 1
+
+
+def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
+    """A zip the mirror holds as its members fails the pin; the zip held as one file passes."""
+    dataset = _dataset(tmp_path, files={'p.zip': MD5_A})
+    unpacked = FakeClient(files=[_file('one.txt', 'SHA-1', 'e' * 40, 4)])
+    assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
+    kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
+    assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None

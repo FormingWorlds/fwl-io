@@ -2521,3 +2521,34 @@ def test_only_a_missing_dataset_id_stops_the_license_put(monkeypatch, dataset_id
     else:
         client.set_license('doi:10.34894/DEMO01', lic)
         assert ('PUT', 'http://unused/api/datasets/0/license') in seen
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('name', ['p.zip', 'P.ZIP'])
+def test_add_file_sends_a_zip_inside_a_second_zip(tmp_path, name):
+    """Dataverse unpacks an uploaded zip, so a zip goes inside an uncompressed second zip
+    whose one member is the archive under its own name, byte for byte; a .dat goes as is."""
+    import io
+    import zipfile
+
+    sent = []
+    client = DataverseClient('http://unused', 'tok')
+
+    def post(path, **kwargs):
+        name, handle, _ = kwargs['files']['file']
+        sent.append((name, handle.read()))
+
+    client._post = post
+    archive = tmp_path / name
+    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('a/one.txt', 'one\n')
+    plain = tmp_path / 'f.dat'
+    plain.write_bytes(b'data')
+    client.add_file('doi:10.34894/DEMO01', archive)
+    client.add_file('doi:10.34894/DEMO01', plain)
+    (wrap_name, wrapped), (plain_name, plain_bytes) = sent
+    assert (wrap_name, plain_name, plain_bytes) == (f'{name}.zip', 'f.dat', b'data')
+    with zipfile.ZipFile(io.BytesIO(wrapped)) as wrapper:
+        (member,) = wrapper.infolist()
+        assert (member.filename, member.compress_type) == (name, zipfile.ZIP_STORED)
+        assert wrapper.read(name) == archive.read_bytes()

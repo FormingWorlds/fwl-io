@@ -3,7 +3,8 @@
 Zenodo is the primary source of every dataset; Dataverse is a download
 mirror used as the second link in the fetch fallback chain. :func:`mirror_to_dataverse`
 takes a Zenodo version DOI, downloads and checksum-verifies its files, then
-creates a matching Dataverse dataset, uploads the files byte-identically,
+creates a matching Dataverse dataset, uploads the files byte-identically (a zip
+archive inside a second zip, which Dataverse unpacks),
 and (optionally) publishes it, printing the Dataverse DOI to add to the
 consuming manifest. Called with ``publish=False``, it leaves the created
 dataset as a private draft instead; :func:`publish_existing_dataverse_draft`
@@ -31,6 +32,7 @@ import logging
 import ssl
 import tempfile
 import time
+import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -584,24 +586,36 @@ class DataverseClient:
             )
 
     def add_file(self, persistent_id: str, path: Path, *, no_ingest: bool = True) -> None:
-        """Upload one file to a dataset, with tabular ingest disabled by default."""
+        """Upload one file to a dataset, with tabular ingest disabled by default.
+
+        Dataverse unpacks an uploaded zip archive into its members, so a ``.zip`` is sent
+        inside a second, uncompressed zip: Dataverse unpacks that one and stores the
+        archive itself, byte for byte, under its own name.
+        """
         params = {'persistentId': persistent_id}
         if no_ingest:
             params[_NO_INGEST_PARAM] = 'true'
 
-        def send():
-            with path.open('rb') as handle:
-                self._post(
-                    '/api/datasets/:persistentId/add',
-                    params=params,
-                    files={'file': (path.name, handle, 'application/octet-stream')},
-                )
+        with tempfile.TemporaryDirectory(prefix='fwl-io-upload-') as tmp:
+            upload = path
+            if path.suffix.lower() == '.zip':
+                upload = Path(tmp, f'{path.name}.zip')
+                with zipfile.ZipFile(upload, 'w', zipfile.ZIP_STORED) as wrapper:
+                    wrapper.write(path, path.name)
 
-        self._retry(
-            send,
-            f'upload of {path.name} to {persistent_id}',
-            done=lambda: self._file_arrived(persistent_id, path),
-        )
+            def send():
+                with upload.open('rb') as handle:
+                    self._post(
+                        '/api/datasets/:persistentId/add',
+                        params=params,
+                        files={'file': (upload.name, handle, 'application/octet-stream')},
+                    )
+
+            self._retry(
+                send,
+                f'upload of {path.name} to {persistent_id}',
+                done=lambda: self._file_arrived(persistent_id, path),
+            )
 
     def publish(self, persistent_id: str, *, version_type: str = 'major') -> None:
         """Publish a dataset, making its files publicly downloadable.
