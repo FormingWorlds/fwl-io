@@ -2611,9 +2611,20 @@ def _zip_bytes() -> bytes:
     """Return a small zip archive with two members, the same bytes on every call."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w') as archive:
-        for name, text in (('a/one.txt', 'one\n'), ('two.txt', 'two\n')):
-            archive.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), text)
+        archive.writestr(zipfile.ZipInfo('a/one.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'one\n')
+        archive.writestr(zipfile.ZipInfo('two.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'two\n')
     return buf.getvalue()
+
+
+def test_the_zip_helper_gives_the_same_bytes_at_any_time(monkeypatch):
+    """The zip tests build the archive more than once, so its bytes must not follow the clock."""
+    import time
+
+    first = _zip_bytes()
+    now = time.time()
+    monkeypatch.setattr(time, 'time', lambda: now + 3600)
+    assert _zip_bytes() == first
+    assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ['a/one.txt', 'two.txt']
 
 
 def test_a_record_with_a_zip_mirrors_to_a_draft_holding_the_zip(http_server, dataverse_server):
