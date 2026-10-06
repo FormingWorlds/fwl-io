@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import re
 import tarfile
 
 import pooch
@@ -1698,3 +1699,37 @@ def test_fetch_for_does_not_blame_tqdm_when_pooch_binding_is_missing(tmp_path, m
 
     assert seen['progress'] is False
     assert 'fwl-io[progress]' not in caplog.text
+
+
+def _layout_patterns() -> list[str]:
+    """Return a regex per dataset location in the layout tree of docs/Explanations/manifests.md."""
+    docs = pathlib.Path(__file__).parents[1] / 'docs' / 'Explanations'
+    text = (docs / 'manifests.md').read_text()
+    tree = text.split('```\nFWL_DATA/\n', 1)[1].split('```', 1)[0]
+    stack, patterns = [], []
+    for line in tree.splitlines():
+        entry = line.split('#', 1)[0].rstrip()
+        depth = (len(entry) - len(entry.lstrip())) // 2 - 1
+        stack[depth:] = [entry.strip().rstrip('/')]
+        if entry.endswith('r<recid>/'):
+            path = '/'.join(stack).removesuffix('/r<recid>')
+            parts = re.split(r'(<\w+>)', path)
+            regex = ''.join(
+                r'\d+' if p == '<bands>' else '[a-z0-9_]+' if p.startswith('<') else re.escape(p)
+                for p in parts
+            )
+            patterns.append(regex)
+    return patterns
+
+
+def test_every_shared_dataset_fits_the_documented_layout():
+    """Each shared dataset sits at a location the layout tree in the docs names."""
+    patterns = _layout_patterns()
+    assert r'atmos_clim/scattering/[a-z0-9_]+' in patterns
+    assert r'atmos_clim/spectral_files/[a-z0-9_]+/\d+' in patterns
+    misfits = [
+        ds.subdir
+        for ds in load_manifest(shared_manifest_path())
+        if not any(re.fullmatch(p, ds.subdir) for p in patterns)
+    ]
+    assert misfits == []

@@ -83,12 +83,18 @@ Below its dataset directory, every dataset resolves into a version directory `r<
 
 ```
 FWL_DATA/
-  atmos_clim/
+  atmos_clim/                        # the folders of AGNI's res/
     spectral_files/<set>/<bands>/r<recid>/
-    surface_albedos/hammond_2024/r<recid>/
+    surface_albedos/<dataset>/r<recid>/
+    scattering/<dataset>/r<recid>/
+    thermodynamics/<dataset>/r<recid>/
+    parfiles/<dataset>/r<recid>/
+    refractive/<dataset>/r<recid>/
   atmos_chem/                        # chemistry networks and cross-sections
   interior/
     eos/<dataset>/r<recid>/
+    eos/dk09_1tpa_elec_free/<set>/r<recid>/
+    mass_radius/zeng_2019/r<recid>/
     melting_curves/<dataset>/r<recid>/
   star/
     tracks/<dataset>/r<recid>/
