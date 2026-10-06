@@ -2616,13 +2616,11 @@ def _zip_bytes() -> bytes:
     return buf.getvalue()
 
 
+@pytest.mark.unit
 def test_the_zip_helper_gives_the_same_bytes_at_any_time(monkeypatch):
     """The zip tests build the archive more than once, so its bytes must not follow the clock."""
-    import time
-
     first = _zip_bytes()
-    now = time.time()
-    monkeypatch.setattr(time, 'time', lambda: now + 3600)
+    monkeypatch.setattr('time.time', lambda: 2e9)
     assert _zip_bytes() == first
     assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ['a/one.txt', 'two.txt']
 
