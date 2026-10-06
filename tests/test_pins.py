@@ -49,6 +49,8 @@ def _file(name, kind, value, size, restricted=False):
 class FakeClient:
     """Answers the dataset read in the DataverseNL shape, or raises an error."""
 
+    base_url = 'https://dataverse.example'
+
     def __init__(
         self, state='RELEASED', files=None, error=None, source=SOURCE, extra=None, note=None
     ):
@@ -160,15 +162,12 @@ def test_a_size_missing_on_both_sides_is_not_a_match(tmp_path):
     """A mirror file without a size does not match a Zenodo record that lacks the file."""
     client = FakeClient(files=[_file('a.dat', 'SHA-1', 'f' * 40, None)])
     assert 'size differs' in pin_problem(_dataset(tmp_path), client, sizes=lambda doi: {})
-    assert pin_problem(_dataset(tmp_path), FakeClient(), sizes=_sizes) is None
 
 
 def test_an_empty_registry_is_not_a_pass(tmp_path):
     """A registry with no file names checks nothing, so it is a reason, not a pass."""
-    assert pin_problem(_dataset(tmp_path, files={}), FakeClient(), sizes=_sizes) == (
-        'the registry lists no files'
-    )
-    assert pin_problem(_dataset(tmp_path), FakeClient(), sizes=_sizes) is None
+    why = pin_problem(_dataset(tmp_path, files={}), FakeClient(), sizes=_sizes)
+    assert why == 'the registry lists no files'
 
 
 def _http(status):
@@ -307,6 +306,76 @@ def test_only_a_certificate_error_is_retried(tmp_path, monkeypatch, waits):
     monkeypatch.setattr(pins, 'zenodo_sizes', sizes)
     assert sorted(check_mirrors('https://example.org').unreachable) == ['g.one']
     assert waits == [] and sizes.call_count == 1
+
+
+def _served(status, text, content_type='application/json'):
+    """Return a stub for requests.request that answers every call with one response."""
+    response = requests.Response()
+    response.status_code, response._content = status, text.encode()
+    response.headers['Content-Type'] = content_type
+    return lambda method, url, **kwargs: response
+
+
+@pytest.mark.parametrize(
+    ('status', 'text', 'content_type'),
+    [
+        (408, 'timeout', 'text/plain'),
+        (429, 'slow down', 'text/plain'),
+        (500, 'error', 'text/plain'),
+        (501, 'error', 'text/plain'),
+        (520, 'error', 'text/plain'),
+        (200, '<html>maintenance</html>', 'text/html'),
+    ],
+)
+def test_a_transient_dataverse_answer_is_unreachable(
+    tmp_path, monkeypatch, status, text, content_type
+):
+    """An HTTP 408, 429 or 5xx, or an HTML page in place of the API answer, from the real
+    client is an outage (exit 3), as on the Zenodo side."""
+    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(status, text, content_type))
+    client = DataverseClient('https://dataverse.example', token='')
+    with pytest.raises(Unreachable, match=f'doi:10.34894/ABCDEF: .*{status}'):
+        pin_problem(_dataset(tmp_path), client, sizes=_sizes)
+
+
+def test_a_missing_dataverse_dataset_is_a_wrong_pin(tmp_path, monkeypatch):
+    """A 404 from the real client makes the pin wrong (exit 1)."""
+    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(404, '{"status": "ERROR"}'))
+    client = DataverseClient('https://dataverse.example', token='')
+    why = pin_problem(_dataset(tmp_path), client, sizes=_sizes)
+    assert why.startswith('cannot read doi:10.34894/ABCDEF:') and '404' in why
+
+
+def test_a_doi_prefix_on_either_pin_is_accepted(tmp_path):
+    """A pin written as doi:<doi> reads the same dataset and Zenodo record as a bare one."""
+    ds = _dataset(tmp_path, pin='doi:10.34894/ABCDEF', zenodo=f'doi:{SOURCE}')
+    client, sizes = FakeClient(), Mock(side_effect=_sizes)
+    assert pin_problem(ds, client, sizes=sizes) is None
+    assert client.calls[0][2] == {'persistentId': 'doi:10.34894/ABCDEF'}
+    sizes.assert_called_once_with(SOURCE)
+
+
+def test_a_host_that_failed_its_certificate_is_not_retried_again(tmp_path, monkeypatch, waits):
+    """Once a host failed every certificate attempt, later reads of it fail at once and the
+    summary says they were not retried; this holds for Zenodo and for the Dataverse host."""
+    datasets = [_dataset(tmp_path, f'g.{n}', zenodo=f'10.5281/zenodo.{n}') for n in (1, 2, 3)]
+    notes = ' '.join(f'Mirror of Zenodo deposit 10.5281/zenodo.{n}.' for n in (1, 2, 3))
+    _patch(monkeypatch, datasets, client=FakeClient(note=notes))
+    sizes = Mock(side_effect=CERT)
+    monkeypatch.setattr(pins, 'zenodo_sizes', sizes)
+    report = check_mirrors('https://example.org')
+    assert sorted(report.failed) == ['g.1', 'g.2', 'g.3']
+    assert waits == [30.0, 30.0] and sizes.call_count == 5
+    assert sorted(report.warnings) == ['g.2', 'g.3']
+    assert 'not retried since zenodo.org failed 3 attempts' in report.warnings['g.3']
+
+    waits.clear()
+    client = FlakyClient(failures=99)
+    _patch(monkeypatch, datasets, client=client)
+    report = check_mirrors('https://example.org')
+    assert sorted(report.failed) == ['g.1', 'g.2', 'g.3'] and len(client.calls) == 5
+    assert waits == [30.0, 30.0]
+    assert 'not retried since dataverse.example failed' in report.warnings['g.2']
 
 
 def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
@@ -475,3 +544,10 @@ def test_shared_manifest_pins_are_consistent():
     for ds in pinned:
         by_record.setdefault(ds.zenodo, set()).add(ds.dataverse)
     assert all(len(dois) == 1 for dois in by_record.values())
+
+
+def test_only_phoenix_is_unpinned_in_the_shared_manifest():
+    """Every shared dataset has a DataverseNL mirror except the PHOENIX spectra."""
+    datasets = load_manifest(shared_manifest_path())
+    assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
+    assert len(datasets) > 1

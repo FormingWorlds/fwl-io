@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import requests
 
@@ -25,6 +26,7 @@ from fwl_io.sync import fetch_zenodo_record
 
 CERT_ATTEMPTS = 3
 CERT_WAIT_S = 30.0
+ZENODO_HOST = 'zenodo.org'
 
 
 class Unreachable(Exception):
@@ -90,23 +92,39 @@ _TRANSIENT = (
 )
 
 
-def _read(call, what: str, notes: list[str] | None):
+def _read(call, what: str, notes: list[str] | None, host: str, cert_failed: set[str] | None):
     """Return ``call()``, retrying a certificate failure up to CERT_ATTEMPTS times.
 
-    A recovery is noted in ``notes``; any other failure, or a certificate failure on every
-    attempt, is raised.
+    A host in ``cert_failed`` already failed every attempt in this run, so it gets one attempt
+    and no wait; a host that fails every attempt is added to it. A recovery, and a read that
+    was not retried, are noted in ``notes``; any other failure is raised.
     """
-    for attempt in range(1, CERT_ATTEMPTS + 1):
+    attempts = 1 if cert_failed is not None and host in cert_failed else CERT_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         try:
             value = call()
         except Exception as exc:
-            if attempt == CERT_ATTEMPTS or not _cert_failure(exc):
+            if not _cert_failure(exc):
                 raise
-            time.sleep(CERT_WAIT_S)
-            continue
+            if attempt < attempts:
+                time.sleep(CERT_WAIT_S)
+                continue
+            if attempts == 1 and notes is not None:
+                notes.append(
+                    f'{what}: certificate error, not retried since {host} failed '
+                    f'{CERT_ATTEMPTS} attempts earlier in this run'
+                )
+            if cert_failed is not None:
+                cert_failed.add(host)
+            raise
         if attempt > 1 and notes is not None:
             notes.append(f'{what}: certificate error, recovered after {attempt} attempts')
         return value
+
+
+def _transient_status(status) -> bool:
+    """Return whether an HTTP status marks a transient server fault: 408, 429 or 5xx."""
+    return isinstance(status, int) and (status in (408, 429) or status >= 500)
 
 
 def _transient(exc: Exception) -> bool:
@@ -114,8 +132,20 @@ def _transient(exc: Exception) -> bool:
     connection, a timeout, or a cut or non-JSON body. A certificate failure is permanent."""
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
     if isinstance(status, int):
-        return status in (408, 429) or status >= 500
+        return _transient_status(status)
     return isinstance(exc, _TRANSIENT) and not _cert_failure(exc)
+
+
+def _dataverse_transient(exc: DataverseError) -> bool:
+    """Return whether a Dataverse read failed in transit: the bot-check page, a lost connection,
+    a timeout or a cut body, an HTTP 408, 429 or 5xx, or a 2xx whose body is not JSON (an
+    HTML page in place of the API answer)."""
+    status = exc.status_code
+    return (
+        isinstance(exc, DataverseRetryableError)
+        or _transient_status(status)
+        or (isinstance(status, int) and 200 <= status < 300)
+    )
 
 
 def _descriptions(version: dict) -> str:
@@ -130,7 +160,11 @@ def _descriptions(version: dict) -> str:
 
 
 def pin_problem(
-    dataset: Dataset, client: DataverseClient, sizes=zenodo_sizes, notes: list[str] | None = None
+    dataset: Dataset,
+    client: DataverseClient,
+    sizes=zenodo_sizes,
+    notes: list[str] | None = None,
+    cert_failed: set[str] | None = None,
 ) -> str | None:
     """Return why the pin of ``dataset`` does not serve its registry, or None when it does.
 
@@ -152,6 +186,8 @@ def pin_problem(
         Returns the name-to-size map of a Zenodo DOI.
     notes : list of str, optional
         Receives a warning when the Dataverse read needed a retry after a certificate error.
+    cert_failed : set of str, optional
+        Hosts that failed every certificate attempt earlier in the run; see ``_read``.
 
     Returns
     -------
@@ -167,32 +203,33 @@ def pin_problem(
     registry = dataset.registry()
     if not registry:
         return 'the registry lists no files'
+    pin, zenodo_doi = dataset.dataverse.removeprefix('doi:'), dataset.zenodo.removeprefix('doi:')
     try:
         body = _read(
             lambda: client._request(
-                'GET',
-                '/api/datasets/:persistentId/',
-                params={'persistentId': f'doi:{dataset.dataverse}'},
+                'GET', '/api/datasets/:persistentId/', params={'persistentId': f'doi:{pin}'}
             ),
-            f'doi:{dataset.dataverse}',
+            f'doi:{pin}',
             notes,
+            urlparse(client.base_url).hostname,
+            cert_failed,
         )
-    except DataverseRetryableError as exc:
-        raise Unreachable(f'doi:{dataset.dataverse}: {exc}') from exc
     except DataverseError as exc:
-        return f'cannot read doi:{dataset.dataverse}: {exc}'
+        if _dataverse_transient(exc):
+            raise Unreachable(f'doi:{pin}: {exc}') from exc
+        return f'cannot read doi:{pin}: {exc}'
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
-        return f'doi:{dataset.dataverse} latest version is {version.get("versionState")!r}'
-    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(dataset.zenodo) + r'(?!\d)'
+        return f'doi:{pin} latest version is {version.get("versionState")!r}'
+    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(zenodo_doi) + r'(?!\d)'
     if not re.search(note, _descriptions(version), re.IGNORECASE):
-        return f'doi:{dataset.dataverse} does not name Zenodo {dataset.zenodo} as its source'
+        return f'doi:{pin} does not name Zenodo {zenodo_doi} as its source'
     files: dict[str, dict] = {}
     for entry in version.get('files') or []:
         meta = (entry or {}).get('dataFile') or {}
         name = meta.get('filename')
         if name in files and name in registry:
-            return f'doi:{dataset.dataverse} holds {name} twice'
+            return f'doi:{pin} holds {name} twice'
         files[name] = {**meta, 'restricted': (entry or {}).get('restricted')}
     problems, by_size = [], []
     for name, digest in sorted(registry.items()):
@@ -210,11 +247,11 @@ def pin_problem(
             by_size.append(name)
     if by_size:
         try:
-            zenodo = sizes(dataset.zenodo)
+            zenodo = sizes(zenodo_doi)
         except Exception as exc:  # noqa: BLE001 -- a non-transient failure is a reason
             if problems or not _transient(exc):
-                return '; '.join([*problems, f'Zenodo {dataset.zenodo} file sizes: {exc}'])
-            raise Unreachable(f'Zenodo {dataset.zenodo} file sizes: {exc}') from exc
+                return '; '.join([*problems, f'Zenodo {zenodo_doi} file sizes: {exc}'])
+            raise Unreachable(f'Zenodo {zenodo_doi} file sizes: {exc}') from exc
         for name in by_size:
             size = files[name].get('filesize')
             if not isinstance(size, int) or size != zenodo.get(name):
@@ -247,12 +284,15 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
     client = DataverseClient(dataverse_url, token='')
     outcomes: dict[str, dict[str, int] | Exception] = {}
     notes: list[str] = []
+    cert_failed: set[str] = set()
 
     def cached_sizes(doi: str) -> dict[str, int]:
         """Return the sizes of a Zenodo DOI, or raise its failure, reading it once per run."""
         if doi not in outcomes:
             try:
-                outcomes[doi] = _read(lambda: zenodo_sizes(doi), f'Zenodo {doi}', notes)
+                outcomes[doi] = _read(
+                    lambda: zenodo_sizes(doi), f'Zenodo {doi}', notes, ZENODO_HOST, cert_failed
+                )
             except Exception as exc:  # noqa: BLE001 -- a failure is read once, like a success
                 outcomes[doi] = exc
         if isinstance(outcomes[doi], Exception):
@@ -265,16 +305,15 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
             continue
         notes = []
         try:
-            why = pin_problem(ds, client, sizes=cached_sizes, notes=notes)
+            why = pin_problem(ds, client, cached_sizes, notes, cert_failed)
         except Unreachable as exc:
-            why = exc
+            report.unreachable[ds.key] = str(exc)
+            continue
         except Exception as exc:  # noqa: BLE001 -- one bad dataset must not stop the run
             why = f'{type(exc).__name__}: {exc}'
-        if notes:
-            report.warnings[ds.key] = '; '.join(notes)
-        if isinstance(why, Unreachable):
-            report.unreachable[ds.key] = str(why)
-            continue
+        finally:
+            if notes:
+                report.warnings[ds.key] = '; '.join(notes)
         if why is None:
             report.passed.append(ds.key)
         else:

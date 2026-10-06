@@ -384,12 +384,14 @@ class DataverseClient:
         except ValueError:
             raise DataverseError(
                 f'Dataverse {method} {path} returned {response.status_code} with a '
-                f'non-JSON body: {response.text[:500]}'
+                f'non-JSON body: {response.text[:500]}',
+                response.status_code,
             ) from None
         if not isinstance(body, dict):
             raise DataverseError(
                 f'Dataverse {method} {path} returned {response.status_code} with a '
-                f'non-object JSON body: {response.text[:500]}'
+                f'non-object JSON body: {response.text[:500]}',
+                response.status_code,
             )
         return body
 
