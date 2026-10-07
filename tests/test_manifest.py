@@ -547,6 +547,45 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
     }
 
 
+def test_shared_interior_tables_name_the_models_that_fetch_them(tmp_path):
+    """`fwl-io fetch zalmoxis` covers every shared table the Zalmoxis setup links, and
+    `fwl-io fetch proteus` the shared Seager and Zeng data PROTEUS reads; spectra
+    are fetched on demand, and the two shared keys have no legacy location."""
+    from fwl_io.check import check_for
+    from fwl_io.relocate import _legacy_locations
+
+    shared = load_manifest(shared_manifest_path())
+    seager, zeng = 'interior.eos.seager_2007', 'interior.mass_radius.zeng_2019'
+    zalmoxis_only = {
+        'interior.eos.chabrier_2021_hhe',
+        'interior.eos.paleos_h2o',
+        'interior.eos.paleos_iron',
+        'interior.eos.paleos_mgsio3',
+        'interior.eos.paleos_mgsio3_unified',
+        'interior.eos.rtpress_melt_100tpa',
+        'interior.eos.wolf_bower_2018_1tpa',
+        'interior.melting_curves.monteux_minus_600',
+    }
+    expected = {key: {'zalmoxis'} for key in zalmoxis_only}
+    expected.update({seager: {'proteus', 'zalmoxis'}, zeng: {'proteus', 'zalmoxis'}})
+    assert {ds.key: set(ds.required_by) for ds in shared if ds.required_by} == expected
+    assert not [
+        ds.key for ds in shared if ds.key.startswith(('atmos_clim.', 'star.')) and ds.required_by
+    ]
+
+    keys = {ds.key for ds in shared}
+    for model in ('zalmoxis', 'proteus'):
+        report = check_for(model, data_root=tmp_path)
+        assert report.manifest_errors == {}
+        assert {k for k in report.datasets if k in keys} == {
+            k for k, models in expected.items() if model in models
+        }
+
+    locations, error = _legacy_locations()
+    assert error is None
+    assert seager not in locations and zeng not in locations
+
+
 class _FakeDist:
     def __init__(self, name):
         self.name = name

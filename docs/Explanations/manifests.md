@@ -89,6 +89,7 @@ FWL_DATA/
   atmos_chem/                        # chemistry networks and cross-sections
   interior/
     eos/<dataset>/r<recid>/
+    mass_radius/<dataset>/r<recid>/
     melting_curves/<dataset>/r<recid>/
   star/
     tracks/<dataset>/r<recid>/
@@ -116,5 +117,7 @@ Models adopt this layout when they migrate to fwl-io; legacy directories from th
 | `stellar_spectra/{solar,PHOENIX,MUSCLES,Named}` | `star/spectra/{solar,phoenix,muscles,named}/r<recid>` |
 | `mass_radius/Zeng2019` | `observe/mass_radius/zeng_2019/r<recid>` |
 | `planet_reference/Exoplanets` | `observe/exoplanet_reference/r<recid>` |
+
+The Seager 2007 EOS and the Zeng 2019 mass-radius relations are shared datasets at `interior/eos/seager_2007` and `interior/mass_radius/zeng_2019`, which Zalmoxis reads, and PROTEUS from the release with its shared-key change. `fwl-io relocate` moves the legacy `EOS_Seager2007` and `Zeng2019` folders only to `interior_struct/eos/seager_2007` and `observe/mass_radius/zeng_2019`, and only while a PROTEUS release that declares those locations is installed; otherwise both records (0.2 MB together) are fetched again.
 
 The Chabrier archive unpacks with its own top-level directory, so its files sit one level below the version directory, in `interior/eos/chabrier_2021_hhe/r<recid>/EOS_Chabrier2021_HHe/`. The archive also holds macOS `._*` metadata files and a `.DS_Store`, which are extracted with it. `fwl-io relocate` reports the Chabrier dataset as unresolvable, since it is an archive dataset.
