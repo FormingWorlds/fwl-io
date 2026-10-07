@@ -545,6 +545,31 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
         'atmos_clim.surface_albedos.hammond_2024',
         'interior_struct.eos.seager_2007',
     }
+    # The shared Seager and Zeng keys reach the same old trees as the PROTEUS keys before them.
+    assert locations['interior.eos.seager_2007'] == 'EOS_material_properties/EOS_Seager2007'
+    assert locations['interior.mass_radius.zeng_2019'] == 'mass_radius/Zeng2019'
+
+
+def test_shared_interior_tables_name_the_models_that_fetch_them():
+    """`fwl-io fetch zalmoxis` gets every shared table the Zalmoxis setup links, and
+    `fwl-io fetch proteus` the shared Seager and Zeng data PROTEUS reads."""
+    models = {ds.key: ds.required_by for ds in load_manifest(shared_manifest_path())}
+    assert {key for key, by in models.items() if 'zalmoxis' in by} == {
+        'interior.eos.chabrier_2021_hhe',
+        'interior.eos.paleos_h2o',
+        'interior.eos.paleos_iron',
+        'interior.eos.paleos_mgsio3',
+        'interior.eos.paleos_mgsio3_unified',
+        'interior.eos.rtpress_melt_100tpa',
+        'interior.eos.seager_2007',
+        'interior.eos.wolf_bower_2018_1tpa',
+        'interior.mass_radius.zeng_2019',
+        'interior.melting_curves.monteux_minus_600',
+    }
+    assert {key for key, by in models.items() if 'proteus' in by} == {
+        'interior.eos.seager_2007',
+        'interior.mass_radius.zeng_2019',
+    }
 
 
 class _FakeDist:
