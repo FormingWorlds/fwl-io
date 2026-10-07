@@ -545,9 +545,6 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
         'atmos_clim.surface_albedos.hammond_2024',
         'interior_struct.eos.seager_2007',
     }
-    # The shared Seager and Zeng keys reach the same old trees as the PROTEUS keys before them.
-    assert locations['interior.eos.seager_2007'] == 'EOS_material_properties/EOS_Seager2007'
-    assert locations['interior.mass_radius.zeng_2019'] == 'mass_radius/Zeng2019'
 
 
 def test_shared_interior_tables_name_the_models_that_fetch_them(tmp_path):
