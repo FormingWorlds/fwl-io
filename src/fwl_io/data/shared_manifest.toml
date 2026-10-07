@@ -149,8 +149,8 @@ dataverse = "10.34894/6VJ51M"
 
 [star.spectra.named]
 name = "Stellar spectra of named stars"
-zenodo = "10.5281/zenodo.15721440"
-dataverse = "10.34894/BC1DEH"
+zenodo = "10.5281/zenodo.23197931"
+dataverse = "10.34894/URD02X"
 
 [star.spectra.phoenix]
 name = "PHOENIX stellar spectra"
