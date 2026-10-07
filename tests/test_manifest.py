@@ -550,11 +550,17 @@ def test_legacy_layout_keys_are_declared_or_owned_by_other_manifests():
     assert locations['interior.mass_radius.zeng_2019'] == 'mass_radius/Zeng2019'
 
 
-def test_shared_interior_tables_name_the_models_that_fetch_them():
-    """`fwl-io fetch zalmoxis` gets every shared table the Zalmoxis setup links, and
-    `fwl-io fetch proteus` the shared Seager and Zeng data PROTEUS reads."""
-    models = {ds.key: ds.required_by for ds in load_manifest(shared_manifest_path())}
-    assert {key for key, by in models.items() if 'zalmoxis' in by} == {
+def test_shared_interior_tables_name_the_models_that_fetch_them(tmp_path):
+    """`fwl-io check zalmoxis` covers every shared table the Zalmoxis setup links, and
+    `fwl-io check proteus` the shared Seager and Zeng data PROTEUS reads."""
+    from fwl_io.check import check_for
+
+    shared = {ds.key for ds in load_manifest(shared_manifest_path())}
+
+    def checked(model):
+        return {key for key in check_for(model, data_root=tmp_path).datasets if key in shared}
+
+    assert checked('zalmoxis') == {
         'interior.eos.chabrier_2021_hhe',
         'interior.eos.paleos_h2o',
         'interior.eos.paleos_iron',
@@ -566,7 +572,7 @@ def test_shared_interior_tables_name_the_models_that_fetch_them():
         'interior.mass_radius.zeng_2019',
         'interior.melting_curves.monteux_minus_600',
     }
-    assert {key for key, by in models.items() if 'proteus' in by} == {
+    assert checked('proteus') == {
         'interior.eos.seager_2007',
         'interior.mass_radius.zeng_2019',
     }
