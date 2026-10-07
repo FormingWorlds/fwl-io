@@ -19,12 +19,12 @@
 #
 # Model-specific datasets do NOT belong here: declare them in the consuming
 # model's own manifest and expose it through the "fwl_io.manifests"
-# entry-point group. This file is only for data consumed by several models
-# (spectral files, multi-consumer lookup tables).
+# entry-point group. This file is only for data several models read (spectral
+# files, stellar spectra, equations of state, melting curves, lookup tables).
 #
 # A dataset without required_by is not part of `fwl-io fetch <model>` or
 # `fwl-io check <model>`: it is fetched on demand by its consumer, through
-# the dataset key. The interior tables Zalmoxis always reads carry required_by;
+# the dataset key. The interior tables the Zalmoxis setup links carry required_by;
 # the spectral files and stellar spectra (many gigabytes) do not.
 #
 # The Baraffe stellar tracks ship with the MORS package, which owns their

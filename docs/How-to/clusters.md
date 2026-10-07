@@ -30,6 +30,6 @@ To stop an array job from stampeding the mirrors, each target is also guarded by
 
 ## Recommended pattern for SLURM campaigns
 
-1. On a login node: `fwl-io fetch <model>` for every model in the pipeline, into the shared tree.
+1. On a login node: `fwl-io fetch <model>` for every model in the pipeline, into the shared tree. For Zalmoxis this is about 2.2 GB (measured on 2026-10-07).
 2. In job scripts: `export FWL_IO_OFFLINE=1` and, if using a group share, `FWL_DATA_CACHE`.
 3. A missing dataset then fails fast at job start with a clear message instead of thousands of jobs attempting downloads.
