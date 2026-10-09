@@ -60,6 +60,7 @@ import logging
 import re
 import tomllib
 from dataclasses import dataclass, field
+from enum import Enum
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -466,21 +467,35 @@ def shared_manifest_path() -> Path:
     return Path(__file__).parent / 'data' / 'shared_manifest.toml'
 
 
+class ErrorKind(Enum):
+    """Why a manifest provider was left out of discovery."""
+
+    LOAD_FAILURE = 'failed to load'
+    CONFLICT = 'conflicts with another provider'
+
+
+@dataclass(frozen=True)
+class ProviderError:
+    """A provider left out of discovery: the reason, the message, and for a conflict the
+    lower-cased models its datasets serve."""
+
+    kind: ErrorKind
+    message: str
+    models: frozenset[str] = frozenset()
+
+
 @dataclass(frozen=True)
 class _Discovery:
     """Result of loading every installed manifest.
 
-    ``found`` holds the datasets of each usable provider. ``errors`` holds one
-    message per provider left out, whether it failed to load or conflicts with
-    another. ``conflict_models`` maps the ``errors`` key of each provider left
-    out for a conflict to the lower-cased models its datasets serve.
+    ``found`` holds the datasets of each usable provider; ``errors`` holds a
+    :class:`ProviderError` per provider left out.
     """
 
     found: dict[str, list[Dataset]]
-    errors: dict[str, str]
-    conflict_models: dict[str, frozenset[str]]
+    errors: dict[str, ProviderError]
 
-    def errors_for(self, model: str) -> dict[str, str]:
+    def errors_for(self, model: str) -> dict[str, ProviderError]:
         """Return the ``errors`` that can affect ``model``, a lower-cased name.
 
         A provider that failed to load is always included, since its datasets
@@ -488,9 +503,9 @@ class _Discovery:
         a conflict is included only when its datasets serve the model.
         """
         return {
-            name: msg
-            for name, msg in self.errors.items()
-            if name not in self.conflict_models or model in self.conflict_models[name]
+            name: error
+            for name, error in self.errors.items()
+            if error.kind is ErrorKind.LOAD_FAILURE or model in error.models
         }
 
 
@@ -499,7 +514,7 @@ def _models_served(datasets: list[Dataset]) -> frozenset[str]:
     return frozenset(m.lower() for ds in datasets for m in ds.required_by)
 
 
-def _unique_key(key: str, taken: dict[str, str]) -> str:
+def _unique_key(key: str, taken: dict) -> str:
     """Return ``key``, suffixed with a counter if ``taken`` already has it."""
     candidate, n = key, 1
     while candidate in taken:
@@ -509,8 +524,8 @@ def _unique_key(key: str, taken: dict[str, str]) -> str:
 
 
 def _drop_duplicate_names(
-    loaded: list[tuple[str, str, str, list[Dataset]]], errors: dict[str, str]
-) -> tuple[dict[str, list[Dataset]], dict[str, frozenset[str]]]:
+    loaded: list[tuple[str, str, str, list[Dataset]]], errors: dict[str, ProviderError]
+) -> dict[str, list[Dataset]]:
     """Keep the providers with a unique entry-point name; report the others.
 
     ``loaded`` holds ``(name, package label, entry-point target, datasets)`` per
@@ -523,7 +538,6 @@ def _drop_duplicate_names(
     for name, label, target, datasets in loaded:
         by_name.setdefault(name, []).append((label, target, datasets))
     found: dict[str, list[Dataset]] = {}
-    models: dict[str, frozenset[str]] = {}
     for name, claimants in by_name.items():
         if len(claimants) == 1:
             found[name] = claimants[0][2]
@@ -538,15 +552,14 @@ def _drop_duplicate_names(
         )
         for _label, target, datasets in claimants:
             key = _unique_key(f'{name} ({target})', errors)
-            errors[key] = message
-            models[key] = _models_served(datasets)
+            errors[key] = ProviderError(ErrorKind.CONFLICT, message, _models_served(datasets))
             log.warning('skipping manifest provider %r: %s', key, message)
-    return found, models
+    return found
 
 
 def _drop_conflicting_datasets(
-    found: dict[str, list[Dataset]], errors: dict[str, str]
-) -> dict[str, frozenset[str]]:
+    found: dict[str, list[Dataset]], errors: dict[str, ProviderError]
+) -> None:
     """Remove every provider that claims a location another provider also claims.
 
     Locations are compared case-folded, the rule a single manifest already
@@ -562,7 +575,6 @@ def _drop_conflicting_datasets(
             claims.setdefault(ds.subdir.lower(), []).append((provider, ds.key))
     conflicts = {loc: sorted(owners) for loc, owners in claims.items() if len(owners) > 1}
     dropped = sorted({provider for owners in conflicts.values() for provider, _ in owners})
-    models: dict[str, frozenset[str]] = {}
     for provider in dropped:
         lines = [
             'manifests from different providers claim the same dataset location '
@@ -580,12 +592,10 @@ def _drop_conflicting_datasets(
         )
         key = _unique_key(provider, errors)
         message = '\n'.join(lines)
-        errors[key] = message
-        models[key] = _models_served(found[provider])
+        errors[key] = ProviderError(ErrorKind.CONFLICT, message, _models_served(found[provider]))
         log.warning('skipping manifest provider %r: %s', key, message)
     for provider in dropped:
         del found[provider]
-    return models
 
 
 def _discover_all() -> _Discovery:
@@ -595,7 +605,7 @@ def _discover_all() -> _Discovery:
     provider, or claims a dataset location another provider also claims is left
     out of ``found`` and reported in ``errors``, so the rest keep working.
     """
-    errors: dict[str, str] = {}
+    errors: dict[str, ProviderError] = {}
     loaded: list[tuple[str, str, str, list[Dataset]]] = []
     for ep in entry_points(group='fwl_io.manifests'):
         target = getattr(ep, 'value', None) or ep.name
@@ -604,17 +614,17 @@ def _discover_all() -> _Discovery:
             manifest_path = ep.load()()
             loaded.append((ep.name, label, target, load_manifest(manifest_path)))
         except Exception as exc:  # noqa: BLE001 -- one bad provider must not break the rest
-            errors[_unique_key(ep.name, errors)] = str(exc)
+            errors[_unique_key(ep.name, errors)] = ProviderError(ErrorKind.LOAD_FAILURE, str(exc))
             log.warning('skipping manifest provider %r: %s', ep.name, exc)
-    found, conflict_models = _drop_duplicate_names(loaded, errors)
-    conflict_models.update(_drop_conflicting_datasets(found, errors))
-    return _Discovery(found, errors, conflict_models)
+    found = _drop_duplicate_names(loaded, errors)
+    _drop_conflicting_datasets(found, errors)
+    return _Discovery(found, errors)
 
 
 def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
     """Return ``(datasets per provider, error per provider left out)``."""
     result = _discover_all()
-    return result.found, result.errors
+    return result.found, {name: error.message for name, error in result.errors.items()}
 
 
 def discover_manifests() -> dict[str, list[Dataset]]:
@@ -631,6 +641,68 @@ def discover_manifests() -> dict[str, list[Dataset]]:
 
 
 _TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
+
+
+def _usable_progress(progress: bool) -> bool:
+    """Return ``progress`` when a bar can be drawn, else False; name the fix when it is tqdm."""
+    from fwl_io.fetch import _progressbar_unavailable
+
+    if not progress:
+        return False
+    reason = _progressbar_unavailable()
+    if reason == 'tqdm':
+        log.warning(_TQDM_HINT)
+    return reason is None
+
+
+def _fetcher_of(ds: Dataset, data_root: str | Path | None = None, progress: bool = False):
+    """Return the fetcher of one declared dataset."""
+    from fwl_io.fetch import create_fetcher
+
+    return create_fetcher(
+        subdir=ds.subdir,
+        zenodo=ds.zenodo,
+        dataverse=ds.dataverse,
+        registry=ds.registry(),
+        data_root=data_root,
+        progress=progress,
+        extract=ds.extract,
+    )
+
+
+def fetcher_for_key(key: str, data_root: str | Path | None = None, progress: bool = False):
+    """Return the fetcher of the dataset ``key`` declared in an installed manifest.
+
+    It is the fetcher :func:`fetch_for` uses, with the same mirrors and checks, so a code
+    that cannot import fwl-io can fetch or locate one dataset through the CLI.
+
+    Parameters
+    ----------
+    key : str
+        Dotted manifest key of the dataset, e.g. ``atmos_clim.refractive.agni_aerosols``.
+    data_root : str | Path | None
+        Override for the data root; defaults to the resolved FWL_DATA tree.
+    progress : bool
+        Show a per-file download progress bar when one can be drawn.
+
+    Returns
+    -------
+    fwl_io.Fetcher
+        Fetcher bound to the dataset's version directory.
+
+    Raises
+    ------
+    LookupError
+        No usable installed manifest declares ``key``.
+    """
+    discovery = _discover_all()
+    for datasets in discovery.found.values():
+        for ds in datasets:
+            if ds.key == key:
+                return _fetcher_of(ds, data_root, _usable_progress(progress))
+    n = len(discovery.errors)
+    unused = f'; {n} manifest(s) not used, see fwl-io list' if n else ''
+    raise LookupError(f'no installed manifest declares the dataset {key!r}{unused}')
 
 
 def fetch_for(
@@ -659,14 +731,7 @@ def fetch_for(
         there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
         continues.
     """
-    from fwl_io.fetch import _progressbar_unavailable, create_fetcher
-
-    if progress:
-        # Never fail a fetch over a cosmetic bar; name the fix only when it is tqdm.
-        reason = _progressbar_unavailable()
-        if reason == 'tqdm':
-            log.warning(_TQDM_HINT)
-        progress = reason is None
+    progress = _usable_progress(progress)
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
@@ -678,16 +743,7 @@ def fetch_for(
             if model not in tuple(r.lower() for r in ds.required_by):
                 continue
             try:
-                fetcher = create_fetcher(
-                    subdir=ds.subdir,
-                    zenodo=ds.zenodo,
-                    dataverse=ds.dataverse,
-                    registry=ds.registry(),
-                    data_root=data_root,
-                    progress=progress,
-                    extract=ds.extract,
-                )
-                fetched[ds.key] = fetcher.fetch_all()
+                fetched[ds.key] = _fetcher_of(ds, data_root, progress).fetch_all()
             except Exception as exc:  # noqa: BLE001 -- aggregate and re-raise below
                 failures[ds.key] = str(exc)
     if failures or provider_errors:
@@ -698,8 +754,8 @@ def fetch_for(
         if provider_errors:
             report.append(f'{len(provider_errors)} manifest(s) not used:')
             by_message: dict[str, list[str]] = {}
-            for name, msg in sorted(provider_errors.items()):
-                by_message.setdefault(msg, []).append(name)
+            for name, error in sorted(provider_errors.items()):
+                by_message.setdefault(error.message, []).append(name)
             report += [f'  {", ".join(names)}: {msg}' for msg, names in by_message.items()]
         raise RuntimeError('\n'.join(report))
     return fetched

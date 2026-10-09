@@ -317,14 +317,17 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
         Keyed by dataset, alongside the manifests that were left out and
         the datasets that could not be resolved.
     """
-    from fwl_io.manifest import _discover_all
+    from fwl_io.manifest import ErrorKind, _discover_all
 
     model = model.lower()
     datasets: dict[str, DatasetCheck] = {}
     dataset_errors: dict[str, str] = {}
     discovery = _discover_all()
-    manifest_errors = discovery.errors_for(model)
-    conflict_providers = frozenset(discovery.conflict_models) & manifest_errors.keys()
+    provider_errors = discovery.errors_for(model)
+    manifest_errors = {name: error.message for name, error in provider_errors.items()}
+    conflict_providers = frozenset(
+        name for name, error in provider_errors.items() if error.kind is ErrorKind.CONFLICT
+    )
     for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             if model not in tuple(r.lower() for r in ds.required_by):

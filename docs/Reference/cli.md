@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has nine subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has ten subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -22,11 +22,20 @@ Lists every dataset from all installed manifests with its key and consumers. Whe
 
 ```bash
 fwl-io fetch <model> [--data-root PATH] [--progress | --no-progress]
+fwl-io fetch --key <dotted.key> [--data-root PATH] [--progress | --no-progress]
 ```
 
-Fetches every dataset that lists `<model>` in its `required_by`. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
+Fetches every dataset that lists `<model>` in its `required_by`, or with `--key` the one dataset of that key, through the same mirrors and checksum checks. With a model, all datasets are attempted and failures are aggregated into one report. With `--key`, the first file that cannot be fetched stops the command with exit 1, as does a stamp that cannot be written after the fetch (then `fwl-io path` could not confirm the dataset); on success it prints the number of files. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
 
 A download progress bar shows by default when stderr is a terminal; `--progress` forces it on and `--no-progress` off. The bar needs the optional `tqdm` dependency (`pip install fwl-io[progress]`); without it, or when there is no stderr to draw on, the fetch runs with no bar.
+
+## fwl-io path
+
+```bash
+fwl-io path <dotted.key> [--data-root PATH]
+```
+
+Prints the version directory of a dataset, for example `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`, when a completed fetch left it in place: a current stamp and every registry file present (every recorded member for an archive dataset). Contents are not hashed again; `fwl-io check` does that. Otherwise it names the directory and the fetch command on stderr and exits 1. A key that no installed manifest declares, or a data root that does not exist, exits 1 too. Nothing is downloaded or written.
 
 ## fwl-io check
 

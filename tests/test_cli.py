@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -713,3 +714,184 @@ def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, ca
     assert 'package-a: MANIFEST NOT USED' in out
     assert 'package-b: MANIFEST NOT USED' in out
     assert 'FAILED TO LOAD' not in out
+
+
+def _one_dataset(tmp_path, monkeypatch, extra=''):
+    """Install one manifest declaring g.demo (one file, a.dat) with a DataverseNL pin."""
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[g.demo]\nzenodo = "10.5281/zenodo.1"\ndataverse = "10.34894/ABCDEF"\n{extra}'
+    )
+    digest = hashlib.md5(b'data').hexdigest()
+    (tmp_path / 'g.demo.registry.txt').write_text(f'a.dat md5:{digest}\n')
+
+    class _EP:
+        name = 'demo'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    return tmp_path / 'data' / 'g' / 'demo' / 'r1'
+
+
+@pytest.mark.unit
+def test_fetch_by_key_then_path_prints_the_version_dir(tmp_path, capsys, monkeypatch):
+    """fwl-io path refuses a dataset no completed fetch left in place, and prints its version
+    directory once fwl-io fetch --key has verified and stamped it."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    root = ['--data-root', str(tmp_path / 'data')]
+    (tmp_path / 'data').mkdir()
+    assert main(['path', 'g.demo', *root]) == 1
+    hint = f'run: fwl-io fetch --key g.demo --data-root {tmp_path / "data"}\n'
+    assert capsys.readouterr().err.endswith(hint), 'the hint keeps the data root'
+    monkeypatch.setenv('FWL_DATA', str(tmp_path / 'data'))
+    assert main(['path', 'g.demo']) == 1
+    assert capsys.readouterr().err.endswith('run: fwl-io fetch --key g.demo\n')
+    target.mkdir(parents=True)
+    (target / 'a.dat').write_bytes(b'data')
+    assert main(['path', 'g.demo', *root]) == 1, 'a file without a completed fetch is not enough'
+    capsys.readouterr()
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
+    assert main(['fetch', '--key', 'g.demo', *root]) == 0
+    assert capsys.readouterr().out == 'g.demo: 1 file(s)\n'
+    assert main(['path', 'g.demo', *root]) == 0
+    assert capsys.readouterr().out == f'{target}\n'
+    (target / 'a.dat').unlink()
+    assert main(['path', 'g.demo', *root]) == 1, 'a file deleted after the fetch'
+
+
+@pytest.mark.unit
+def test_fetch_by_key_uses_the_dataset_mirrors(tmp_path, monkeypatch):
+    """The key fetcher carries the Zenodo and DataverseNL mirrors of the dataset."""
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch)
+    fetcher = fetcher_for_key('g.demo', tmp_path / 'data')
+    assert fetcher.mirrors == ['doi:10.5281/zenodo.1/', 'doi:10.34894/ABCDEF/']
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('argv', 'key'),
+    [
+        (['path', 'g.other'], 'g.other'),
+        (['fetch', '--key', 'g.other'], 'g.other'),
+        (['fetch', '--key', ''], ''),
+    ],
+)
+def test_an_unknown_key_is_named(tmp_path, capsys, monkeypatch, argv, key):
+    """A key no installed manifest declares, an empty one included, is a message and exit 1."""
+    _one_dataset(tmp_path, monkeypatch)
+    (tmp_path / 'data').mkdir()
+    assert main([*argv, '--data-root', str(tmp_path / 'data')]) == 1
+    assert f'no installed manifest declares the dataset {key!r}' in capsys.readouterr().err
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('via_env', [False, True])
+def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch, via_env):
+    """fwl-io path only reads: a data root that does not exist, given by --data-root or by
+    FWL_DATA, or that is a file, is named and left as it is."""
+    _one_dataset(tmp_path, monkeypatch)
+    typo, file_root = tmp_path / 'typo', tmp_path / 'file'
+    file_root.write_text('x')
+    for root in (typo, file_root):
+        if via_env:
+            monkeypatch.setenv('FWL_DATA', str(root))
+        argv = ['path', 'g.demo'] if via_env else ['path', 'g.demo', '--data-root', str(root)]
+        assert main(argv) == 1
+        assert (
+            f'the data root {root} does not exist or is not a directory' in capsys.readouterr().err
+        )
+    assert not typo.exists() and file_root.read_text() == 'x'
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('argv', [['fetch'], ['fetch', 'demo', '--key', 'g.demo']])
+def test_fetch_takes_a_model_or_a_key(argv):
+    """fetch needs exactly one of a model and --key."""
+    with pytest.raises(SystemExit) as raised:
+        main(argv)
+    assert raised.value.code == 2
+
+
+@pytest.mark.unit
+def test_an_archive_dataset_is_fetched_when_its_tree_is_intact(tmp_path, monkeypatch):
+    """For an archive dataset, is_fetched is the stamp-recorded tree check."""
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch, extra='extract = "zip"\n')
+    fetcher = fetcher_for_key('g.demo', tmp_path / 'data')
+    for intact in (True, False):
+        monkeypatch.setattr(type(fetcher), '_archive_tree_intact', lambda self, v=intact: v)
+        assert fetcher.is_fetched() is intact
+
+
+@pytest.mark.unit
+def test_a_missing_key_names_the_unused_manifests(tmp_path, monkeypatch):
+    """With a provider left out of discovery, a key no usable manifest declares is not found
+    and the error says how many manifests were not used; the usable keys still resolve."""
+    from fwl_io import manifest
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch)
+
+    class _Broken:
+        name = 'broken'
+
+        def load(self):
+            raise ImportError('provider package is broken')
+
+    eps = [*manifest.entry_points(group='fwl_io.manifests'), _Broken()]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+    with pytest.raises(LookupError, match=r"'g.other'; 1 manifest\(s\) not used, see fwl-io"):
+        fetcher_for_key('g.other', tmp_path / 'data')
+    assert fetcher_for_key('g.demo', tmp_path / 'data').target_dir.name == 'r1'
+
+
+@pytest.mark.unit
+def test_the_fetch_hint_quotes_a_data_root_with_a_space(tmp_path, capsys, monkeypatch):
+    """A data root that needs shell quoting is quoted in the suggested fetch command."""
+    import shlex
+
+    _one_dataset(tmp_path, monkeypatch)
+    root = tmp_path / 'my data'
+    root.mkdir()
+    assert main(['path', 'g.demo', '--data-root', str(root)]) == 1
+    hint = f'run: fwl-io fetch --key g.demo --data-root {shlex.quote(str(root))}\n'
+    assert "'" in hint and capsys.readouterr().err.endswith(hint)
+
+
+@pytest.mark.unit
+def test_fetch_by_key_fails_cleanly_when_a_file_cannot_be_fetched(tmp_path, capsys, monkeypatch):
+    """Offline with an empty tree, fetch --key exits 1 with no file count and no stamp, and
+    path still exits 1."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    root = ['--data-root', str(tmp_path / 'data')]
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+    assert main(['fetch', '--key', 'g.demo', *root]) == 1
+    out, err = capsys.readouterr()
+    assert 'file(s)' not in out and 'offline mode is active' in err
+    assert not (target / '.fwl-io.json').exists()
+    assert main(['path', 'g.demo', *root]) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes into a read-only directory')
+def test_fetch_by_key_fails_when_the_stamp_cannot_be_written(tmp_path, capsys, monkeypatch):
+    """When the version directory cannot take the stamp, fetch --key exits 1 and says so,
+    instead of a success that fwl-io path would then refuse."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    target.mkdir(parents=True)
+    (target / 'a.dat').write_bytes(b'data')
+    target.chmod(0o555)
+    try:
+        monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+        assert main(['fetch', '--key', 'g.demo', '--data-root', str(tmp_path / 'data')]) == 1
+        out, err = capsys.readouterr()
+        assert 'file(s)' not in out and 'its stamp could not be written' in err
+    finally:
+        target.chmod(0o755)
