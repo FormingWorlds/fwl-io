@@ -1520,12 +1520,18 @@ def test_checksum_mismatch_and_responseless_http_error_are_permanent():
 
 
 @pytest.mark.unit
-def test_certificate_failure_is_retried_by_the_fetch():
-    """A connection error caused by a failed certificate check is retried, since a mirror's
-    certificate check can fail for a while and then pass."""
-    exc = requests.exceptions.SSLError('verify failed')
-    exc.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+@pytest.mark.parametrize(
+    'exc',
+    [
+        requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'verify failed')),
+        ssl.SSLCertVerificationError(1, 'verify failed'),
+    ],
+)
+def test_a_certificate_failure_is_transient_unless_the_caller_retries_it(exc):
+    """A certificate failure is transient by default and permanent with cert_is_transient=False,
+    also when it is not wrapped in a requests error."""
     assert is_transient(exc) is True
+    assert is_transient(exc, cert_is_transient=False) is False
 
 
 @pytest.mark.unit
@@ -1535,8 +1541,7 @@ def test_a_certificate_failure_runs_the_retry_schedule(tmp_path, monkeypatch):
     monkeypatch.setattr('fwl_io.fetch._RETRY_BACKOFF_S', (0.01, 0.02))
     sleeps: list[float] = []
     monkeypatch.setattr('time.sleep', sleeps.append)
-    exc = requests.exceptions.SSLError('verify failed')
-    exc.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    exc = requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'verify failed'))
     monkeypatch.setattr('pooch.retrieve', Mock(side_effect=exc))
     fetcher = create_fetcher(
         subdir=SUBDIR,

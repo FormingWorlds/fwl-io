@@ -46,14 +46,18 @@ def is_cert_failure(exc: BaseException) -> bool:
     return False
 
 
-def is_transient(exc: BaseException) -> bool:
+def is_transient(exc: BaseException, *, cert_is_transient: bool = True) -> bool:
     """Return whether a failed request is worth a retry.
 
     An error that carries a response is decided by its status (:func:`is_transient_status`),
-    any other by its type (``TRANSIENT_EXC``), which includes a certificate failure. A checksum
-    mismatch (a plain ``ValueError``) and an ``HTTPError`` without a response are permanent.
+    any other by its type (``TRANSIENT_EXC``). A certificate failure counts as transient only
+    with ``cert_is_transient``; a caller that retries certificate failures itself passes False.
+    A checksum mismatch (a plain ``ValueError``) and an ``HTTPError`` without a response are
+    permanent.
     """
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
     if isinstance(status, int):
         return is_transient_status(status)
+    if is_cert_failure(exc):
+        return cert_is_transient
     return isinstance(exc, TRANSIENT_EXC)

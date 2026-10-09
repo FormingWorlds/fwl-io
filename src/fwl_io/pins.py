@@ -136,6 +136,22 @@ def _dataverse_transient(exc: DataverseError) -> bool:
     )
 
 
+def _embargo(meta: dict, today: date) -> str | None:
+    """Return why a file's embargo blocks its download, or None.
+
+    It blocks while ``dataFile.embargo.dateAvailable`` is after ``today``, and a date that
+    cannot be read counts as blocking.
+    """
+    embargo = meta.get('embargo')
+    if embargo is None:
+        return None
+    try:
+        until = date.fromisoformat(str(embargo['dateAvailable'])[:10])
+    except (TypeError, KeyError, ValueError):
+        return 'unreadable embargo date'
+    return f'embargoed until {until}' if until > today else None
+
+
 def _descriptions(version: dict) -> str:
     """Return the dsDescription values of a dataset version's citation block, one per line."""
     fields = ((version.get('metadataBlocks') or {}).get('citation') or {}).get('fields') or []
@@ -219,7 +235,7 @@ def pin_problem(
         if name in files and name in registry:
             return f'doi:{pin} holds {name} twice'
         files[name] = {**meta, 'restricted': (entry or {}).get('restricted')}
-    problems, by_size, today = [], [], date.today().isoformat()
+    problems, by_size, today = [], [], date.today()
     for name, digest in sorted(registry.items()):
         meta = files.get(name)
         checksum = (meta or {}).get('checksum') or {}
@@ -228,8 +244,8 @@ def pin_problem(
             problems.append(f'{name} missing')
         elif meta['restricted']:
             problems.append(f'{name} restricted')
-        elif str(until := (meta.get('embargo') or {}).get('dateAvailable') or '')[:10] > today:
-            problems.append(f'{name} embargoed until {until}')
+        elif embargo := _embargo(meta, today):
+            problems.append(f'{name} {embargo}')
         elif algorithm == digest.partition(':')[0].lower():
             if f'{algorithm}:{str(checksum.get("value")).lower()}' != digest.lower():
                 problems.append(f'{name} checksum differs')
@@ -239,7 +255,7 @@ def pin_problem(
         try:
             zenodo = sizes(zenodo_doi)
         except Exception as exc:  # noqa: BLE001 -- a non-transient failure is a reason
-            if problems or not is_transient(exc) or is_cert_failure(exc):
+            if problems or not is_transient(exc, cert_is_transient=False):
                 return '; '.join([*problems, f'Zenodo {zenodo_doi} file sizes: {exc}'])
             raise Unreachable(f'Zenodo {zenodo_doi} file sizes: {exc}') from exc
         for name in by_size:

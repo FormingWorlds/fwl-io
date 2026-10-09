@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import ssl
@@ -717,17 +718,59 @@ def test_each_doi_of_a_prefix_is_looked_up_on_its_own(tmp_path, monkeypatch):
     assert asked == ['10.9999/A', '10.9999/B']
 
 
+# A file entry of doi:10.34894/V5OMBE as DataverseNL 6.10.1 serves it, with the file name,
+# size and checksum set to the test registry and the embargo reason shortened.
+V5OMBE_ENTRY = {
+    'label': 'a.dat',
+    'restricted': False,
+    'directoryLabel': 'Publication package',
+    'version': 1,
+    'datasetVersionId': 30117,
+    'dataFile': {
+        'id': 466858,
+        'persistentId': '',
+        'filename': 'a.dat',
+        'contentType': 'application/zip',
+        'friendlyType': 'ZIP Archive',
+        'filesize': 10,
+        'embargo': {'dateAvailable': '2029-11-13', 'reason': 'derivative of a larger dataset'},
+        'storageIdentifier': 'surf://store:19492908fef-2ea7817d695d',
+        'rootDataFileId': -1,
+        'checksum': {'type': 'SHA-1', 'value': 'f' * 40},
+        'tabularData': False,
+        'creationDate': '2025-01-23',
+        'publicationDate': '2025-01-23',
+        'directoryLabel': 'Publication package',
+        'lastUpdateTime': '2025-01-23T11:41:13Z',
+        'fileAccessRequest': True,
+    },
+}
+
+
 @pytest.mark.parametrize(
-    ('until', 'served'), [('2999-01-01', False), (date.today().isoformat(), True), (None, True)]
+    ('embargo', 'why'),
+    [
+        ({'dateAvailable': '2029-11-13'}, 'a.dat embargoed until 2029-11-13'),
+        ({'dateAvailable': f'{date.today().isoformat()}T23:00:00'}, None),
+        ({'dateAvailable': '2000-01-01'}, None),
+        ({'dateAvailable': '13/11/2029'}, 'a.dat unreadable embargo date'),
+        ({}, 'a.dat unreadable embargo date'),
+        ('2029-11-13', 'a.dat unreadable embargo date'),
+        (None, None),
+    ],
 )
-def test_an_embargoed_file_does_not_serve_its_registry(tmp_path, until, served):
-    """A file under an embargo that ends after today (dataFile.embargo.dateAvailable, as the
-    Dataverse JSON printer writes it) is refused for download, so the pin is wrong."""
-    entry = _file('a.dat', 'SHA-1', 'f' * 40, 10)
-    if until:
-        entry['dataFile']['embargo'] = {'dateAvailable': until, 'reason': 'r'}
-    why = pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes)
-    assert why == (None if served else 'a.dat embargoed until 2999-01-01')
+def test_an_embargo_is_read_from_the_server_entry(tmp_path, embargo, why):
+    """The embargo of the real entry blocks the pin until its date; a date that cannot be read
+    or an embargo that is not an object blocks it too, and no embargo leaves it served."""
+    entry = copy.deepcopy(V5OMBE_ENTRY)
+    entry['dataFile']['embargo'] = embargo
+    if embargo is None:
+        del entry['dataFile']['embargo']
+    assert pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes) == why
+    other = copy.deepcopy(V5OMBE_ENTRY)
+    other['dataFile']['filename'] = 'z.dat'
+    client = FakeClient(files=[entry, other])
+    assert pin_problem(_dataset(tmp_path), client, sizes=_sizes) == why, 'z.dat is not in it'
 
 
 @pytest.mark.parametrize(
@@ -783,16 +826,6 @@ def test_check_mirrors_reads_each_pin_from_its_server_by_default(monkeypatch, ca
     monkeypatch.setattr(pins, 'check_mirrors', lambda url: called.append(url) or MirrorReport())
     main(['check-mirrors'])
     assert called == [None]
-
-
-def test_an_embargo_is_read_by_its_date_on_registry_files_only(tmp_path):
-    """An embargo date with a time part ends on its date, and an embargo on a file outside the
-    registry does not affect the pin."""
-    today = _file('a.dat', 'SHA-1', 'f' * 40, 10)
-    today['dataFile']['embargo'] = {'dateAvailable': f'{date.today().isoformat()}T23:00:00'}
-    other = _file('z.dat', 'SHA-1', 'f' * 40, 1)
-    other['dataFile']['embargo'] = {'dateAvailable': '2999-01-01'}
-    assert pin_problem(_dataset(tmp_path), FakeClient(files=[today, other]), sizes=_sizes) is None
 
 
 def test_a_certificate_failure_on_one_server_leaves_another_checked(tmp_path, monkeypatch, waits):
