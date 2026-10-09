@@ -17,5 +17,19 @@ jobs:
           python-version: '3.12'
       - name: Install package
         run: pip install -e ".[develop]"
-      - name: Run slow tier (live Zenodo and DataverseNL checks)
+      - name: Run slow tier (live Zenodo checks)
         run: pytest -m slow
+      - name: Check the DataverseNL mirror pins
+        if: ${{ !cancelled() }}
+        # Exit 1 (a wrong pin) and 4 (no pin could be read) fail the job; exit 3 (some pins
+        # unreadable after the retries, the rest served) leaves a warning and passes.
+        run: |
+          set +e
+          fwl-io check-mirrors | tee mirrors.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -eq 3 ]; then
+            echo "::warning title=Mirror pins not all checked::$(grep -c '^UNREACHABLE' mirrors.txt) pin(s) could not be read; see the step log"
+            { echo '### Mirror pins not all checked'; grep '^UNREACHABLE' mirrors.txt; } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$code"

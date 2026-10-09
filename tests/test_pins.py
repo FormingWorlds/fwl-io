@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 import ssl
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -17,6 +20,8 @@ from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
     DataverseRetryableError,
+    names_source,
+    source_note,
     zenodo_record_to_citation,
 )
 from fwl_io.pins import MirrorReport, Unreachable, check_mirrors, pin_problem, zenodo_sizes
@@ -95,6 +100,25 @@ def test_a_released_mirror_with_every_registry_file_passes(tmp_path):
     assert pin_problem(upper, md5, sizes=lambda doi: pytest.fail('no lookup')) is None
     for note in (f'mirror of zenodo deposit {SOURCE}', f'Mirror of Zenodo\n deposit {SOURCE}'):
         assert pin_problem(_dataset(tmp_path), FakeClient(note=note), sizes=_sizes) is None
+
+
+def test_the_source_matcher_accepts_the_note_of_every_shared_pin():
+    """The matcher finds the note written for each shared Zenodo DOI, in either manifest form,
+    and rejects the note of a DOI that only shares its leading digits."""
+    dois = {ds.zenodo.removeprefix('doi:') for ds in load_manifest(shared_manifest_path())}
+    assert dois
+    for doi in dois:
+        assert names_source(f'Text.\n{source_note(doi)}', doi)
+        assert not names_source(source_note(doi + '1'), doi)
+        assert not names_source(source_note('10.5281/zenodo.1'), doi)
+
+
+def test_a_file_in_a_folder_serves_its_name(tmp_path):
+    """A mirror file under a folder label serves the registry entry of its file name, since
+    the fetch (pooch's Dataverse download) maps files by name alone."""
+    entry = _file('a.dat', 'SHA-1', 'f' * 40, 10)
+    entry['directoryLabel'] = entry['dataFile']['directoryLabel'] = 'sub'
+    assert pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes) is None
 
 
 def test_the_note_written_by_mirror_passes_the_source_check(tmp_path):
@@ -192,7 +216,7 @@ CERT = requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'certificate
         requests.exceptions.JSONDecodeError('down', '<html>', 0),
         ConnectionError('down'),
         TimeoutError('down'),
-        *(_http(status) for status in (408, 429, 500, 501, 503, 599)),
+        *(_http(status) for status in (408, 429, 500, 503, 599)),
     ],
 )
 def test_a_transient_zenodo_error_is_unreachable(tmp_path, error):
@@ -213,7 +237,7 @@ def test_a_transient_dataverse_error_is_unreachable(tmp_path):
 @pytest.mark.parametrize(
     'error',
     [
-        *(_http(status) for status in (404, 407, 409, 499)),
+        *(_http(status) for status in (404, 407, 409, 499, 501, 505)),
         ValueError('concept DOI'),
         CERT,
         requests.exceptions.InvalidURL('bad url'),
@@ -223,8 +247,8 @@ def test_a_transient_dataverse_error_is_unreachable(tmp_path):
     ],
 )
 def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error):
-    """A 4xx other than 408 and 429, a concept DOI, a certificate failure, a bad URL, a
-    redirect loop or a malformed record makes the pin wrong."""
+    """A 4xx other than 408 and 429, a 501 or 505, a concept DOI, a certificate failure, a bad
+    URL, a redirect loop or a malformed record makes the pin wrong."""
     why = pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
     assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {error}'
 
@@ -322,7 +346,6 @@ def _served(status, text, content_type='application/json'):
         (408, 'timeout', 'text/plain'),
         (429, 'slow down', 'text/plain'),
         (500, 'error', 'text/plain'),
-        (501, 'error', 'text/plain'),
         (520, 'error', 'text/plain'),
         (200, '<html>maintenance</html>', 'text/html'),
     ],
@@ -330,20 +353,21 @@ def _served(status, text, content_type='application/json'):
 def test_a_transient_dataverse_answer_is_unreachable(
     tmp_path, monkeypatch, status, text, content_type
 ):
-    """An HTTP 408, 429 or 5xx, or an HTML page in place of the API answer, from the real
-    client is an outage (exit 3), as on the Zenodo side."""
+    """An HTTP 408, 429 or 5xx other than 501 and 505, or an HTML page in place of the API
+    answer, from the real client is an outage (exit 3), as on the Zenodo side."""
     monkeypatch.setattr('fwl_io.mirror.requests.request', _served(status, text, content_type))
     client = DataverseClient('https://dataverse.example', token='')
     with pytest.raises(Unreachable, match=f'doi:10.34894/ABCDEF: .*{status}'):
         pin_problem(_dataset(tmp_path), client, sizes=_sizes)
 
 
-def test_a_missing_dataverse_dataset_is_a_wrong_pin(tmp_path, monkeypatch):
-    """A 404 from the real client makes the pin wrong (exit 1)."""
-    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(404, '{"status": "ERROR"}'))
+@pytest.mark.parametrize('status', [404, 501, 505])
+def test_a_permanent_dataverse_answer_is_a_wrong_pin(tmp_path, monkeypatch, status):
+    """A 404, 501 or 505 from the real client makes the pin wrong (exit 1)."""
+    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(status, '{"status": "ERROR"}'))
     client = DataverseClient('https://dataverse.example', token='')
     why = pin_problem(_dataset(tmp_path), client, sizes=_sizes)
-    assert why.startswith('cannot read doi:10.34894/ABCDEF:') and '404' in why
+    assert why.startswith('cannot read doi:10.34894/ABCDEF:') and str(status) in why
 
 
 def test_a_doi_prefix_on_either_pin_is_accepted(tmp_path):
@@ -390,15 +414,18 @@ def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
 
 
 def _patch(monkeypatch, found, errors=None, client=None, seen=None):
+    """Serve ``found`` as the installed datasets; return the client made for each URL."""
     monkeypatch.setattr(pins, '_discover', lambda: ({'m': found}, errors or {}))
+    made = {}
 
     def make(url, token):
         if seen is not None:
             seen.append((url, token))
-        return client or FakeClient()
+        return made.setdefault(url, client or FakeClient())
 
     monkeypatch.setattr(pins, 'DataverseClient', make)
     monkeypatch.setattr(pins, 'zenodo_sizes', _sizes)
+    return made
 
 
 def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
@@ -459,22 +486,23 @@ def test_check_mirrors_reads_each_zenodo_record_once(tmp_path, monkeypatch):
     [
         (FakeClient(), True, 0, 'pins served by their mirror: 1'),
         (FakeClient(state='DRAFT'), True, 1, 'FAIL group.good'),
-        (FakeClient(error=DataverseRetryableError('504')), True, 3, 'UNREACHABLE group.good'),
+        (FakeClient(error=DataverseRetryableError('504')), True, 4, 'UNREACHABLE group.good'),
         (FakeClient(), False, 1, 'pins served by their mirror: 0'),
     ],
 )
 def test_check_mirrors_command_exits_by_the_verdict(
     tmp_path, monkeypatch, capsys, client, found, code, text
 ):
-    """Exit 0 when every pin is served, 1 for a wrong pin or nothing to check, 3 when only
-    the server could not be read; the given URL reaches the client with no token."""
+    """Exit 0 when every pin is served, 1 for a wrong pin or nothing to check, 4 when no pin
+    could be read; the given URL reaches the client with no token, and no client is made
+    without a pin."""
     seen = []
     _patch(
         monkeypatch, [_dataset(tmp_path, 'group.good')] if found else [], client=client, seen=seen
     )
     assert main(['check-mirrors', '--dataverse-url', 'https://x.example']) == code
     assert text in capsys.readouterr().out
-    assert seen == [('https://x.example', '')]
+    assert seen == ([('https://x.example', '')] if found else [])
 
 
 @pytest.mark.parametrize(
@@ -482,14 +510,15 @@ def test_check_mirrors_command_exits_by_the_verdict(
     [
         (MirrorReport(passed=['a'], failed={'b': 'x'}, unreachable={'c': 'y'}), 1),
         (MirrorReport(passed=['a'], manifest_errors={'m': 'x'}, unreachable={'c': 'y'}), 1),
-        (MirrorReport(unreachable={'c': 'y'}), 3),
+        (MirrorReport(passed=['a'], unreachable={'c': 'y'}), 3),
+        (MirrorReport(unreachable={'c': 'y'}), 4),
         (MirrorReport(unpinned=['d']), 1),
         (MirrorReport(passed=['a'], unpinned=['d']), 0),
     ],
 )
 def test_exit_code_puts_a_wrong_pin_before_an_outage(report, code):
-    """A wrong pin or manifest error wins over an unreachable server, and 3 stays clear of
-    the 2 that argparse uses for a usage error."""
+    """A wrong pin or manifest error wins over an unreachable server, an outage with no pin
+    read is 4 apart from a partial one (3), and both stay clear of argparse's usage error 2."""
     assert report.exit_code == code
     assert report.ok == (code == 0)
 
@@ -607,3 +636,209 @@ def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
     assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
     kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
     assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None
+
+
+def _handles(monkeypatch, answers):
+    """Serve doi.org handle lookups from ``answers`` (DOI to URL, status or exception)."""
+    asked = []
+
+    def get(url, timeout):
+        doi = url.removeprefix(pins.DOI_HANDLES + '/')
+        asked.append(doi)
+        answer = answers[doi]
+        if isinstance(answer, Exception):
+            raise answer
+        response = requests.Response()
+        response.url = url
+        response.status_code = answer if isinstance(answer, int) else 200
+        values = (
+            answer if isinstance(answer, list) else [{'type': 'URL', 'data': {'value': answer}}]
+        )
+        response._content = json.dumps({'values': [] if answer == 'none' else values}).encode()
+        return response
+
+    monkeypatch.setattr(pins.requests, 'get', get)
+    return asked
+
+
+def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
+    """A known prefix names its server without a lookup, another DOI is resolved through
+    doi.org, and each server gets one client; --dataverse-url overrides them all."""
+    asked = _handles(monkeypatch, {'10.9999/B': 'https://dv.example.org/citation?x=1'})
+    found = [
+        _dataset(tmp_path, 'g.one', pin='10.34894/ABCDEF'),
+        _dataset(tmp_path, 'g.two', pin='doi:10.34894/ABCDEF'),
+        _dataset(tmp_path, 'g.three', pin='10.9999/B'),
+        _dataset(tmp_path, 'g.four', pin='10.9999/B'),
+    ]
+    seen = []
+    made = _patch(monkeypatch, found, seen=seen)
+    assert check_mirrors().passed == ['g.one', 'g.two', 'g.three', 'g.four']
+    assert seen == [('https://dataverse.nl', ''), ('https://dv.example.org', '')]
+    read = {url: [c[2]['persistentId'] for c in client.calls] for url, client in made.items()}
+    assert read == {
+        'https://dataverse.nl': ['doi:10.34894/ABCDEF'] * 2,
+        'https://dv.example.org': ['doi:10.9999/B'] * 2,
+    }
+    assert asked == ['10.9999/B', '10.9999/B']
+    seen.clear()
+    assert len(check_mirrors('https://override.example').passed) == 4
+    assert seen == [('https://override.example', '')]
+
+
+@pytest.mark.parametrize(
+    ('answer', 'verdict', 'why'),
+    [
+        (404, 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        ([{'type': 'URL'}], 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        (['x'], 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        ('/no/host', 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        ('none', 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        (503, 'unreachable', 'doi.org lookup of doi:10.9999/B'),
+        (requests.ConnectionError('down'), 'unreachable', 'doi.org lookup of doi:10.9999/B'),
+    ],
+)
+def test_a_pin_whose_server_cannot_be_found(tmp_path, monkeypatch, answer, verdict, why):
+    """An unknown DOI or a malformed answer is a wrong pin; a doi.org outage leaves the pin
+    unchecked."""
+    _handles(monkeypatch, {'10.9999/B': answer})
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one', pin='10.9999/B')])
+    report = check_mirrors()
+    assert list(getattr(report, verdict)) == ['g.one']
+    assert getattr(report, verdict)['g.one'].startswith(why)
+
+
+def test_each_doi_of_a_prefix_is_looked_up_on_its_own(tmp_path, monkeypatch):
+    """Two DOIs of one prefix get a lookup each, so a failed one does not decide the other."""
+    asked = _handles(monkeypatch, {'10.9999/A': 404, '10.9999/B': 'https://dv.example.org/x'})
+    found = [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in 'AB']
+    _patch(monkeypatch, found)
+    report = check_mirrors()
+    assert list(report.failed) == ['g.A'] and report.passed == ['g.B']
+    assert asked == ['10.9999/A', '10.9999/B']
+
+
+# A file entry of doi:10.34894/V5OMBE as DataverseNL 6.10.1 serves it, with the file name,
+# size and checksum set to the test registry and the embargo reason shortened.
+V5OMBE_ENTRY = {
+    'label': 'a.dat',
+    'restricted': False,
+    'directoryLabel': 'Publication package',
+    'version': 1,
+    'datasetVersionId': 30117,
+    'dataFile': {
+        'id': 466858,
+        'persistentId': '',
+        'filename': 'a.dat',
+        'contentType': 'application/zip',
+        'friendlyType': 'ZIP Archive',
+        'filesize': 10,
+        'embargo': {'dateAvailable': '2029-11-13', 'reason': 'derivative of a larger dataset'},
+        'storageIdentifier': 'surf://store:19492908fef-2ea7817d695d',
+        'rootDataFileId': -1,
+        'checksum': {'type': 'SHA-1', 'value': 'f' * 40},
+        'tabularData': False,
+        'creationDate': '2025-01-23',
+        'publicationDate': '2025-01-23',
+        'directoryLabel': 'Publication package',
+        'lastUpdateTime': '2025-01-23T11:41:13Z',
+        'fileAccessRequest': True,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ('embargo', 'why'),
+    [
+        ({'dateAvailable': '2029-11-13'}, 'a.dat embargoed until 2029-11-13'),
+        ({'dateAvailable': f'{date.today().isoformat()}T23:00:00'}, None),
+        ({'dateAvailable': '2000-01-01'}, None),
+        ({'dateAvailable': '13/11/2029'}, 'a.dat unreadable embargo date'),
+        ({}, 'a.dat unreadable embargo date'),
+        ('2029-11-13', 'a.dat unreadable embargo date'),
+        (None, None),
+    ],
+)
+def test_an_embargo_is_read_from_the_server_entry(tmp_path, embargo, why):
+    """The embargo of the real entry blocks the pin until its date; a date that cannot be read
+    or an embargo that is not an object blocks it too, and no embargo leaves it served."""
+    entry = copy.deepcopy(V5OMBE_ENTRY)
+    entry['dataFile']['embargo'] = embargo
+    if embargo is None:
+        del entry['dataFile']['embargo']
+    assert pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes) == why
+    other = copy.deepcopy(V5OMBE_ENTRY)
+    other['dataFile']['filename'] = 'z.dat'
+    client = FakeClient(files=[entry, other])
+    assert pin_problem(_dataset(tmp_path), client, sizes=_sizes) == why, 'z.dat is not in it'
+
+
+@pytest.mark.parametrize(
+    ('landing', 'server'),
+    [
+        ('http://u:p@dv.example.org:8080/citation?x=1', 'http://dv.example.org:8080'),
+        ('https://[::1]:8443/x', 'https://[::1]:8443'),
+        ('//dv.example.org/x', None),
+        ('ftp://dv.example.org/x', None),
+        ('https://dv.example.org:abc/x', None),
+        ('https://dv.example.org:99999/x', None),
+        ('https://dv.example.org:0/x', None),
+    ],
+)
+def test_a_landing_page_names_scheme_host_and_port_without_credentials(
+    monkeypatch, landing, server
+):
+    """The server URL keeps the http(s) scheme, host and port of the landing page and drops a
+    user; another scheme, no host or a bad port is an unknown server."""
+    _handles(monkeypatch, {'10.9999/B': landing})
+    if server:
+        assert pins.dataverse_server('doi:10.9999/B') == server
+    else:
+        with pytest.raises(pins.UnknownServer, match='doi.org gives no landing page'):
+            pins.dataverse_server('doi:10.9999/B')
+
+
+def test_a_certificate_failure_at_doi_org_is_retried(tmp_path, monkeypatch, waits):
+    """A doi.org lookup gets the certificate retries of the other reads, then fails the pin."""
+    _handles(monkeypatch, {'10.9999/B': CERT})
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one', pin='10.9999/B')])
+    report = check_mirrors()
+    assert waits == [pins.CERT_WAIT_S] * (pins.CERT_ATTEMPTS - 1)
+    assert report.failed['g.one'].startswith('SSLError')
+
+
+def test_doi_org_is_tried_once_after_failing_every_certificate_attempt(
+    tmp_path, monkeypatch, waits
+):
+    """Once doi.org failed every certificate attempt, the next pin's lookup is tried once and
+    its warning says so."""
+    asked = _handles(monkeypatch, {'10.9999/A': CERT, '10.9999/B': CERT})
+    _patch(monkeypatch, [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in 'AB'])
+    report = check_mirrors()
+    assert asked == ['10.9999/A'] * pins.CERT_ATTEMPTS + ['10.9999/B']
+    assert len(waits) == pins.CERT_ATTEMPTS - 1
+    assert 'not retried since doi.org failed' in report.warnings['g.B']
+
+
+def test_check_mirrors_reads_each_pin_from_its_server_by_default(monkeypatch, capsys):
+    """Without --dataverse-url the command lets each pin name its server."""
+    called = []
+    monkeypatch.setattr(pins, 'check_mirrors', lambda url: called.append(url) or MirrorReport())
+    main(['check-mirrors'])
+    assert called == [None]
+
+
+def test_a_certificate_failure_on_one_server_leaves_another_checked(tmp_path, monkeypatch, waits):
+    """A server whose certificate fails every attempt is tried once for its later pins, while
+    a pin on another server gets its own full read and passes."""
+    pins_on = {'A1': 'a', 'A2': 'a', 'B': 'b'}
+    _handles(monkeypatch, {f'10.9999/{c}': f'https://{h}.example/x' for c, h in pins_on.items()})
+    _patch(monkeypatch, [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in pins_on])
+    bad, good = FakeClient(error=CERT), FakeClient()
+    bad.base_url, good.base_url = 'https://a.example', 'https://b.example'
+    monkeypatch.setattr(pins, 'DataverseClient', lambda url, token: bad if 'a.' in url else good)
+    report = check_mirrors()
+    assert sorted(report.failed) == ['g.A1', 'g.A2'] and report.passed == ['g.B']
+    assert len(bad.calls) == pins.CERT_ATTEMPTS + 1
+    assert 'not retried since a.example failed' in report.warnings['g.A2']
+    assert 'g.B' not in report.warnings and report.exit_code == 1
