@@ -7,6 +7,7 @@ import tarfile
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pooch
 import pytest
@@ -1525,6 +1526,27 @@ def test_certificate_failure_is_retried_by_the_fetch():
     exc = requests.exceptions.SSLError('verify failed')
     exc.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
     assert is_transient(exc) is True
+
+
+@pytest.mark.unit
+def test_a_certificate_failure_runs_the_retry_schedule(tmp_path, monkeypatch):
+    """A download that fails its certificate check on every attempt is retried on the full
+    schedule before the fetch gives up."""
+    monkeypatch.setattr('fwl_io.fetch._RETRY_BACKOFF_S', (0.01, 0.02))
+    sleeps: list[float] = []
+    monkeypatch.setattr('time.sleep', sleeps.append)
+    exc = requests.exceptions.SSLError('verify failed')
+    exc.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+    monkeypatch.setattr('pooch.retrieve', Mock(side_effect=exc))
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'alpha.dat': 'sha256:' + '0' * 64},
+        base_urls=['http://mirror/'],
+        data_root=tmp_path,
+    )
+    with pytest.raises(DownloadError):
+        fetcher.fetch('alpha.dat')
+    assert sleeps == [0.01, 0.02]
 
 
 @pytest.mark.unit

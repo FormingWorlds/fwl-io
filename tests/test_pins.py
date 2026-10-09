@@ -413,15 +413,18 @@ def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
 
 
 def _patch(monkeypatch, found, errors=None, client=None, seen=None):
+    """Serve ``found`` as the installed datasets; return the client made for each URL."""
     monkeypatch.setattr(pins, '_discover', lambda: ({'m': found}, errors or {}))
+    made = {}
 
     def make(url, token):
         if seen is not None:
             seen.append((url, token))
-        return client or FakeClient()
+        return made.setdefault(url, client or FakeClient())
 
     monkeypatch.setattr(pins, 'DataverseClient', make)
     monkeypatch.setattr(pins, 'zenodo_sizes', _sizes)
+    return made
 
 
 def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
@@ -674,9 +677,14 @@ def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
         _dataset(tmp_path, 'g.four', pin='10.9999/B'),
     ]
     seen = []
-    _patch(monkeypatch, found, seen=seen)
+    made = _patch(monkeypatch, found, seen=seen)
     assert check_mirrors().passed == ['g.one', 'g.two', 'g.three', 'g.four']
     assert seen == [('https://dataverse.nl', ''), ('https://dv.example.org', '')]
+    read = {url: [c[2]['persistentId'] for c in client.calls] for url, client in made.items()}
+    assert read == {
+        'https://dataverse.nl': ['doi:10.34894/ABCDEF'] * 2,
+        'https://dv.example.org': ['doi:10.9999/B'] * 2,
+    }
     assert asked == ['10.9999/B', '10.9999/B']
     seen.clear()
     assert len(check_mirrors('https://override.example').passed) == 4
@@ -705,8 +713,8 @@ def test_a_pin_whose_server_cannot_be_found(tmp_path, monkeypatch, answer, verdi
     assert getattr(report, verdict)['g.one'].startswith(why)
 
 
-def test_a_failed_lookup_does_not_decide_other_pins_of_its_prefix(tmp_path, monkeypatch):
-    """Only a lookup that succeeded is kept for the prefix; each failed DOI is its own verdict."""
+def test_each_doi_of_a_prefix_is_looked_up_on_its_own(tmp_path, monkeypatch):
+    """Two DOIs of one prefix get a lookup each, so a failed one does not decide the other."""
     asked = _handles(monkeypatch, {'10.9999/A': 404, '10.9999/B': 'https://dv.example.org/x'})
     found = [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in 'AB']
     _patch(monkeypatch, found)
@@ -728,10 +736,29 @@ def test_an_embargoed_file_does_not_serve_its_registry(tmp_path, until, served):
     assert why == (None if served else 'a.dat embargoed until 2999-01-01')
 
 
-def test_a_landing_page_names_scheme_host_and_port_without_credentials(monkeypatch):
-    """The server URL keeps the scheme, host and port of the landing page and drops a user."""
-    _handles(monkeypatch, {'10.9999/B': 'http://u:p@dv.example.org:8080/citation?x=1'})
-    assert pins.dataverse_server('doi:10.9999/B') == 'http://dv.example.org:8080'
+@pytest.mark.parametrize(
+    ('landing', 'server'),
+    [
+        ('http://u:p@dv.example.org:8080/citation?x=1', 'http://dv.example.org:8080'),
+        ('https://[::1]:8443/x', 'https://[::1]:8443'),
+        ('//dv.example.org/x', None),
+        ('ftp://dv.example.org/x', None),
+        ('https://dv.example.org:abc/x', None),
+        ('https://dv.example.org:99999/x', None),
+        ('https://dv.example.org:0/x', None),
+    ],
+)
+def test_a_landing_page_names_scheme_host_and_port_without_credentials(
+    monkeypatch, landing, server
+):
+    """The server URL keeps the http(s) scheme, host and port of the landing page and drops a
+    user; another scheme, no host or a bad port is an unknown server."""
+    _handles(monkeypatch, {'10.9999/B': landing})
+    if server:
+        assert pins.dataverse_server('doi:10.9999/B') == server
+    else:
+        with pytest.raises(pins.UnknownServer, match='doi.org gives no landing page'):
+            pins.dataverse_server('doi:10.9999/B')
 
 
 def test_a_certificate_failure_at_doi_org_is_retried(tmp_path, monkeypatch, waits):
@@ -741,6 +768,19 @@ def test_a_certificate_failure_at_doi_org_is_retried(tmp_path, monkeypatch, wait
     report = check_mirrors()
     assert waits == [pins.CERT_WAIT_S] * (pins.CERT_ATTEMPTS - 1)
     assert report.failed['g.one'].startswith('SSLError')
+
+
+def test_doi_org_is_tried_once_after_failing_every_certificate_attempt(
+    tmp_path, monkeypatch, waits
+):
+    """Once doi.org failed every certificate attempt, the next pin's lookup is tried once and
+    its warning says so."""
+    asked = _handles(monkeypatch, {'10.9999/A': CERT, '10.9999/B': CERT})
+    _patch(monkeypatch, [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in 'AB'])
+    report = check_mirrors()
+    assert asked == ['10.9999/A'] * pins.CERT_ATTEMPTS + ['10.9999/B']
+    assert len(waits) == pins.CERT_ATTEMPTS - 1
+    assert 'not retried since doi.org failed' in report.warnings['g.B']
 
 
 def test_check_mirrors_reads_each_pin_from_its_server_by_default(monkeypatch, capsys):

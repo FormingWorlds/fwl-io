@@ -42,12 +42,6 @@ class UnknownServer(Exception):
     """doi.org names no landing page, so no Dataverse server, for a pinned DOI."""
 
 
-def _transient(exc: BaseException) -> bool:
-    """Return whether a read failed in transit; a certificate failure is not, ``_read``
-    retries it."""
-    return is_transient(exc) and not is_cert_failure(exc)
-
-
 @dataclass
 class MirrorReport:
     """Outcome of :func:`check_mirrors`: passed, failed, unreachable and unpinned datasets,
@@ -242,7 +236,7 @@ def pin_problem(
         try:
             zenodo = sizes(zenodo_doi)
         except Exception as exc:  # noqa: BLE001 -- a non-transient failure is a reason
-            if problems or not _transient(exc):
+            if problems or not is_transient(exc) or is_cert_failure(exc):
                 return '; '.join([*problems, f'Zenodo {zenodo_doi} file sizes: {exc}'])
             raise Unreachable(f'Zenodo {zenodo_doi} file sizes: {exc}') from exc
         for name in by_size:
@@ -256,7 +250,8 @@ def dataverse_server(doi: str) -> str:
     """Return the base URL of the Dataverse server that holds a DOI.
 
     A prefix in ``DATAVERSE_SERVERS`` names its server; any other DOI is resolved through the
-    doi.org handle API, and the scheme, host and port of its landing page name the server.
+    doi.org handle API, and the http(s) scheme, host and port of its landing page name the
+    server.
 
     Raises
     ------
@@ -273,15 +268,16 @@ def dataverse_server(doi: str) -> str:
         response.raise_for_status()
         values = response.json()['values']
         url = urlparse(next(str(v['data']['value']) for v in values if v.get('type') == 'URL'))
+        port = url.port  # raises ValueError for a malformed port
     except Exception as exc:
         if is_cert_failure(exc):
             raise
-        if _transient(exc):
+        if is_transient(exc):
             raise Unreachable(f'doi.org lookup of doi:{doi}: {exc}') from exc
         raise UnknownServer(f'doi.org gives no landing page for doi:{doi}: {exc!r}') from exc
-    if not url.hostname:
-        raise UnknownServer(f'doi.org gives no landing page for doi:{doi}')
-    return f'{url.scheme}://{url.hostname}' + (f':{url.port}' if url.port else '')
+    if url.scheme not in ('http', 'https') or not url.hostname or port == 0:
+        raise UnknownServer(f'doi.org gives no landing page for doi:{doi}: {url.geturl()}')
+    return f'{url.scheme}://{url.netloc.rpartition("@")[2]}'
 
 
 def check_mirrors(
