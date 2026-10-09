@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import tempfile
 import time
 import zipfile
@@ -143,6 +144,17 @@ def _creators_to_authors(creators: list[dict]) -> list[dict]:
     return authors or [{'authorName': _primitive('authorName', 'Unknown')}]
 
 
+def source_note(doi: str) -> str:
+    """Return the description line that names a mirror's Zenodo source DOI."""
+    return f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
+
+
+def names_source(text: str, doi: str) -> bool:
+    """Return whether ``text`` holds the :func:`source_note` of ``doi`` (any case or spacing)."""
+    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(doi) + r'(?!\d)'
+    return re.search(note, text, re.IGNORECASE) is not None
+
+
 def zenodo_record_to_citation(
     record: dict,
     *,
@@ -161,7 +173,6 @@ def zenodo_record_to_citation(
     doi = record.get('doi') or metadata.get('doi', '')
     title = metadata.get('title') or f'Zenodo record {record.get("id")}'
     description = metadata.get('description') or title
-    source_note = f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
 
     contact = {
         'datasetContactName': _primitive('datasetContactName', contact_name),
@@ -176,7 +187,7 @@ def zenodo_record_to_citation(
             'dsDescription',
             [
                 {'dsDescriptionValue': _primitive('dsDescriptionValue', description)},
-                {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note)},
+                {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note(doi))},
             ],
         ),
         _controlled('subject', [subject]),

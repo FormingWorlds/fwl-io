@@ -7,7 +7,6 @@ pin whose server or Zenodo record cannot be read is reported apart from a pin th
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -18,6 +17,7 @@ from fwl_io.mirror import (
     DataverseError,
     DataverseRetryableError,
     checksum_algorithm,
+    names_source,
 )
 from fwl_io.sync import fetch_zenodo_record
 from fwl_io.transient import is_cert_failure, is_transient, is_transient_status
@@ -196,8 +196,7 @@ def pin_problem(
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
         return f'doi:{pin} latest version is {version.get("versionState")!r}'
-    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(zenodo_doi) + r'(?!\d)'
-    if not re.search(note, _descriptions(version), re.IGNORECASE):
+    if not names_source(_descriptions(version), zenodo_doi):
         return f'doi:{pin} does not name Zenodo {zenodo_doi} as its source'
     files: dict[str, dict] = {}
     for entry in version.get('files') or []:

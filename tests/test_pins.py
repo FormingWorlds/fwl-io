@@ -17,6 +17,8 @@ from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
     DataverseRetryableError,
+    names_source,
+    source_note,
     zenodo_record_to_citation,
 )
 from fwl_io.pins import MirrorReport, Unreachable, check_mirrors, pin_problem, zenodo_sizes
@@ -95,6 +97,17 @@ def test_a_released_mirror_with_every_registry_file_passes(tmp_path):
     assert pin_problem(upper, md5, sizes=lambda doi: pytest.fail('no lookup')) is None
     for note in (f'mirror of zenodo deposit {SOURCE}', f'Mirror of Zenodo\n deposit {SOURCE}'):
         assert pin_problem(_dataset(tmp_path), FakeClient(note=note), sizes=_sizes) is None
+
+
+def test_the_source_matcher_accepts_the_note_of_every_shared_pin():
+    """The matcher finds the note written for each shared Zenodo DOI, in either manifest form,
+    and rejects the note of a DOI that only shares its leading digits."""
+    dois = {ds.zenodo.removeprefix('doi:') for ds in load_manifest(shared_manifest_path())}
+    assert dois
+    for doi in dois:
+        assert names_source(f'Text.\n{source_note(doi)}', doi)
+        assert not names_source(source_note(doi + '1'), doi)
+        assert not names_source(source_note('10.5281/zenodo.1'), doi)
 
 
 def test_a_file_in_a_folder_serves_its_name(tmp_path):
