@@ -35,7 +35,7 @@ A download progress bar shows by default when stderr is a terminal; `--progress`
 fwl-io path <dotted.key> [--data-root PATH]
 ```
 
-Prints the version directory of a dataset, for example `$FWL_DATA/atmos_clim/refractive/agni_aerosols/r23000222`, when a completed fetch left it in place: a current stamp and every registry file present (every recorded member for an archive dataset). Contents are not hashed again; `fwl-io check` does that. Otherwise it names the directory and the fetch command on stderr and exits 1. A key that no installed manifest declares exits 1 too. Nothing is downloaded.
+Prints the version directory of a dataset, for example `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`, when a completed fetch left it in place: a current stamp and every registry file present (every recorded member for an archive dataset). Contents are not hashed again; `fwl-io check` does that. Otherwise it names the directory and the fetch command on stderr and exits 1. A key that no installed manifest declares exits 1 too. Nothing is downloaded.
 
 ## fwl-io check
 
