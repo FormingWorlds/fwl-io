@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 
 from fwl_io import __version__
@@ -107,13 +108,13 @@ def _cmd_path(args: argparse.Namespace) -> int:
 
     root = resolve_data_root(args.data_root, create=False)
     if not root.is_dir():
-        print(f'fwl-io: the data root {root} does not exist', file=sys.stderr)
-        return 1
+        raise NotADirectoryError(f'the data root {root} is not an existing directory')
     fetcher = fetcher_for_key(args.key, root)
     if not fetcher.is_fetched():
+        same_root = '' if args.data_root is None else f' --data-root {shlex.quote(str(root))}'
         print(
             f'fwl-io: {args.key} is not fetched in {fetcher.target_dir}; '
-            f'run: fwl-io fetch --key {args.key}',
+            f'run: fwl-io fetch --key {args.key}{same_root}',
             file=sys.stderr,
         )
         return 1

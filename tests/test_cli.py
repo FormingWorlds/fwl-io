@@ -744,7 +744,11 @@ def test_fetch_by_key_then_path_prints_the_version_dir(tmp_path, capsys, monkeyp
     root = ['--data-root', str(tmp_path / 'data')]
     (tmp_path / 'data').mkdir()
     assert main(['path', 'g.demo', *root]) == 1
-    assert 'g.demo is not fetched' in capsys.readouterr().err
+    hint = f'run: fwl-io fetch --key g.demo --data-root {tmp_path / "data"}\n'
+    assert capsys.readouterr().err.endswith(hint), 'the hint keeps the data root'
+    monkeypatch.setenv('FWL_DATA', str(tmp_path / 'data'))
+    assert main(['path', 'g.demo']) == 1
+    assert capsys.readouterr().err.endswith('run: fwl-io fetch --key g.demo\n')
     target.mkdir(parents=True)
     (target / 'a.dat').write_bytes(b'data')
     assert main(['path', 'g.demo', *root]) == 1, 'a file without a completed fetch is not enough'
@@ -786,12 +790,20 @@ def test_an_unknown_key_is_named(tmp_path, capsys, monkeypatch, argv, key):
 
 
 @pytest.mark.unit
-def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch):
-    """fwl-io path only reads: a data root that does not exist is named and left absent."""
+@pytest.mark.parametrize('via_env', [False, True])
+def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch, via_env):
+    """fwl-io path only reads: a data root that does not exist, given by --data-root or by
+    FWL_DATA, or that is a file, is named and left as it is."""
     _one_dataset(tmp_path, monkeypatch)
-    assert main(['path', 'g.demo', '--data-root', str(tmp_path / 'typo')]) == 1
-    assert f'the data root {tmp_path / "typo"} does not exist' in capsys.readouterr().err
-    assert not (tmp_path / 'typo').exists()
+    typo, file_root = tmp_path / 'typo', tmp_path / 'file'
+    file_root.write_text('x')
+    for root in (typo, file_root):
+        if via_env:
+            monkeypatch.setenv('FWL_DATA', str(root))
+        argv = ['path', 'g.demo'] if via_env else ['path', 'g.demo', '--data-root', str(root)]
+        assert main(argv) == 1
+        assert f'the data root {root} is not an existing directory' in capsys.readouterr().err
+    assert not typo.exists() and file_root.read_text() == 'x'
 
 
 @pytest.mark.unit

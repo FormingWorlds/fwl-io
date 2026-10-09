@@ -29,15 +29,17 @@ Each file is checked against the registry. When Zenodo does not answer, the file
 fwl-io path atmos_clim.spectral_files.dayspring.48
 ```
 
-prints the version directory of the dataset, `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`. The last segment names the Zenodo record, so a newer version of the dataset goes into a new directory next to it. The command exits 1 when no completed fetch left the dataset in place, so a script stops there instead of passing a path to missing files.
+prints the version directory of the dataset, `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`. The last segment names the Zenodo record, so a newer version of the dataset goes into a new directory next to it. The command exits 1 when no completed fetch left the dataset in place; a script that checks the exit status, as in the next step, stops there instead of passing a path to missing files. The files are not hashed again; `fwl-io check` does that for a model.
 
 ## 4. Pass the path to the code
 
 Give the code the absolute file paths. For AGNI, put them in the `[files]` table of its configuration:
 
 ```bash
-SF="$(fwl-io path atmos_clim.spectral_files.dayspring.48)/Dayspring.sf"
-STAR="$(fwl-io path star.spectra.solar)/sun.txt"
+SF_DIR="$(fwl-io path atmos_clim.spectral_files.dayspring.48)" || exit 1
+STAR_DIR="$(fwl-io path star.spectra.solar)" || exit 1
+SF="$SF_DIR/Dayspring.sf"
+STAR="$STAR_DIR/sun.txt"
 ```
 
 ```toml
