@@ -39,6 +39,10 @@ def _write(tmp_path, text):
     return path
 
 
+def _load_failure(message):
+    return manifest.ProviderError(manifest.ErrorKind.LOAD_FAILURE, message)
+
+
 def test_nested_tables_load_with_dotted_keys(tmp_path):
     """A dataset table is identified by its Zenodo pin and keyed by its full path."""
     datasets = {ds.key: ds for ds in load_manifest(_write(tmp_path, GOOD))}
@@ -477,7 +481,7 @@ def test_fetch_for_fetches_only_the_listed_files(http_server, tmp_path, monkeypa
     (version_dir / 'c.dat').write_bytes(contents['c.dat'])
 
     monkeypatch.setattr(
-        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {})
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')
 
@@ -669,12 +673,7 @@ def test_two_providers_claiming_one_location_are_dropped_and_reported(tmp_path, 
 
 
 def test_a_load_error_and_a_conflict_error_are_classified_apart(tmp_path, monkeypatch):
-    """``conflict_models`` names only the conflict, never the plain load failure.
-
-    A caller such as ``cli.py`` picks the verdict label by testing membership
-    in ``conflict_models``; a load failure and a conflict must land on opposite
-    sides of that test even though both end up as ``errors`` entries.
-    """
+    """Each ``errors`` entry carries its kind: a load failure is never a conflict."""
 
     def broken():
         raise ImportError('provider package is broken')
@@ -689,8 +688,13 @@ def test_a_load_error_and_a_conflict_error_are_classified_apart(tmp_path, monkey
     discovery = manifest._discover_all()
 
     assert set(discovery.errors) == {'broken', 'package-a', 'package-b'}
-    assert 'broken' not in discovery.conflict_models, 'a load failure is not a conflict'
-    assert {'package-a', 'package-b'} <= set(discovery.conflict_models)
+    kinds = {name: error.kind for name, error in discovery.errors.items()}
+    assert kinds == {
+        'broken': manifest.ErrorKind.LOAD_FAILURE,
+        'package-a': manifest.ErrorKind.CONFLICT,
+        'package-b': manifest.ErrorKind.CONFLICT,
+    }
+    assert discovery.errors['broken'].models == frozenset()
 
 
 def test_a_dataset_location_conflict_logs_a_warning_per_dropped_provider(
@@ -1210,7 +1214,9 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
     )
     monkeypatch.setattr(
         'fwl_io.manifest._discover_all',
-        lambda: manifest._Discovery({'shared': [wanted]}, {'mymodel': 'unreadable manifest'}, {}),
+        lambda: manifest._Discovery(
+            {'shared': [wanted]}, {'mymodel': _load_failure('unreadable manifest')}
+        ),
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
 
@@ -1220,7 +1226,7 @@ def test_fetch_for_reports_an_unreadable_manifest_beside_the_data_it_did_fetch(
     assert '1 dataset(s) arrived' in str(excinfo.value)
     # Discrimination: the same call without the broken provider returns the data.
     monkeypatch.setattr(
-        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'shared': [wanted]}, {}, {})
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'shared': [wanted]}, {})
     )
     fetched = fetch_for('mymodel', data_root=data_root)
     assert [p.name for p in fetched[wanted.key]] == ['a.dat']
@@ -1236,7 +1242,9 @@ def test_fetch_for_reports_a_dataset_failure_and_an_unreadable_manifest_together
     broken.registry_path.unlink()  # the dataset now fails on its missing registry
     monkeypatch.setattr(
         'fwl_io.manifest._discover_all',
-        lambda: manifest._Discovery({'shared': [broken]}, {'mymodel': 'unreadable manifest'}, {}),
+        lambda: manifest._Discovery(
+            {'shared': [broken]}, {'mymodel': _load_failure('unreadable manifest')}
+        ),
     )
     with pytest.raises(RuntimeError) as excinfo:
         fetch_for('mymodel', data_root=tmp_path / 'data')
@@ -1328,7 +1336,7 @@ def test_fetch_for_stamps_each_required_dataset_and_skips_others(tmp_path, monke
 
     monkeypatch.setattr(
         'fwl_io.manifest._discover_all',
-        lambda: manifest._Discovery({'prov': [wanted, other]}, {}, {}),
+        lambda: manifest._Discovery({'prov': [wanted, other]}, {}),
     )
     monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # all files pre-seeded; no network
 
@@ -1657,7 +1665,7 @@ def _fetch_for_progress_probe(tmp_path, monkeypatch):
         tmp_path / 'data', 'star/tracks/demo', '111', {'a.dat': b'A\n'}, ('mymodel',)
     )
     monkeypatch.setattr(
-        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {}, {})
+        'fwl_io.manifest._discover_all', lambda: manifest._Discovery({'prov': [ds]}, {})
     )
 
     seen = {}
