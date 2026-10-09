@@ -68,6 +68,21 @@ def resolve_data_root(explicit: str | Path | None = None, *, create: bool = True
     return root
 
 
+def existing_data_root(explicit: str | Path | None = None) -> Path:
+    """Return the data root, which must already exist; this never creates it.
+
+    Raises
+    ------
+    FileNotFoundError
+        When the resolved root is not an existing directory, so a mistyped root fails
+        clearly rather than reading as an empty tree.
+    """
+    root = resolve_data_root(explicit, create=False)
+    if not root.is_dir():
+        raise FileNotFoundError(f'the data root {root} does not exist or is not a directory')
+    return root
+
+
 def resolve_cache_root() -> Path | None:
     """Return the read-only shared cache root, or None if not configured.
 
