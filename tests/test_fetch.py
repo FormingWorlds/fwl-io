@@ -3,16 +3,19 @@ import io
 import json
 import logging
 import socket
+import ssl
 import tarfile
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pooch
 import pytest
 import requests
 
-from fwl_io.fetch import DownloadError, OfflineDataError, _is_transient, create_fetcher
+from fwl_io.fetch import DownloadError, OfflineDataError, create_fetcher
+from fwl_io.transient import is_transient
 
 pytestmark = pytest.mark.integration
 
@@ -1457,7 +1460,7 @@ def _http_error(status: int) -> requests.exceptions.HTTPError:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('status', [408, 429, 500, 502, 503, 504])
+@pytest.mark.parametrize('status', [408, 429, 500, 502, 503, 504, 520, 599])
 def test_retryable_http_status_is_transient(status):
     """Every status in the retryable set is classified transient.
 
@@ -1465,7 +1468,7 @@ def test_retryable_http_status_is_transient(status):
     dropping 429 rate-limiting or a 5xx gateway error from the policy is caught
     here rather than silently making those failures permanent.
     """
-    assert _is_transient(_http_error(status)) is True
+    assert is_transient(_http_error(status)) is True
 
 
 @pytest.mark.unit
@@ -1476,7 +1479,7 @@ def test_non_retryable_http_status_is_permanent(status):
     A regression widening the policy to blanket 4xx (retrying a 404) or to every
     5xx (retrying 501/505) would flip one of these and fail here.
     """
-    assert _is_transient(_http_error(status)) is False
+    assert is_transient(_http_error(status)) is False
 
 
 @pytest.mark.unit
@@ -1490,6 +1493,8 @@ def test_non_retryable_http_status_is_permanent(status):
         requests.exceptions.ChunkedEncodingError('IncompleteRead'),
         requests.exceptions.ContentDecodingError('corrupt gzip body'),
         requests.exceptions.JSONDecodeError('metadata', '', 0),
+        ConnectionResetError('reset by peer'),
+        TimeoutError('timed out'),
     ],
 )
 def test_transport_and_metadata_errors_are_transient(exc):
@@ -1499,7 +1504,7 @@ def test_transport_and_metadata_errors_are_transient(exc):
     through an API call that does not raise for status, so a 5xx there surfaces as
     a JSONDecodeError rather than an HTTPError and must still be treated transient.
     """
-    assert _is_transient(exc) is True
+    assert is_transient(exc) is True
 
 
 @pytest.mark.unit
@@ -1510,9 +1515,44 @@ def test_checksum_mismatch_and_responseless_http_error_are_permanent():
     confused with the DOI-metadata JSONDecodeError (a ValueError subclass); and an
     HTTPError with no response carries no status to trust, so neither is retried.
     """
-    assert _is_transient(ValueError('hash of downloaded file does not match')) is False
+    assert is_transient(ValueError('hash of downloaded file does not match')) is False
     assert isinstance(requests.exceptions.JSONDecodeError('m', '', 0), ValueError)  # the trap
-    assert _is_transient(requests.exceptions.HTTPError('no response attached')) is False
+    assert is_transient(requests.exceptions.HTTPError('no response attached')) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'exc',
+    [
+        requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'verify failed')),
+        ssl.SSLCertVerificationError(1, 'verify failed'),
+    ],
+)
+def test_a_certificate_failure_is_transient_unless_the_caller_retries_it(exc):
+    """A certificate failure is transient by default and permanent with cert_is_transient=False,
+    also when it is not wrapped in a requests error."""
+    assert is_transient(exc) is True
+    assert is_transient(exc, cert_is_transient=False) is False
+
+
+@pytest.mark.unit
+def test_a_certificate_failure_runs_the_retry_schedule(tmp_path, monkeypatch):
+    """A download that fails its certificate check on every attempt is retried on the full
+    schedule before the fetch gives up."""
+    monkeypatch.setattr('fwl_io.fetch._RETRY_BACKOFF_S', (0.01, 0.02))
+    sleeps: list[float] = []
+    monkeypatch.setattr('time.sleep', sleeps.append)
+    exc = requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'verify failed'))
+    monkeypatch.setattr('pooch.retrieve', Mock(side_effect=exc))
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'alpha.dat': 'sha256:' + '0' * 64},
+        base_urls=['http://mirror/'],
+        data_root=tmp_path,
+    )
+    with pytest.raises(DownloadError):
+        fetcher.fetch('alpha.dat')
+    assert sleeps == [0.01, 0.02]
 
 
 @pytest.mark.unit

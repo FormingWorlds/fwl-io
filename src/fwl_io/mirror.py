@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import ssl
+import re
 import tempfile
 import time
 import zipfile
@@ -38,6 +38,7 @@ from pathlib import Path
 import requests
 
 from fwl_io.sync import ZENODO_API, fetch_zenodo_record, zenodo_record_id
+from fwl_io.transient import is_cert_failure
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -93,21 +94,6 @@ def _wait(attempt: int, retry_after=None) -> float:
     )
 
 
-def _cert_failure(exc: BaseException) -> bool:
-    """Return whether a certificate verification failure is anywhere in the exception chain."""
-    todo, seen = [exc], set()
-    while todo:
-        e = todo.pop()
-        if id(e) in seen:
-            continue
-        seen.add(id(e))
-        if isinstance(e, ssl.SSLCertVerificationError):
-            return True
-        links = (e.__cause__, e.__context__, getattr(e, 'reason', None), *e.args)
-        todo += [x for x in links if isinstance(x, BaseException)]
-    return False
-
-
 class DataversePublishUnconfirmed(DataverseError):
     """A publish request was sent, but whether it took effect is not known."""
 
@@ -158,6 +144,17 @@ def _creators_to_authors(creators: list[dict]) -> list[dict]:
     return authors or [{'authorName': _primitive('authorName', 'Unknown')}]
 
 
+def source_note(doi: str) -> str:
+    """Return the description line that names a mirror's Zenodo source DOI."""
+    return f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
+
+
+def names_source(text: str, doi: str) -> bool:
+    """Return whether ``text`` holds the :func:`source_note` of ``doi`` (any case or spacing)."""
+    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(doi) + r'(?!\d)'
+    return re.search(note, text, re.IGNORECASE) is not None
+
+
 def zenodo_record_to_citation(
     record: dict,
     *,
@@ -176,7 +173,6 @@ def zenodo_record_to_citation(
     doi = record.get('doi') or metadata.get('doi', '')
     title = metadata.get('title') or f'Zenodo record {record.get("id")}'
     description = metadata.get('description') or title
-    source_note = f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
 
     contact = {
         'datasetContactName': _primitive('datasetContactName', contact_name),
@@ -191,7 +187,7 @@ def zenodo_record_to_citation(
             'dsDescription',
             [
                 {'dsDescriptionValue': _primitive('dsDescriptionValue', description)},
-                {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note)},
+                {'dsDescriptionValue': _primitive('dsDescriptionValue', source_note(doi))},
             ],
         ),
         _controlled('subject', [subject]),
@@ -200,6 +196,11 @@ def zenodo_record_to_citation(
 
 
 _ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
+
+
+def checksum_algorithm(entry: dict) -> str | None:
+    """Return the hashlib name of a Dataverse file entry's checksum type, or None if unknown."""
+    return _ALGORITHMS.get((entry.get('checksum') or {}).get('type'))
 
 
 def _zenodo_record_rights(recid: str, api_base: str) -> dict:
@@ -275,13 +276,13 @@ def _same_file(entry: dict, path: Path) -> bool:
 
     An entry without a checksum of a known type does not count as the same file.
     """
-    checksum = entry.get('checksum') or {}
-    algorithm = _ALGORITHMS.get(checksum.get('type'))
+    algorithm = checksum_algorithm(entry)
     if algorithm is None or entry.get('filesize') != path.stat().st_size:
         return False
     with path.open('rb') as handle:
         return (
-            hashlib.file_digest(handle, algorithm).hexdigest() == str(checksum.get('value')).lower()
+            hashlib.file_digest(handle, algorithm).hexdigest()
+            == str(entry['checksum'].get('value')).lower()
         )
 
 
@@ -345,7 +346,7 @@ class DataverseClient:
         ) as exc:
             # The request may have reached Dataverse, like a gateway error; a
             # certificate failure is final (SSLError is a ConnectionError).
-            cls = DataverseError if _cert_failure(exc) else DataverseRetryableError
+            cls = DataverseError if is_cert_failure(exc) else DataverseRetryableError
             raise cls(f'Dataverse {method} {path} failed: {exc}') from exc
         except requests.RequestException as exc:
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc
