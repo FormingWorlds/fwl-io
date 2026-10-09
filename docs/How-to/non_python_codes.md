@@ -1,6 +1,6 @@
 # Use fwl-io data from a non-Python code
 
-A code that cannot import fwl-io, such as AGNI (Julia) or SOCRATES (Fortran), gets its data through the `fwl-io` command. The command needs a Python environment with fwl-io installed and `FWL_DATA` set; the code itself only reads files.
+A code that cannot import fwl-io, such as AGNI (Julia) or SOCRATES (Fortran), gets its data through the `fwl-io` command. The command needs a Python environment with fwl-io installed and `FWL_DATA` set; the code itself only reads files. Run every command below with the same `FWL_DATA` (or the same `--data-root`).
 
 When PROTEUS drives the code, PROTEUS fetches the data and passes the paths, so nothing on this page is needed.
 

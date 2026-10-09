@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import logging
@@ -1548,3 +1549,42 @@ def test_round_with_a_transient_mirror_retries_despite_a_permanent_one(tmp_path,
     # abandon after the permanent mirror and give calls == 2, sleeps == [].
     assert calls['n'] == 6, 'two mirrors tried across three rounds'
     assert sleeps == [0.01, 0.02], 'the transient mirror keeps the round retriable'
+
+
+def test_is_fetched_needs_a_current_stamp_and_every_file(tmp_path, monkeypatch):
+    """A plain dataset is fetched once fetch_all stamped it, while the stamp names this record
+    and every registry name is a file."""
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
+    data = b'data'
+    fetcher = create_fetcher(
+        subdir=SUBDIR,
+        registry={'a.dat': 'sha256:' + hashlib.sha256(data).hexdigest()},
+        zenodo=ZENODO,
+        data_root=tmp_path,
+    )
+    fetcher.target_dir.mkdir(parents=True)
+    (fetcher.target_dir / 'a.dat').write_bytes(data)
+    assert not fetcher.is_fetched(), 'present, but no completed fetch'
+    fetcher.fetch_all()
+    assert fetcher.is_fetched()
+    stamp_path = fetcher.target_dir / '.fwl-io.json'
+    stamp = stamp_path.read_text()
+    stamp_path.write_text(stamp.replace(f'"{fetcher.record_id}"', '"999"'))
+    assert stamp_path.read_text() != stamp, 'the record id was rewritten'
+    assert not fetcher.is_fetched(), 'a stamp of another record'
+    stamp_path.write_text(stamp)
+    (fetcher.target_dir / 'a.dat').unlink()
+    (fetcher.target_dir / 'a.dat').mkdir()
+    assert not fetcher.is_fetched(), 'a directory in place of a file'
+
+
+def test_is_fetched_follows_the_extracted_tree_of_an_archive(http_server, tmp_path):
+    """An archive dataset is fetched while every member its stamp records is present."""
+    base_url, root = http_server
+    registry = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    fetcher = _archive_fetcher(base_url, registry, tmp_path, 'tar')
+    assert not fetcher.is_fetched()
+    fetcher.fetch_all()
+    assert fetcher.is_fetched()
+    (tmp_path / VERSIONED / 'nested' / 'm1p0.txt').unlink()
+    assert not fetcher.is_fetched()

@@ -742,6 +742,7 @@ def test_fetch_by_key_then_path_prints_the_version_dir(tmp_path, capsys, monkeyp
     directory once fwl-io fetch --key has verified and stamped it."""
     target = _one_dataset(tmp_path, monkeypatch)
     root = ['--data-root', str(tmp_path / 'data')]
+    (tmp_path / 'data').mkdir()
     assert main(['path', 'g.demo', *root]) == 1
     assert 'g.demo is not fetched' in capsys.readouterr().err
     target.mkdir(parents=True)
@@ -768,13 +769,29 @@ def test_fetch_by_key_uses_the_dataset_mirrors(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('command', ['path', 'fetch'])
-def test_an_unknown_key_is_named(tmp_path, capsys, monkeypatch, command):
-    """A key no installed manifest declares is a message and exit 1."""
+@pytest.mark.parametrize(
+    ('argv', 'key'),
+    [
+        (['path', 'g.other'], 'g.other'),
+        (['fetch', '--key', 'g.other'], 'g.other'),
+        (['fetch', '--key', ''], ''),
+    ],
+)
+def test_an_unknown_key_is_named(tmp_path, capsys, monkeypatch, argv, key):
+    """A key no installed manifest declares, an empty one included, is a message and exit 1."""
     _one_dataset(tmp_path, monkeypatch)
-    argv = [command, 'g.other'] if command == 'path' else [command, '--key', 'g.other']
+    (tmp_path / 'data').mkdir()
     assert main([*argv, '--data-root', str(tmp_path / 'data')]) == 1
-    assert "no installed manifest declares the dataset 'g.other'" in capsys.readouterr().err
+    assert f'no installed manifest declares the dataset {key!r}' in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch):
+    """fwl-io path only reads: a data root that does not exist is named and left absent."""
+    _one_dataset(tmp_path, monkeypatch)
+    assert main(['path', 'g.demo', '--data-root', str(tmp_path / 'typo')]) == 1
+    assert f'the data root {tmp_path / "typo"} does not exist' in capsys.readouterr().err
+    assert not (tmp_path / 'typo').exists()
 
 
 @pytest.mark.unit
@@ -796,3 +813,25 @@ def test_an_archive_dataset_is_fetched_when_its_tree_is_intact(tmp_path, monkeyp
     for intact in (True, False):
         monkeypatch.setattr(type(fetcher), '_archive_tree_intact', lambda self, v=intact: v)
         assert fetcher.is_fetched() is intact
+
+
+@pytest.mark.unit
+def test_a_missing_key_names_the_unused_manifests(tmp_path, monkeypatch):
+    """With a provider left out of discovery, a key no usable manifest declares is not found
+    and the error says how many manifests were not used; the usable keys still resolve."""
+    from fwl_io import manifest
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch)
+
+    class _Broken:
+        name = 'broken'
+
+        def load(self):
+            raise ImportError('provider package is broken')
+
+    eps = [*manifest.entry_points(group='fwl_io.manifests'), _Broken()]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+    with pytest.raises(LookupError, match=r"'g.other'; 1 manifest\(s\) not used, see fwl-io"):
+        fetcher_for_key('g.other', tmp_path / 'data')
+    assert fetcher_for_key('g.demo', tmp_path / 'data').target_dir.name == 'r1'

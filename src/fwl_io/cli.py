@@ -1,5 +1,5 @@
-"""Command-line interface for ``fwl-io``: sync, list, fetch, check, relocate, prune,
-mirror, mirror-publish.
+"""Command-line interface for ``fwl-io``: sync, list, fetch, path, check, relocate, prune,
+mirror, mirror-publish, check-mirrors.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -88,7 +88,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetch_for, fetcher_for_key
 
     progress = _resolve_progress(args.progress)
-    if args.key:
+    if args.key is not None:
         paths = fetcher_for_key(args.key, args.data_root, progress).fetch_all()
         print(f'{args.key}: {len(paths)} file(s)')
         return 0
@@ -103,8 +103,13 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
 def _cmd_path(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetcher_for_key
+    from fwl_io.paths import resolve_data_root
 
-    fetcher = fetcher_for_key(args.key, args.data_root)
+    root = resolve_data_root(args.data_root, create=False)
+    if not root.is_dir():
+        print(f'fwl-io: the data root {root} does not exist', file=sys.stderr)
+        return 1
+    fetcher = fetcher_for_key(args.key, root)
     if not fetcher.is_fetched():
         print(
             f'fwl-io: {args.key} is not fetched in {fetcher.target_dir}; '
