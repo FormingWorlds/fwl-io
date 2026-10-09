@@ -195,6 +195,14 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mirror_status(args: argparse.Namespace) -> int:
+    from fwl_io.mirror_status import mirror_status
+
+    report = mirror_status()
+    print(report.summary())
+    return report.exit_code
+
+
 def _cmd_check_mirrors(args: argparse.Namespace) -> int:
     from fwl_io.pins import check_mirrors
 
@@ -343,6 +351,13 @@ def main(argv: list[str] | None = None) -> int:
         help='Dataverse base URL for every pin (default: the server of each pin DOI)',
     )
     p_check_mirrors.set_defaults(func=_cmd_check_mirrors)
+
+    p_mirror_status = sub.add_parser(
+        'mirror-status',
+        help='list datasets without a Dataverse pin or with a newer Zenodo version '
+        '(exit 5 when one needs work, 3 when Zenodo could not be read)',
+    )
+    p_mirror_status.set_defaults(func=_cmd_mirror_status)
 
     args = parser.parse_args(argv)
     try:

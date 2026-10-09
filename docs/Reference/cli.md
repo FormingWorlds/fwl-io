@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has nine subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has ten subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -113,6 +113,14 @@ DATAVERSE_TOKEN=... fwl-io mirror-publish <persistent-id> \
 ```
 
 Publishes an existing Dataverse draft by its persistent id: it never creates a dataset, so it is the second step of a create-draft-then-publish workflow, run once a draft created by `fwl-io mirror --no-publish` has been reviewed. `<persistent-id>` must be of the form `doi:<prefix>/<suffix>`, for example `doi:10.34894/EXAMPLE`. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. `--version-type` is `major` by default and accepts only `major` or `minor`. Fails clearly if the dataset is already published or the persistent id does not resolve to a draft. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
+
+## fwl-io mirror-status
+
+```bash
+fwl-io mirror-status
+```
+
+Lists the datasets of the installed manifests whose Dataverse mirror needs work: one without a `dataverse` pin (UNPINNED, with its Zenodo DOI), and one whose Zenodo record has a newer version than the one pinned (STALE: the manifest needs a new pin, and that version a mirror). A dataset can be both. It reads only Zenodo, once per record, through `<record>/versions/latest`; a record that cannot be read is listed as UNREADABLE. Exit is 1 when a manifest fails to load, 5 when a dataset needs work, 3 when the only problem is a record that could not be read, and 0 otherwise.
 
 ## fwl-io check-mirrors
 
