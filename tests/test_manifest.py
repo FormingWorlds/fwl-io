@@ -1771,10 +1771,11 @@ def test_every_known_dataset_fits_the_documented_layout():
     assert {p.split('/', 1)[0] for p in patterns} == tops
     assert {r'atmos_clim/scattering/[a-z0-9_]+', 'interior/mass_radius/[a-z0-9_]+'} <= set(patterns)
     locations, error = _legacy_locations()
-    shared = load_manifest(shared_manifest_path())
-    assert error is None and locations and shared
-    subdirs = {ds.subdir for ds in shared}
-    subdirs |= {Dataset(key=k, name=k, zenodo=None).subdir for k in locations}
-    subdirs.add('atmos_clim/scattering/socrates_aerosols')
-    assert {'interior_struct/eos/seager_2007', 'observe/mass_radius/zeng_2019'} <= subdirs
+    assert error is None
+    shared = {ds.subdir for ds in load_manifest(shared_manifest_path())}
+    moved = {Dataset(key=k, name=k, zenodo=None).subdir for k in locations}
+    families = {'/'.join(s.split('/')[:2]) for s in shared}
+    assert families >= {'atmos_clim/spectral_files', 'interior/eos', 'star/spectra'}
+    assert {'interior_struct/eos/seager_2007', 'observe/mass_radius/zeng_2019'} <= moved
+    subdirs = shared | moved | {'atmos_clim/scattering/socrates_aerosols'}
     assert [s for s in sorted(subdirs) if not any(re.fullmatch(p, s) for p in patterns)] == []
