@@ -628,3 +628,10 @@ def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
     assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
     kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
     assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None
+
+
+def test_the_summary_line_the_nightly_reads_is_stable():
+    """The nightly step reads 'pins served by their mirror: <n>,' to fail when none is served."""
+    lines = MirrorReport(unreachable={'a.b': 'down'}).summary().splitlines()
+    assert lines[0] == 'UNREACHABLE a.b: down'
+    assert lines[1].startswith('pins served by their mirror: 0,')
