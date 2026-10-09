@@ -811,7 +811,11 @@ def _fill_draft(
     replace: bool,
     sizes: dict[str, int],
 ) -> None:
-    """Upload every registry file the draft does not hold byte for byte, one at a time.
+    """Upload every registry file the draft does not hold, one at a time.
+
+    With ``replace`` (a run into an own draft), a draft file of the Zenodo name and size in
+    ``sizes`` is kept without a download, so its contents are not compared; any other file
+    is compared byte for byte as below.
 
     ``draft()`` returns the draft's persistent id; it is called only once the first file
     has arrived from Zenodo, so a Zenodo failure on it leaves Dataverse untouched.
@@ -833,9 +837,12 @@ def _fill_draft(
     wait, streak, names = 0.0, 0, sorted(registry)
     for name in names:
         if replace:  # into an own draft: a file of the Zenodo size is kept without a download
-            entry = client._retry(lambda: client._draft_files(draft()), 'file listing').get(name)
-            if entry is not None and entry.get('filesize') == sizes.get(name):
-                continue
+            entry = client._retry(lambda: client._draft_files(draft()), 'file listing').get(
+                _draft_path(None, name)
+            )
+            if entry is not None and sizes.get(name) is not None:
+                if entry.get('filesize') == sizes[name]:
+                    continue
         with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:
             path = _download_zenodo_files(
                 zenodo_doi, {name: registry[name]}, Path(tmp), base_urls=base_urls
@@ -875,6 +882,14 @@ def _fill_draft(
             log.info('uploaded %s', name)
         streak = streak + 1 if client.bot_checks > checks else 0
         wait = BOT_CHECK_SPACING_S if streak else UPLOAD_SPACING_S
+
+
+def _record_sizes(record: dict) -> dict[str, int | None]:
+    """Return the name-to-size map of a Zenodo record, in either API files shape."""
+    listing = record.get('files')
+    if isinstance(listing, dict):  # InvenioRDM shape
+        return {n: m.get('size') for n, m in (listing.get('entries') or {}).items()}
+    return {f['key']: f.get('size') for f in listing or []}
 
 
 def _missing(client: DataverseClient, persistent_id: str, names) -> list[str] | None:
@@ -941,7 +956,8 @@ def mirror_to_dataverse(
     into : str | None
         Persistent id of an existing draft of this record to complete instead of
         creating one: files it already holds with the Zenodo size are skipped without
-        a download (the verify table checks their contents before any publish), a differing
+        a download, so their contents are not compared here (check them before a
+        publish), a differing
         copy is replaced, files the record does not hold are removed, and the draft is
         never deleted. It takes neither ``dry_run`` nor ``publish`` (publish the completed
         draft with :func:`publish_existing_dataverse_draft`) and needs no contact email.
@@ -1022,11 +1038,7 @@ def mirror_to_dataverse(
     if not registry:
         raise ValueError(f'Zenodo record {recid} lists no files; nothing to mirror')
     deposit = set(registry)  # a run into a draft removes only files outside the whole record
-    listing = record.get('files')
-    if isinstance(listing, dict):  # InvenioRDM shape
-        sizes = {n: m.get('size') for n, m in (listing.get('entries') or {}).items()}
-    else:
-        sizes = {f['key']: f.get('size') for f in listing or []}
+    sizes = _record_sizes(record)
     if files is not None:
         from fwl_io.sync import select_files
 

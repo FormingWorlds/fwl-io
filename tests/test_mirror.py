@@ -2968,7 +2968,7 @@ def test_a_run_into_a_draft_keeps_a_file_of_the_zenodo_size_without_a_download(
     assert fetched == ['b.dat'] and not _adds(calls, 'a.dat') and len(_adds(calls, 'b.dat')) == 1
 
 
-def test_a_failed_upload_into_a_draft_that_cannot_be_listed_keeps_it(
+def test_a_failed_first_upload_to_a_draft_that_cannot_be_listed_keeps_it(
     http_server, dataverse_server, sleeps, monkeypatch
 ):
     """After a rejected first upload, a draft that cannot be listed may hold the file, so it
@@ -2984,9 +2984,9 @@ def test_a_failed_upload_into_a_draft_that_cannot_be_listed_keeps_it(
         return real(self, pid)
 
     monkeypatch.setattr(DataverseClient, '_draft_files', listing)
-    with pytest.raises(MirrorIncomplete):
+    with pytest.raises(MirrorIncomplete) as raised:
         _mirror(http_server, dataverse_server)
-    assert not _DataverseHandler.deleted
+    assert raised.value.missing is None and not _DataverseHandler.deleted
 
 
 def test_a_draft_file_deletion_is_logged(http_server, dataverse_server, sleeps, caplog):
@@ -2994,3 +2994,43 @@ def test_a_draft_file_deletion_is_logged(http_server, dataverse_server, sleeps, 
     _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('z.dat', b'Z', 9)]
     _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
     assert 'deleting z.dat (file 9) from doi:10.34894/DEMO01' in caplog.text
+
+
+def test_record_sizes_read_both_zenodo_shapes():
+    """Sizes come from the legacy files list and from the InvenioRDM entries."""
+    from fwl_io.mirror import _record_sizes
+
+    assert _record_sizes({'files': [{'key': 'a', 'size': 1}, {'key': 'b'}]}) == {'a': 1, 'b': None}
+    assert _record_sizes({'files': {'entries': {'a': {'size': 2}}}}) == {'a': 2}
+    assert _record_sizes({}) == {}
+
+
+def test_a_file_without_a_zenodo_size_is_downloaded_into_a_draft(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """With no size on either side, a draft file is not kept on size: it is downloaded,
+    differs, and is sent again."""
+    from fwl_io import mirror
+
+    monkeypatch.setattr(mirror, '_record_sizes', lambda record: {})
+    no_size = {k: v for k, v in _entry('a.dat', b'old\n', 1).items() if k != 'filesize'}
+    _DataverseHandler.draft_files = [no_size, _entry('b.dat', b'BBBB\n', 2)]
+    _, calls = _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
+    assert len(_adds(calls, 'a.dat')) == 1 and not _adds(calls, 'b.dat')
+
+
+def test_two_bot_check_uploads_then_only_kept_files_finish_the_run(
+    http_server, dataverse_server, sleeps
+):
+    """The stop applies before a further upload: when the remaining files are in the draft,
+    the run ends normally."""
+    three = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n', 'c.dat': b'C\n'}
+    _DataverseHandler.draft_files = [_entry('c.dat', b'C\n', 3)]
+    _DataverseHandler.script = {('POST', '/add'): ['challenge', 'pass', 'challenge']}
+    result, _ = _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01', deposit=three)
+    assert result == 'doi:10.34894/DEMO01'
+    assert sorted(f['filename'] for f in _DataverseHandler.draft_files) == [
+        'a.dat',
+        'b.dat',
+        'c.dat',
+    ]
