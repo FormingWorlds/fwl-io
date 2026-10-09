@@ -1777,5 +1777,5 @@ def test_every_known_dataset_fits_the_documented_layout():
     families = {'/'.join(s.split('/')[:2]) for s in shared}
     assert families >= {'atmos_clim/spectral_files', 'interior/eos', 'star/spectra'}
     assert {'interior_struct/eos/seager_2007', 'observe/mass_radius/zeng_2019'} <= moved
-    subdirs = shared | moved | {'atmos_clim/scattering/socrates_aerosols'}
+    subdirs = shared | moved
     assert [s for s in sorted(subdirs) if not any(re.fullmatch(p, s) for p in patterns)] == []
