@@ -220,6 +220,11 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
     )
     if persistent_id is None:
         print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
+    elif args.into is not None:
+        print(
+            f'draft {persistent_id} completed, not published; verify its files, then run '
+            f'fwl-io mirror-publish {persistent_id}'
+        )
     else:
         print(f'mirrored to {persistent_id}')
         print(f'add this to the manifest:  dataverse = "{persistent_id.removeprefix("doi:")}"')

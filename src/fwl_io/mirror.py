@@ -101,14 +101,16 @@ def _wait(attempt: int, retry_after=None) -> float:
 class MirrorIncomplete(DataverseError):
     """A draft holds part of a deposit; it is kept so a run with ``into`` can finish it.
 
-    ``persistent_id`` names the draft and ``missing`` the files it does not list (None
-    when the listing failed).
+    ``persistent_id`` names the draft; ``state`` maps 'missing', 'wrong' and 'extra' to
+    file names (None when the draft could not be listed), and ``missing`` is its list of
+    files the draft lacks.
     """
 
-    def __init__(self, message: str, persistent_id: str, missing: list[str] | None):
+    def __init__(self, message: str, persistent_id: str, state: dict | None):
         super().__init__(message)
         self.persistent_id = persistent_id
-        self.missing = missing
+        self.state = state
+        self.missing = None if state is None else state['missing']
 
 
 class DataversePublishUnconfirmed(DataverseError):
@@ -840,9 +842,8 @@ def _fill_draft(
             entry = client._retry(lambda: client._draft_files(draft()), 'file listing').get(
                 _draft_path(None, name)
             )
-            if entry is not None and sizes.get(name) is not None:
-                if entry.get('filesize') == sizes[name]:
-                    continue
+            if entry is not None and _matches_record(entry, registry[name], sizes.get(name)):
+                continue
         with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:
             path = _download_zenodo_files(
                 zenodo_doi, {name: registry[name]}, Path(tmp), base_urls=base_urls
@@ -878,10 +879,44 @@ def _fill_draft(
                 f'check of {name} in {persistent_id}',
             ).get(_draft_path(None, name))
             if landed is None or not _same_file(landed, path):
+                if landed is not None:  # known bad: removed so no later run keeps it
+                    client.delete_file(persistent_id, landed)
                 raise DataverseError(f'{name} is not intact in {persistent_id} after its upload')
             log.info('uploaded %s', name)
         streak = streak + 1 if client.bot_checks > checks else 0
         wait = BOT_CHECK_SPACING_S if streak else UPLOAD_SPACING_S
+
+
+def _matches_record(entry: dict, digest: str, size: int | None) -> bool:
+    """Return whether a draft entry has the Zenodo size and, where its checksum type is the
+    registry's, the registry checksum; with another checksum type only the size is known."""
+    if size is None or entry.get('filesize') != size:
+        return False
+    algorithm, _, value = digest.partition(':')
+    if checksum_algorithm(entry) != algorithm.lower():
+        return True
+    return str((entry.get('checksum') or {}).get('value')).lower() == value.lower()
+
+
+def _draft_state(
+    client: DataverseClient, persistent_id: str, registry: dict[str, str], sizes: dict
+) -> dict[str, list[str]] | None:
+    """Return the registry files a draft lacks or holds wrong, and the files it holds that
+    are not selected, or None if the draft cannot be listed."""
+    try:
+        listed = client._draft_files(persistent_id)
+    except Exception:  # noqa: BLE001 -- the caller reports an unknown state instead
+        return None
+    keys = {_draft_path(None, n): n for n in registry}
+    return {
+        'missing': sorted(n for k, n in keys.items() if k not in listed),
+        'wrong': sorted(
+            n
+            for k, n in keys.items()
+            if k in listed and not _matches_record(listed[k], registry[n], sizes.get(n))
+        ),
+        'extra': sorted(set(listed) - set(keys)),
+    }
 
 
 def _record_sizes(record: dict) -> dict[str, int | None]:
@@ -1012,15 +1047,15 @@ def mirror_to_dataverse(
         JSON object (a non-empty body that fails to parse, or that parses to
         something other than a JSON object), the draft does not hold
         exactly the Zenodo files, or the draft does not report the license it
-        was given. A draft this run created is deleted after a failure while it
-        is still empty, or after a failed publish; if that fails too, the log
-        names the draft to delete by hand. A failed creation leaves no draft to
+        was given. A draft this run created is deleted after a failure only while
+        it holds none of the run's files; if that fails too, the log names the
+        draft to delete by hand. A failed creation leaves no draft to
         roll back, but a creation whose reply was lost can leave one in the
         collection.
     MirrorIncomplete
-        If the run stops once a file has reached the draft, or may have, or with
-        ``into``: the draft is kept, and the exception names the draft
-        (``persistent_id``) and the files it does not list (``missing``).
+        If the run stops, the publish included, once a file has reached the draft,
+        or may have, or with ``into``: the draft is kept, and the exception names the
+        draft (``persistent_id``) and its missing, wrong and unselected files.
     DataverseAlreadyPublished
         If the dataset is already published before the publish request; it is kept.
     DataversePublishUnconfirmed
@@ -1137,16 +1172,18 @@ def mirror_to_dataverse(
             client.set_license(made[0], dv_license)
         return made[0]
 
-    # A draft that holds files is kept on a failure and named with what it lacks; only a
-    # draft this run created and that is still empty, or complete, is deleted.
+    # A draft that holds a file of the run is kept on any failure and reported; only a
+    # draft this run created that holds none of its files is deleted.
     sent: list[str] = []
-    complete = False
     try:
         _fill_draft(client, draft, zenodo_doi, registry, base_urls, sent, into is not None, sizes)
         persistent_id = draft()
         listed = client._retry(
             lambda: client._draft_files(persistent_id), f'file listing of {persistent_id}'
         )
+        absent = sorted(n for n in registry if _draft_path(None, n) not in listed)
+        if absent:
+            raise DataverseError(f'draft {persistent_id} lacks {absent} after the uploads')
         extra = sorted(set(listed).difference(deposit if into is not None else registry))
         if into is not None:  # a run into an own draft removes what the record does not hold
             for name in extra:
@@ -1157,7 +1194,6 @@ def mirror_to_dataverse(
                 f'draft {persistent_id} does not match the Zenodo files: '
                 f'not expected {extra} (checksum types listed: {kinds})'
             )
-        complete = True
         log.info('%s holds all %d file(s) of Zenodo record %s', persistent_id, len(registry), recid)
         if publish:
             client.publish(persistent_id)
@@ -1170,15 +1206,20 @@ def mirror_to_dataverse(
         persistent_id = made[0]
         if persistent_id is None:  # nothing was written to Dataverse
             raise
-        if into is not None or (sent and not complete):
-            missing = _missing(client, persistent_id, list(registry))
+        if into is not None or sent:  # the draft holds a file of the run: never deleted
+            state = _draft_state(client, persistent_id, registry, sizes)
+            found = (
+                'its files could not be listed'
+                if state is None
+                else f'missing {state["missing"]}, wrong {state["wrong"]}, '
+                f'not selected {state["extra"]}'
+            )
             message = (
-                f'{persistent_id} is kept as a draft; files not in it: '
-                f'{"unknown (the listing failed)" if missing is None else missing}; run the '
-                f'mirror again into {persistent_id} with the same files and server ({exc})'
+                f'{persistent_id} is kept as a draft ({found}); run the mirror again into '
+                f'{persistent_id} with the same files and server ({exc})'
             )
             log.error('%s', message)
-            raise MirrorIncomplete(message, persistent_id, missing) from exc
+            raise MirrorIncomplete(message, persistent_id, state) from exc
         try:
             client.delete_draft(persistent_id)
             log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)

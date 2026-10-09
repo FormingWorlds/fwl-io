@@ -36,6 +36,11 @@ on:
         type: boolean
         default: true
 
+# One run at a time per draft (into) or per deposit, so two runs never write one draft.
+concurrency:
+  group: mirror-${{ inputs.into || inputs.zenodo_doi }}
+  cancel-in-progress: false
+
 jobs:
   mirror:
     runs-on: ubuntu-latest

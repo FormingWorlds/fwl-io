@@ -909,6 +909,9 @@ def test_mirror_into_passes_the_draft_and_never_publishes(monkeypatch, capsys):
     monkeypatch.setenv('DATAVERSE_TOKEN', 't')
     argv = ['mirror', '10.5281/zenodo.55', '--collection', 'C', '--into', 'doi:10.34894/DRAFT1']
     assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert 'draft doi:10.34894/DRAFT1 completed, not published' in out
+    assert 'add this to the manifest' not in out
     assert seen['into'] == 'doi:10.34894/DRAFT1' and seen['publish'] is False
     assert seen['contact_email'] == ''
     assert seen['licence'] is None
