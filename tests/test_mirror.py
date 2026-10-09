@@ -10,9 +10,11 @@ asserted without touching a real Dataverse installation.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import ssl
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -185,7 +187,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.endswith('/add') and self._scripted('POST', '/add', self.script_after):
             # The upload reached the draft, but the response was lost.
-            self.draft_files.append(self._uploaded_file())
+            self.draft_files.extend(self._uploaded_files())
             return
         if parsed.path.endswith('/actions/:publish') and self.script_after.get(
             ('POST', '/actions/:publish')
@@ -208,7 +210,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             if self.fail_on_add:
                 self._reply(400, {'status': 'ERROR', 'message': 'bad field'})
             else:
-                self.draft_files.append(self._uploaded_file())
+                self.draft_files.extend(self._uploaded_files())
                 self._reply(200, {'status': 'OK', 'data': {'files': [{'label': 'ok'}]}})
         elif parsed.path.endswith('/actions/:publish'):
             if self.fail_on_publish:
@@ -220,12 +222,24 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def _uploaded_file(self):
+    def _uploaded_files(self):
+        """Return the draft entries of the last upload; a zip is unpacked into its members,
+        as DataverseNL does."""
         body = self.calls[-1]['body']
         name = body.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
         payload = body.split(b'\r\n\r\n', 1)[1].rsplit(b'\r\n--', 1)[0]
-        checksum = {'type': 'MD5', 'value': hashlib.md5(payload).hexdigest()}
-        return {'filename': name, 'filesize': len(payload), 'checksum': checksum}
+        members = [(name, payload)]
+        if zipfile.is_zipfile(io.BytesIO(payload)):
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                members = [(m.filename, archive.read(m)) for m in archive.infolist()]
+        return [
+            {
+                'filename': member,
+                'filesize': len(data),
+                'checksum': {'type': 'MD5', 'value': hashlib.md5(data).hexdigest()},
+            }
+            for member, data in members
+        ]
 
     def do_DELETE(self):  # noqa: N802 -- BaseHTTPRequestHandler API
         parsed = self._record('DELETE')
@@ -2521,3 +2535,144 @@ def test_only_a_missing_dataset_id_stops_the_license_put(monkeypatch, dataset_id
     else:
         client.set_license('doi:10.34894/DEMO01', lic)
         assert ('PUT', 'http://unused/api/datasets/0/license') in seen
+
+
+def _capture_posts(client):
+    """Record the multipart name, bytes and query of each upload ``client`` sends."""
+    sent = []
+
+    def post(path, **kwargs):
+        sent_name, handle, _ = kwargs['files']['file']
+        sent.append((sent_name, handle.read(), kwargs['params']))
+
+    client._post = post
+    return sent
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('name', ['p.zip', 'P.ZIP'])
+def test_add_file_sends_a_zip_inside_a_second_zip(tmp_path, name):
+    """A zip goes in an uncompressed second zip holding it by name, even with a pre-1980 mtime."""
+    import io
+    import os
+    import zipfile
+
+    client = DataverseClient('http://unused', 'tok')
+    sent = _capture_posts(client)
+    archive = tmp_path / name
+    archive.write_bytes(b'one\n')
+    os.utime(archive, (0, 0))
+    client.add_file('doi:10.34894/DEMO01', archive)
+    ((sent_name, wrapped, params),) = sent
+    assert sent_name == 'upload.zip'
+    assert params == {'persistentId': 'doi:10.34894/DEMO01', 'noVarDetect': 'true'}
+    with zipfile.ZipFile(io.BytesIO(wrapped)) as wrapper:
+        (member,) = wrapper.infolist()
+        assert (member.filename, member.compress_type) == (name, zipfile.ZIP_STORED)
+        assert wrapper.read(name) == archive.read_bytes()
+
+
+@pytest.mark.unit
+def test_add_file_sends_another_file_as_it_is(tmp_path):
+    """A file that is not a zip goes under its own name with its own bytes."""
+    client = DataverseClient('http://unused', 'tok')
+    sent = _capture_posts(client)
+    plain = tmp_path / 'f.dat'
+    plain.write_bytes(b'data')
+    client.add_file('doi:10.34894/DEMO01', plain)
+    assert [(n, b) for n, b, _ in sent] == [('f.dat', b'data')]
+
+
+@pytest.mark.unit
+def test_a_zip_that_arrived_behind_a_failed_response_is_not_sent_again(tmp_path, sleeps):
+    """After a failed response the draft is checked for the archive itself, not its wrapper."""
+    from fwl_io.mirror import DataverseRetryableError
+
+    archive = tmp_path / 'p.zip'
+    archive.write_bytes(b'one\n')
+    entry = {
+        'filesize': 4,
+        'checksum': {'type': 'MD5', 'value': hashlib.md5(archive.read_bytes()).hexdigest()},
+    }
+    client = DataverseClient('http://unused', 'tok')
+    posts = []
+
+    def post(path, **kwargs):
+        posts.append(path)
+        raise DataverseRetryableError('bot-check page', 403, unprocessed=True)
+
+    client._post = post
+    client._draft_files = lambda pid: {'p.zip': entry}
+    client.add_file('doi:10.34894/DEMO01', archive)
+    assert posts == ['/api/datasets/:persistentId/add']
+
+
+def _zip_bytes() -> bytes:
+    """Return a small zip archive with two members, the same bytes on every call."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as archive:
+        archive.writestr(zipfile.ZipInfo('a/one.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'one\n')
+        archive.writestr(zipfile.ZipInfo('two.txt', date_time=(2020, 1, 1, 0, 0, 0)), 'two\n')
+    return buf.getvalue()
+
+
+@pytest.mark.unit
+def test_the_zip_helper_gives_the_same_bytes_at_any_time(monkeypatch):
+    """The zip tests build the archive more than once, so its bytes must not follow the clock."""
+    first = _zip_bytes()
+    monkeypatch.setattr('time.time', lambda: 2e9)
+    assert _zip_bytes() == first
+    assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ['a/one.txt', 'two.txt']
+
+
+def test_a_record_with_a_zip_mirrors_to_a_draft_holding_the_zip(http_server, dataverse_server):
+    """A server that unpacks uploaded zips still ends with the archive as one file, so the
+    draft check passes on the record's own files."""
+    base_url, root = http_server
+    dv_url, calls = dataverse_server
+    _serve_zenodo_record(root, 56, {'p.zip': _zip_bytes(), 'a.dat': b'AAA\n'})
+    pid = mirror_to_dataverse(
+        '10.5281/zenodo.56',
+        dataverse_url=dv_url,
+        collection='Proteus_Fr',
+        token='secret-token',
+        contact_name='PROTEUS',
+        contact_email='contact@example.org',
+        api_base=f'{base_url}api/records',
+        base_urls=[base_url],
+        publish=False,
+    )
+    assert pid == 'doi:10.34894/DEMO01'
+    held = {f['filename']: f['checksum']['value'] for f in _DataverseHandler.draft_files}
+    assert held == {
+        'p.zip': hashlib.md5(_zip_bytes()).hexdigest(),
+        'a.dat': hashlib.md5(b'AAA\n').hexdigest(),
+    }
+
+
+def test_a_resent_zip_upload_carries_the_whole_wrapper(http_server, dataverse_server, sleeps):
+    """An upload refused before it arrived is sent again with the complete wrapper."""
+    base_url, root = http_server
+    dv_url, calls = dataverse_server
+    _serve_zenodo_record(root, 57, {'p.zip': _zip_bytes()})
+    _DataverseHandler.script = {('POST', '/add'): [503]}
+    mirror_to_dataverse(
+        '10.5281/zenodo.57',
+        dataverse_url=dv_url,
+        collection='Proteus_Fr',
+        token='secret-token',
+        contact_name='PROTEUS',
+        contact_email='contact@example.org',
+        api_base=f'{base_url}api/records',
+        base_urls=[base_url],
+        publish=False,
+    )
+    first, second = [
+        c['body'].split(b'\r\n\r\n', 1)[1].rsplit(b'\r\n--', 1)[0]
+        for c in calls
+        if c['path'].endswith('/add')
+    ]
+    assert first == second
+    with zipfile.ZipFile(io.BytesIO(second)) as wrapper:
+        assert wrapper.read('p.zip') == _zip_bytes()
+    assert [f['filename'] for f in _DataverseHandler.draft_files] == ['p.zip']

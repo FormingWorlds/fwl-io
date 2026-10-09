@@ -567,3 +567,43 @@ def test_only_phoenix_is_unpinned_in_the_shared_manifest():
     datasets = load_manifest(shared_manifest_path())
     assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
     assert len(datasets) > 1
+
+
+def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
+    """The shared Seager and Zeng datasets have their pins and registries, and sit at their own
+    locations, so the collision rule keeps both providers while PROTEUS declares its copies."""
+    from fwl_io.manifest import _drop_conflicting_datasets
+
+    shared = {ds.key: ds for ds in load_manifest(shared_manifest_path())}
+    seager, zeng = shared['interior.eos.seager_2007'], shared['interior.mass_radius.zeng_2019']
+    assert [(d.subdir, d.zenodo, d.dataverse, d.extract, d.files) for d in (seager, zeng)] == [
+        ('interior/eos/seager_2007', '10.5281/zenodo.15727998', '10.34894/QZZGHW', None, None),
+        (
+            'interior/mass_radius/zeng_2019',
+            '10.5281/zenodo.15727899',
+            '10.34894/ZGZA6I',
+            None,
+            None,
+        ),
+    ]
+    seager_files, zeng_files = seager.registry(), zeng.registry()
+    assert sorted(seager_files) == [f'eos_seager07_{m}.txt' for m in ('iron', 'silicate', 'water')]
+    assert seager_files['eos_seager07_iron.txt'] == 'md5:7bf215a2bb4da6d27ceeac2ade0ce706'
+    assert len(zeng_files) == 57
+    assert zeng_files['massradiusEarthlikeRocky.txt'] == 'md5:6761a26366bd6bc6ece720a1013d1285'
+    proteus = [
+        _dataset(tmp_path, key='interior_struct.eos.seager_2007'),
+        _dataset(tmp_path, key='observe.mass_radius.zeng_2019'),
+    ]
+    found, errors = {'fwl-io': list(shared.values()), 'proteus': proteus}, {}
+    _drop_conflicting_datasets(found, errors)
+    assert (sorted(found), errors) == (['fwl-io', 'proteus'], {})
+
+
+def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
+    """A zip the mirror holds as its members fails the pin; the zip held as one file passes."""
+    dataset = _dataset(tmp_path, files={'p.zip': MD5_A})
+    unpacked = FakeClient(files=[_file('one.txt', 'SHA-1', 'e' * 40, 4)])
+    assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
+    kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
+    assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None

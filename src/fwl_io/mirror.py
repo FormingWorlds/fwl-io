@@ -31,6 +31,7 @@ import logging
 import ssl
 import tempfile
 import time
+import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -584,24 +585,43 @@ class DataverseClient:
             )
 
     def add_file(self, persistent_id: str, path: Path, *, no_ingest: bool = True) -> None:
-        """Upload one file to a dataset, with tabular ingest disabled by default."""
+        """Upload one file to a dataset, with tabular ingest disabled by default.
+
+        Dataverse unpacks an uploaded zip, so a ``.zip`` goes inside a second, stored zip.
+
+        Raises
+        ------
+        DataverseError
+            If the upload fails after its retries, or the draft holds another file of
+            that name.
+        OSError
+            If the wrapper of a zip cannot be written, for example with no temp space.
+        """
         params = {'persistentId': persistent_id}
         if no_ingest:
             params[_NO_INGEST_PARAM] = 'true'
 
-        def send():
-            with path.open('rb') as handle:
-                self._post(
-                    '/api/datasets/:persistentId/add',
-                    params=params,
-                    files={'file': (path.name, handle, 'application/octet-stream')},
-                )
+        with tempfile.TemporaryDirectory(prefix='fwl-io-upload-') as tmp:
+            upload = path
+            if path.suffix.lower() == '.zip':
+                upload = Path(tmp, 'upload.zip')
+                # strict_timestamps=False: a pre-1980 mtime sets only the wrapper's header.
+                with zipfile.ZipFile(upload, 'w', strict_timestamps=False) as wrapper:
+                    wrapper.write(path, path.name)
 
-        self._retry(
-            send,
-            f'upload of {path.name} to {persistent_id}',
-            done=lambda: self._file_arrived(persistent_id, path),
-        )
+            def send():
+                with upload.open('rb') as handle:
+                    self._post(
+                        '/api/datasets/:persistentId/add',
+                        params=params,
+                        files={'file': (upload.name, handle, 'application/octet-stream')},
+                    )
+
+            self._retry(
+                send,
+                f'upload of {path.name} to {persistent_id}',
+                done=lambda: self._file_arrived(persistent_id, path),
+            )
 
     def publish(self, persistent_id: str, *, version_type: str = 'major') -> None:
         """Publish a dataset, making its files publicly downloadable.

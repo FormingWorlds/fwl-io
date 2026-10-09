@@ -24,7 +24,7 @@ Lists every dataset from all installed manifests with its key and consumers. Whe
 fwl-io fetch <model> [--data-root PATH] [--progress | --no-progress]
 ```
 
-Fetches every dataset that lists `<model>` in its `required_by`. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree.
+Fetches every dataset that lists `<model>` in its `required_by`. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
 
 A download progress bar shows by default when stderr is a terminal; `--progress` forces it on and `--no-progress` off. The bar needs the optional `tqdm` dependency (`pip install fwl-io[progress]`); without it, or when there is no stderr to draw on, the fetch runs with no bar.
 
