@@ -99,7 +99,16 @@ def _wait(attempt: int, retry_after=None) -> float:
 
 
 class MirrorIncomplete(DataverseError):
-    """A draft holds part of a deposit; it is kept so a run with ``into`` can finish it."""
+    """A draft holds part of a deposit; it is kept so a run with ``into`` can finish it.
+
+    ``persistent_id`` names the draft and ``missing`` the files it does not list (None
+    when the listing failed).
+    """
+
+    def __init__(self, message: str, persistent_id: str, missing: list[str] | None):
+        super().__init__(message)
+        self.persistent_id = persistent_id
+        self.missing = missing
 
 
 class DataversePublishUnconfirmed(DataverseError):
@@ -502,27 +511,6 @@ class DataverseClient:
         )
         return True
 
-    def check_draft(self, persistent_id: str, files: dict[str, Path]) -> None:
-        """Check that the draft holds exactly ``files``, each with its size and checksum.
-
-        Raises
-        ------
-        DataverseError
-            If a file is missing or differs, or the draft holds another file.
-        """
-        listed = self._retry(
-            lambda: self._draft_files(persistent_id), f'file listing of {persistent_id}'
-        )
-        wrong = sorted(n for n, p in files.items() if not _same_file(listed.get(n, {}), p))
-        extra = sorted(set(listed) - set(files))
-        if wrong or extra:
-            kinds = sorted({str((f.get('checksum') or {}).get('type')) for f in listed.values()})
-            raise DataverseError(
-                f'draft {persistent_id} does not match the Zenodo files: '
-                f'missing or different {wrong}, not expected {extra} '
-                f'(checksum types listed: {kinds})'
-            )
-
     def _released(self, persistent_id: str) -> bool:
         """Return whether the dataset's latest version is published."""
         body = self._request(
@@ -729,6 +717,8 @@ class DataverseClient:
     def delete_file(self, persistent_id: str, entry: dict) -> None:
         """Delete one file from a draft that was never published, where it is gone for good."""
         file_id = entry.get('id')
+        if file_id is None:
+            raise DataverseError(f'{persistent_id} lists {entry.get("filename")} without a file id')
         self._retry(
             lambda: self._request('DELETE', f'/api/files/{file_id}'),
             f'deletion of {entry.get("filename")} from {persistent_id}',
@@ -776,6 +766,17 @@ def _download_zenodo_files(
     return {name: fetcher.target_dir / name for name in registry}
 
 
+def descriptions(version: dict) -> str:
+    """Return the dsDescription values of a dataset version's citation block, one per line."""
+    fields = ((version.get('metadataBlocks') or {}).get('citation') or {}).get('fields') or []
+    return '\n'.join(
+        str(((item or {}).get('dsDescriptionValue') or {}).get('value', ''))
+        for f in fields
+        if f.get('typeName') == 'dsDescription'
+        for item in f.get('value') or []
+    )
+
+
 def _check_own_draft(client: DataverseClient, persistent_id: str, zenodo_doi: str) -> None:
     """Refuse a target that is not a never-published draft naming ``zenodo_doi`` as its source.
 
@@ -792,16 +793,10 @@ def _check_own_draft(client: DataverseClient, persistent_id: str, zenodo_doi: st
     )
     data = body.get('data') or {}
     version = data.get('latestVersion') or {}
-    if version.get('versionState') != 'DRAFT' or data.get('publicationDate'):
+    released = data.get('publicationDate') or version.get('versionNumber') is not None
+    if version.get('versionState') != 'DRAFT' or released:
         raise DataverseError(f'{persistent_id} is not a draft that was never published')
-    fields = ((version.get('metadataBlocks') or {}).get('citation') or {}).get('fields') or []
-    text = ' '.join(
-        str(((item or {}).get('dsDescriptionValue') or {}).get('value', ''))
-        for f in fields
-        if f.get('typeName') == 'dsDescription'
-        for item in f.get('value') or []
-    )
-    if not names_source(text, zenodo_doi):
+    if not names_source(descriptions(version), zenodo_doi):
         raise DataverseError(f'{persistent_id} does not name Zenodo {zenodo_doi} as its source')
 
 
@@ -823,7 +818,9 @@ def _fill_draft(
     uploaded, checked in the draft, and removed locally, so the runner holds one file
     at a time. Uploads are spaced by
     ``UPLOAD_SPACING_S``, or ``BOT_CHECK_SPACING_S`` after one that met the bot-check
-    page; two such uploads in a row stop the run. Names sent are appended to ``sent``.
+    page; two such uploads in a row stop the run while files remain. The name of each
+    file that reached the draft, or may have (a failed upload whose file is listed, or
+    whose draft cannot be listed), is appended to ``sent``.
 
     Raises
     ------
@@ -831,8 +828,8 @@ def _fill_draft(
         If an upload fails after its retries, does not arrive intact, or two uploads in a
         row met the bot-check page.
     """
-    wait, streak = 0.0, 0
-    for name in sorted(registry):
+    wait, streak, names = 0.0, 0, sorted(registry)
+    for name in names:
         with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:
             path = _download_zenodo_files(
                 zenodo_doi, {name: registry[name]}, Path(tmp), base_urls=base_urls
@@ -854,24 +851,43 @@ def _fill_draft(
                 )
             if entry is not None:
                 client.delete_file(persistent_id, entry)
-            client.add_file(persistent_id, path)
-            if not client._file_arrived(persistent_id, path):
-                raise DataverseError(f'{name} is not in {persistent_id} after its upload')
+            try:
+                client.add_file(persistent_id, path)
+            except Exception:
+                if _may_hold(client, persistent_id, name):
+                    sent.append(name)
+                raise
             sent.append(name)
+            landed = client._retry(
+                lambda pid=persistent_id: client._draft_files(pid),
+                f'check of {name} in {persistent_id}',
+            ).get(_draft_path(None, name))
+            if landed is None or not _same_file(landed, path):
+                raise DataverseError(f'{name} is not intact in {persistent_id} after its upload')
             log.info('uploaded %s', name)
         streak = streak + 1 if client.bot_checks > checks else 0
-        if streak == 2:
+        if streak == 2 and name != names[-1]:
             raise DataverseRetryableError('two uploads in a row met the bot-check page')
         wait = BOT_CHECK_SPACING_S if streak else UPLOAD_SPACING_S
 
 
-def _missing(client: DataverseClient, persistent_id: str, registry: dict[str, str]) -> str:
-    """Return the registry names a draft does not list, for an error message."""
+def _may_hold(client: DataverseClient, persistent_id: str, name: str) -> bool:
+    """Return whether the draft lists ``name``, or cannot be listed to tell."""
+    try:
+        return _draft_path(None, name) in client._draft_files(persistent_id)
+    except Exception:  # noqa: BLE001 -- unknown counts as present: the draft is kept
+        return True
+
+
+def _missing(
+    client: DataverseClient, persistent_id: str, registry: dict[str, str]
+) -> list[str] | None:
+    """Return the registry names a draft does not list, or None if it cannot be listed."""
     try:
         listed = client._draft_files(persistent_id)
-    except Exception as exc:  # noqa: BLE001 -- the message names the failed listing instead
-        return f'unknown (listing failed: {exc})'
-    return str(sorted(n for n in registry if _draft_path(None, n) not in listed))
+    except Exception:  # noqa: BLE001 -- the caller reports an unknown list instead
+        return None
+    return sorted(n for n in registry if _draft_path(None, n) not in listed)
 
 
 def mirror_to_dataverse(
@@ -928,8 +944,9 @@ def mirror_to_dataverse(
     into : str | None
         Persistent id of an existing draft of this record to complete instead of
         creating one: files it already holds byte for byte are skipped, a differing
-        copy is replaced, files not in the deposit are removed, and the draft is never
-        deleted. No contact email is needed.
+        copy is replaced, files the record does not hold are removed, and the draft is
+        never deleted. It takes neither ``dry_run`` nor ``publish`` (publish the completed
+        draft with :func:`publish_existing_dataverse_draft`) and needs no contact email.
 
     Returns
     -------
@@ -984,6 +1001,11 @@ def mirror_to_dataverse(
     # The subject is validated by the server when the dataset is created: an
     # unknown value fails the create there rather than being checked locally, so
     # the server stays authoritative across installations and vocabulary changes.
+    if into is not None and (dry_run or publish):
+        raise ValueError(
+            'into completes a draft only: it takes neither dry_run nor publish; publish the '
+            'completed draft with mirror-publish'
+        )
     if not dry_run and into is None and not contact_email:
         raise ValueError(
             'a contact email is required to create a Dataverse dataset; provide one '
@@ -998,6 +1020,7 @@ def mirror_to_dataverse(
     registry = _extract_files(record)
     if not registry:
         raise ValueError(f'Zenodo record {recid} lists no files; nothing to mirror')
+    deposit = set(registry)  # a run into a draft removes only files outside the whole record
     if files is not None:
         from fwl_io.sync import select_files
 
@@ -1036,7 +1059,7 @@ def mirror_to_dataverse(
         return None
 
     if into is not None:
-        _check_own_draft(client, into, zenodo_doi)
+        _check_own_draft(client, into, f'10.5281/zenodo.{recid}')
     made = [into]
 
     def draft() -> str:
@@ -1058,11 +1081,11 @@ def mirror_to_dataverse(
             lambda: client._draft_files(persistent_id), f'file listing of {persistent_id}'
         )
         extra = sorted(set(listed) - {_draft_path(None, n) for n in registry})
-        if extra and into is not None:  # a run into an own draft leaves it holding the deposit
+        if into is not None:  # a run into an own draft removes what the record does not hold
             for name in extra:
-                client.delete_file(persistent_id, listed[name])
-            extra = []
-        if extra:
+                if name not in deposit:
+                    client.delete_file(persistent_id, listed[name])
+        elif extra:
             kinds = sorted({str((f.get('checksum') or {}).get('type')) for f in listed.values()})
             raise DataverseError(
                 f'draft {persistent_id} does not match the Zenodo files: '
@@ -1081,17 +1104,15 @@ def mirror_to_dataverse(
         persistent_id = made[0]
         if persistent_id is None:  # nothing was written to Dataverse
             raise
-        if into is not None and complete:
-            log.error('%s; %s is kept, check its state by hand', exc, persistent_id)
-            raise
         if into is not None or (sent and not complete):
+            missing = _missing(client, persistent_id, registry)
             message = (
-                f'{persistent_id} is kept as a partial draft; missing: '
-                f'{_missing(client, persistent_id, registry)}; finish it with: fwl-io mirror '
-                f'{zenodo_doi} --collection {collection} --into {persistent_id} --no-publish'
+                f'{persistent_id} is kept as a draft; files not in it: '
+                f'{"unknown (the listing failed)" if missing is None else missing}; run the '
+                f'mirror again into {persistent_id} with the same files and server ({exc})'
             )
             log.error('%s', message)
-            raise MirrorIncomplete(f'{message} ({exc})') from exc
+            raise MirrorIncomplete(message, persistent_id, missing) from exc
         try:
             client.delete_draft(persistent_id)
             log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)

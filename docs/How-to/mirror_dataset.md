@@ -28,7 +28,7 @@ DataverseNL sometimes answers an API call with its bot-check page (an HTML page 
 
 The publish request is sent again only after the bot-check page at a status below 500 or a 429, which show that DataverseNL did not process it. After any other reply except a 4xx rejection, a success included, or no reply, the request is not sent again: the mirror checks the dataset state up to 5 times over 450 s, and the publish counts as done only when the state is RELEASED. If it is not, or if all 5 attempts get the bot-check page or a 429, the publish is not confirmed. A 4xx reply other than the bot-check page is a rejection.
 
-The run logs the DOI of the dataset it creates. The dataset creation is not repeated, since a repeat could create a second draft: when it fails, look in the collection for a draft the run did not report. When a later step fails while the draft it created holds none of its files, or when the publish fails, the run deletes the draft, with the same retries, and the error names the call and the last response. Once a file has reached the draft, a failure keeps it: the error names the files still missing and the command that finishes the draft (see below). The draft counts as deleted only when DataverseNL itself answers 404; if the deletion fails, the log names the draft to delete by hand. The run keeps the dataset, logs its DOI and asks you to check its state by hand when the publish is not confirmed, when the dataset was already published before the publish request, or when the run is interrupted.
+The run logs the DOI of the dataset it creates. The dataset creation is not repeated, since a repeat could create a second draft: when it fails, look in the collection for a draft the run did not report. When a later step fails while the draft it created holds none of its files, or when the publish fails, the run deletes the draft, with the same retries, and the error names the call and the last response. Once a file has reached the draft, or may have (an upload that failed but whose file the draft lists, or a draft that cannot be listed), a failure keeps it: the error names the files still missing (see below). The draft counts as deleted only when DataverseNL itself answers 404; if the deletion fails, the log names the draft to delete by hand. The run keeps the dataset, logs its DOI and asks you to check its state by hand when the publish is not confirmed, when the dataset was already published before the publish request, or when the run is interrupted.
 
 ## Publishing a reviewed draft
 
@@ -40,13 +40,13 @@ For the given Zenodo version DOI, the mirror downloads and checksum-verifies eac
 
 ## Large deposits and finishing a partial draft
 
-The run holds one file at a time on disk: it downloads a file, uploads it, checks it in the draft and deletes the local copy. Uploads into one draft are 60 s apart, 600 s after an upload that met the bot-check page, and two such uploads in a row stop the run with the draft kept. To finish a kept draft, run the mirror again with the draft's DOI: fill **into** in the workflow (and leave **publish** unchecked), or from the command line:
+The run holds one file at a time on disk: it downloads a file, uploads it, checks it in the draft and deletes the local copy. Uploads into one draft are 60 s apart, 600 s after an upload that met the bot-check page, and two such uploads in a row stop the run with the draft kept. To finish a kept draft, run the mirror again with the draft's DOI and the same files and server: fill **into** in the workflow, or from the command line:
 
 ```bash
-fwl-io mirror 10.5281/zenodo.17674612 --collection Proteus_Fr --into doi:10.34894/XXXXXX --no-publish
+fwl-io mirror 10.5281/zenodo.17674612 --collection Proteus_Fr --into doi:10.34894/XXXXXX
 ```
 
-It accepts only a draft that was never published and whose description names the same Zenodo record. Files the draft holds with the same size and checksum are not sent again, a file that differs is deleted and sent again, and a file the deposit does not hold is deleted, so a second run into a complete draft sends nothing. The draft is never deleted.
+It accepts only a draft that was never published and whose description names the same Zenodo record. Files the draft holds with the same size and checksum are not sent again, a file that differs is deleted and sent again, and a file the Zenodo record does not hold is deleted, so a second run into a complete draft sends nothing. Each file is still downloaded from Zenodo to compare it, since DataverseNL stores SHA-1 and the registry MD5. The draft is never deleted and never published: publish it with the **Publish an existing Dataverse draft** workflow below. **into** takes no dry run.
 
 ## Mirroring part of a deposit
 

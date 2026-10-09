@@ -713,3 +713,19 @@ def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, ca
     assert 'package-a: MANIFEST NOT USED' in out
     assert 'package-b: MANIFEST NOT USED' in out
     assert 'FAILED TO LOAD' not in out
+
+
+def test_mirror_into_passes_the_draft_and_never_publishes(monkeypatch, capsys):
+    """--into reaches the mirror with publish off, and needs no contact email."""
+    seen = {}
+
+    def fake(doi, **kwargs):
+        seen.update(kwargs)
+        return 'doi:10.34894/DRAFT1'
+
+    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', fake)
+    monkeypatch.setenv('DATAVERSE_TOKEN', 't')
+    argv = ['mirror', '10.5281/zenodo.55', '--collection', 'C', '--into', 'doi:10.34894/DRAFT1']
+    assert main(argv) == 0
+    assert seen['into'] == 'doi:10.34894/DRAFT1' and seen['publish'] is False
+    assert seen['contact_email'] == ''

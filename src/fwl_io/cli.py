@@ -183,7 +183,7 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
         contact_name=args.contact_name,
         contact_email=args.contact_email,
         subject=args.subject,
-        publish=not args.no_publish,
+        publish=not args.no_publish and args.into is None,
         dry_run=args.dry_run,
         files=args.file or None,
         into=args.into,
@@ -317,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     p_mirror.add_argument(
         '--into',
         metavar='PERSISTENT_ID',
-        help='complete this existing draft of the record instead of creating one',
+        help='complete this existing draft of the record instead of creating one (never publishes)',
     )
     p_mirror.add_argument(
         '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'

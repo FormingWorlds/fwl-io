@@ -108,6 +108,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     license: dict | None = None
     source_note: str = 'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
     next_file_id: int = 100
+    version_number: int | None = None  # set for a draft of a dataset released before
 
     def log_message(self, *args):  # noqa: D102 -- silence request logging
         pass
@@ -169,6 +170,8 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             }
             if self.license is not None:
                 version['license'] = self.license
+            if self.version_number is not None:
+                version['versionNumber'] = self.version_number
             data = {'id': 7, 'latestVersion': version}
             if self.released:
                 data['publicationDate'] = '2026-10-09'
@@ -297,6 +300,7 @@ def dataverse_server():
     _DataverseHandler.released = False
     _DataverseHandler.deleted = False
     _DataverseHandler.license = None
+    _DataverseHandler.version_number = None
     _DataverseHandler.source_note = (
         'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
     )
@@ -313,7 +317,8 @@ def _mirror(http_server, dataverse_server, **overrides):
     base_url, root = http_server
     dv_url, calls = dataverse_server
     rights = overrides.pop('rights', (CC_BY,))
-    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'}, rights)
+    deposit = overrides.pop('deposit', {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'})
+    _serve_zenodo_record(root, 55, deposit, rights)
     kwargs = dict(
         dataverse_url=dv_url,
         collection='Proteus_Fr',
@@ -2221,11 +2226,9 @@ def test_an_already_published_dataset_is_not_deleted(http_server, dataverse_serv
 
 @pytest.mark.unit
 def test_a_file_listed_twice_in_the_draft_is_a_fault(tmp_path, monkeypatch):
-    """A draft that lists a path twice fails the check, even when both entries match."""
+    """A draft that lists a path twice fails the listing, even when both entries match."""
     import requests
 
-    target = tmp_path / 'a.dat'
-    target.write_bytes(b'AAA\n')
     entry = {
         'filename': 'a.dat',
         'filesize': 4,
@@ -2236,9 +2239,7 @@ def test_a_file_listed_twice_in_the_draft_is_a_fault(tmp_path, monkeypatch):
         requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
     )
     with pytest.raises(DataverseError, match=r"\['a.dat'\] more than once"):
-        DataverseClient('http://unused', 'tok').check_draft(
-            'doi:10.34894/DEMO01', {'a.dat': target}
-        )
+        DataverseClient('http://unused', 'tok')._draft_files('doi:10.34894/DEMO01')
 
 
 @pytest.mark.unit
@@ -2367,8 +2368,6 @@ def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypa
     """The listing's directoryLabel on the file entry, outside dataFile, keys the path."""
     import requests
 
-    target = tmp_path / 'a.dat'
-    target.write_bytes(b'AAA\n')
     data_file = {
         'filename': 'a.dat',
         'filesize': 4,
@@ -2378,10 +2377,8 @@ def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypa
     monkeypatch.setattr(
         requests, 'request', lambda *args, **kwargs: _fake_response(200, body.encode())
     )
-    with pytest.raises(DataverseError, match=r"not expected \['sub/a.dat'\]"):
-        DataverseClient('http://unused', 'tok').check_draft(
-            'doi:10.34894/DEMO01', {'a.dat': target}
-        )
+    listed = DataverseClient('http://unused', 'tok')._draft_files('doi:10.34894/DEMO01')
+    assert list(listed) == ['sub/a.dat']
 
 
 # ---------------------------------------------------------------------------
@@ -2755,6 +2752,7 @@ def test_a_run_into_a_draft_sends_only_missing_or_differing_files(
     ('released', 'note', 'why'),
     [
         (True, None, 'is not a draft that was never published'),
+        ('version', None, 'is not a draft that was never published'),
         (False, 'Mirror of Zenodo deposit 10.5281/zenodo.56.', 'does not name Zenodo'),
     ],
 )
@@ -2763,7 +2761,8 @@ def test_a_run_into_refuses_a_published_or_foreign_dataset(
 ):
     """Files are added only to a never-published draft that names this record; nothing is
     written to another dataset."""
-    _DataverseHandler.released = released
+    _DataverseHandler.released = released is True
+    _DataverseHandler.version_number = 1 if released == 'version' else None
     if note:
         _DataverseHandler.source_note = note
     with pytest.raises(DataverseError, match=why):
@@ -2774,15 +2773,12 @@ def test_a_run_into_refuses_a_published_or_foreign_dataset(
 def test_a_failure_after_a_file_landed_keeps_the_draft_and_names_what_is_missing(
     http_server, dataverse_server, sleeps
 ):
-    """A rejected second upload leaves a.dat in the draft: it is kept, the error names b.dat
-    and the command that finishes the draft, and that command does."""
+    """A rejected second upload leaves a.dat in the draft: it is kept, the error names b.dat,
+    and a run into the draft finishes it."""
     _DataverseHandler.script = {('POST', '/add'): ['pass', 400]}
-    with pytest.raises(
-        MirrorIncomplete,
-        match=r"missing: \['b.dat'\]; finish it with: fwl-io "
-        r'mirror 10.5281/zenodo.55 --collection Proteus_Fr --into doi:10.34894/DEMO01',
-    ):
+    with pytest.raises(MirrorIncomplete, match=r"files not in it: \['b.dat'\]") as raised:
         _mirror(http_server, dataverse_server)
+    assert (raised.value.persistent_id, raised.value.missing) == ('doi:10.34894/DEMO01', ['b.dat'])
     assert not _DataverseHandler.deleted
     _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01', publish=False)
     assert sorted(f['filename'] for f in _DataverseHandler.draft_files) == ['a.dat', 'b.dat']
@@ -2792,31 +2788,36 @@ def test_uploads_are_spaced_and_slow_down_after_a_bot_check_page(
     http_server, dataverse_server, sleeps, monkeypatch
 ):
     """Uploads wait UPLOAD_SPACING_S apart, BOT_CHECK_SPACING_S after one that met the
-    bot-check page, and two such uploads in a row stop the run with the draft kept."""
+    bot-check page; two such uploads in a row stop the run with the draft kept while files
+    remain, and not after the last file."""
     monkeypatch.setattr('fwl_io.mirror.UPLOAD_SPACING_S', 60.0)
     monkeypatch.setattr('fwl_io.mirror.BOT_CHECK_SPACING_S', 600.0)
-    _mirror(http_server, dataverse_server, publish=False)
-    assert sleeps == [60.0]
+    three = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n', 'c.dat': b'C\n'}
+    _mirror(http_server, dataverse_server, publish=False, deposit=three)
+    assert sleeps == [60.0, 60.0]
     sleeps.clear()
     _DataverseHandler.draft_files, _DataverseHandler.calls[:] = [], []
     _DataverseHandler.script = {('POST', '/add'): ['challenge', 'pass', 'challenge']}
-    with pytest.raises(MirrorIncomplete, match='two uploads in a row met the bot-check page'):
-        _mirror(http_server, dataverse_server, publish=False)
-    assert sleeps == [30.0, 600.0, 30.0]
+    with pytest.raises(MirrorIncomplete, match=r'two uploads in a row') as raised:
+        _mirror(http_server, dataverse_server, publish=False, deposit=three)
+    assert raised.value.missing == ['c.dat'] and sleeps == [30.0, 600.0, 30.0]
     assert not _DataverseHandler.deleted
+    sleeps.clear()
+    _DataverseHandler.draft_files, _DataverseHandler.calls[:] = [], []
+    _DataverseHandler.script = {('POST', '/add'): ['challenge', 'pass', 'challenge']}
+    assert _mirror(http_server, dataverse_server, publish=False)[0] == 'doi:10.34894/DEMO01'
+    assert sleeps == [30.0, 600.0, 30.0], 'the last file met the page too, and the run ends'
 
 
 def test_an_upload_missing_from_the_draft_afterwards_is_an_error(
     http_server, dataverse_server, sleeps, monkeypatch
 ):
-    """An upload the draft does not list afterwards stops the run; with nothing of the run
-    in the draft, the draft is deleted."""
-    monkeypatch.setattr(DataverseClient, '_file_arrived', lambda self, pid, path: False)
-    with pytest.raises(
-        DataverseError, match='a.dat is not in doi:10.34894/DEMO01 after its upload'
-    ):
+    """An upload that was answered as stored but that the draft does not list stops the run;
+    the draft is kept, since the server reported the file stored."""
+    monkeypatch.setattr(_DataverseHandler, '_uploaded_files', lambda self: [])
+    with pytest.raises(MirrorIncomplete, match='a.dat is not intact in doi:10.34894/DEMO01'):
         _mirror(http_server, dataverse_server)
-    assert _DataverseHandler.deleted
+    assert not _DataverseHandler.deleted
 
 
 def test_a_partial_draft_whose_listing_fails_says_so(
@@ -2832,17 +2833,115 @@ def test_a_partial_draft_whose_listing_fails_says_so(
         raise DataverseError('listing down')
 
     monkeypatch.setattr(DataverseClient, '_draft_files', listing)
-    with pytest.raises(
-        MirrorIncomplete, match=r'missing: unknown \(listing failed: listing down\)'
-    ):
+    with pytest.raises(MirrorIncomplete, match=r'files not in it: unknown \(the listing failed\)'):
         _mirror(http_server, dataverse_server)
 
 
-def test_a_failed_publish_into_a_complete_draft_keeps_it(http_server, dataverse_server, sleeps):
-    """A draft completed with into is kept when its publish fails, and the error is the
-    publish rejection."""
-    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('b.dat', b'BBBB\n', 2)]
-    _DataverseHandler.fail_on_publish = True
-    with pytest.raises(DataverseError, match='publish rejected'):
-        _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
+@pytest.mark.parametrize('flags', [{'publish': True}, {'dry_run': True}])
+def test_a_run_into_a_draft_neither_publishes_nor_dry_runs(http_server, dataverse_server, flags):
+    """into only completes a draft: publish and dry run are refused before any request."""
+    with pytest.raises(ValueError, match='into completes a draft only'):
+        _mirror(http_server, dataverse_server, **{'publish': False, **flags}, into='doi:x')
+    assert _DataverseHandler.calls == []
+
+
+def test_a_run_into_a_draft_with_files_keeps_the_rest_of_the_record(
+    http_server, dataverse_server, sleeps
+):
+    """A run into a draft with a file selection deletes no file of the record outside it;
+    only a file the record does not hold goes."""
+    _DataverseHandler.draft_files = [
+        _entry('a.dat', b'AAA\n', 1),
+        _entry('b.dat', b'BBBB\n', 2),
+        _entry('z.dat', b'Z', 3),
+    ]
+    _mirror(
+        http_server, dataverse_server, into='doi:10.34894/DEMO01', publish=False, files=['a.dat']
+    )
+    assert sorted(f['filename'] for f in _DataverseHandler.draft_files) == ['a.dat', 'b.dat']
+
+
+def test_a_bot_check_page_on_the_check_after_an_upload_is_retried(
+    http_server, dataverse_server, sleeps
+):
+    """The listing after an upload is retried like the others, so a bot-check page there
+    neither stops the run nor deletes the draft."""
+    _DataverseHandler.script = {('GET', '/versions/:draft/files'): ['pass', 'challenge']}
+    assert _mirror(http_server, dataverse_server)[0] == 'doi:10.34894/DEMO01'
+    assert sleeps == [30.0] and not _DataverseHandler.deleted
+
+
+def test_a_failed_check_after_the_first_upload_keeps_the_draft(
+    http_server, dataverse_server, sleeps
+):
+    """When the check after the first upload runs out of retries, the file may be in the
+    draft, so the draft is kept and reported."""
+    _DataverseHandler.script = {('GET', '/versions/:draft/files'): ['pass'] + ['challenge'] * 6}
+    with pytest.raises(MirrorIncomplete, match='files not in it: unknown'):
+        _mirror(http_server, dataverse_server)
     assert not _DataverseHandler.deleted
+
+
+def test_a_zenodo_failure_on_a_later_file_keeps_the_draft(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """Zenodo failing on b.dat after a.dat reached the draft keeps the draft and names b.dat."""
+    from fwl_io import mirror
+    from fwl_io.fetch import DownloadError
+
+    real = mirror._download_zenodo_files
+
+    def download(doi, registry, root, base_urls=None):
+        if 'b.dat' in registry:
+            raise DownloadError('zenodo down')
+        return real(doi, registry, root, base_urls=base_urls)
+
+    monkeypatch.setattr(mirror, '_download_zenodo_files', download)
+    with pytest.raises(MirrorIncomplete, match=r"files not in it: \['b.dat'\].*zenodo down"):
+        _mirror(http_server, dataverse_server)
+    assert not _DataverseHandler.deleted
+
+
+def test_a_run_into_a_draft_needs_no_contact_email(http_server, dataverse_server, sleeps):
+    """into creates nothing, so it needs no contact email."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1)]
+    result, _ = _mirror(
+        http_server, dataverse_server, into='doi:10.34894/DEMO01', publish=False, contact_email=''
+    )
+    assert result == 'doi:10.34894/DEMO01'
+
+
+def test_a_file_entry_without_an_id_is_not_deleted():
+    """delete_file refuses an entry without a file id instead of sending DELETE .../None."""
+    with pytest.raises(DataverseError, match='without a file id'):
+        DataverseClient('http://unused', 'tok').delete_file('doi:x', {'filename': 'a.dat'})
+
+
+def test_an_upload_stored_but_answered_as_rejected_keeps_the_draft(
+    http_server, dataverse_server, sleeps
+):
+    """A 400 after the server stored the file: the listing shows it, so the draft is kept."""
+    _DataverseHandler.script_after = {('POST', '/add'): [400]}
+    with pytest.raises(MirrorIncomplete, match=r"files not in it: \['b.dat'\]"):
+        _mirror(http_server, dataverse_server)
+    assert not _DataverseHandler.deleted
+
+
+def test_a_run_into_a_draft_accepts_a_doi_prefix(http_server, dataverse_server, sleeps):
+    """The source check reads the record id, so a doi: prefix on the Zenodo DOI is fine."""
+    base_url, root = http_server
+    _serve_zenodo_record(root, 55, {'a.dat': b'AAA\n'})
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1)]
+    result = mirror_to_dataverse(
+        'doi:10.5281/zenodo.55',
+        dataverse_url=dataverse_server[0],
+        collection='Proteus_Fr',
+        token='t',
+        contact_name='P',
+        contact_email='',
+        publish=False,
+        api_base=f'{base_url}api/records',
+        base_urls=[base_url],
+        into='doi:10.34894/DEMO01',
+    )
+    assert result == 'doi:10.34894/DEMO01'
