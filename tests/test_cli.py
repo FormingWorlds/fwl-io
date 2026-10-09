@@ -911,3 +911,6 @@ def test_mirror_into_passes_the_draft_and_never_publishes(monkeypatch, capsys):
     assert main(argv) == 0
     assert seen['into'] == 'doi:10.34894/DRAFT1' and seen['publish'] is False
     assert seen['contact_email'] == ''
+    argv = ['mirror', '10.5281/zenodo.21390786', '--collection', 'C', '--licence', 'CC-BY-4.0']
+    assert main([*argv, '--contact-email', 'c@x']) == 0
+    assert seen['licence'] == 'CC-BY-4.0' and seen['into'] is None

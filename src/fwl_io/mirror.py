@@ -892,6 +892,21 @@ def _record_sizes(record: dict) -> dict[str, int | None]:
     return {f['key']: f.get('size') for f in listing or []}
 
 
+def _named_license(licenses: list[dict], name: str) -> dict:
+    """Return the active Dataverse license called ``name``.
+
+    Raises
+    ------
+    ValueError
+        If the server lists no active license of that name.
+    """
+    hits = [lic for lic in licenses if lic.get('active', True) and lic.get('name') == name]
+    if not hits:
+        names = sorted(lic.get('name') for lic in licenses if lic.get('active', True))
+        raise ValueError(f'the Dataverse server lists no active license {name!r}; it has {names}')
+    return hits[0]
+
+
 def _missing(client: DataverseClient, persistent_id: str, names) -> list[str] | None:
     """Return the names a draft does not list, or None if it cannot be listed."""
     try:
@@ -916,6 +931,7 @@ def mirror_to_dataverse(
     base_urls: list[str] | None = None,
     files: list[str] | tuple[str, ...] | None = None,
     into: str | None = None,
+    licence: str | None = None,
 ) -> str | None:
     """Mirror a pinned Zenodo deposit to Dataverse; return the Dataverse DOI.
 
@@ -961,6 +977,11 @@ def mirror_to_dataverse(
         copy is replaced, files the record does not hold are removed, and the draft is
         never deleted. It takes neither ``dry_run`` nor ``publish`` (publish the completed
         draft with :func:`publish_existing_dataverse_draft`) and needs no contact email.
+
+    licence : str | None
+        Name of a Dataverse license to give a new draft in place of the one matched from
+        the Zenodo record, for a record whose author licenses it otherwise; a description
+        line then names it and the Zenodo licence field. Not with ``into``.
 
     Returns
     -------
@@ -1018,6 +1039,8 @@ def mirror_to_dataverse(
     # the server stays authoritative across installations and vocabulary changes.
     if publish is None:
         publish = into is None
+    if into is not None and licence is not None:
+        raise ValueError('licence applies to a new draft only; the draft for into has its licence')
     if into is not None and (dry_run or publish):
         raise ValueError(
             'into completes a draft only: it takes neither dry_run nor publish; publish the '
@@ -1064,8 +1087,17 @@ def mirror_to_dataverse(
     rights = _zenodo_record_rights(recid, api_base)
     log.info('Zenodo record %s license: %s', recid, rights.get('id'))
     client = None if dry_run else DataverseClient(dataverse_url, token)
-    if client is not None and into is None:
+    if client is not None and into is None and licence is None:
         dv_license = dataverse_license(rights, client.licenses(), f'Zenodo record {recid}')
+    elif client is not None and into is None:
+        dv_license = _named_license(client.licenses(), licence)
+        note = (
+            f'Licensed {licence} by the author; the Zenodo licence field of record {recid} '
+            f'reads {rights.get("id")}.'
+        )
+        fields = metadata['datasetVersion']['metadataBlocks']['citation']['fields']
+        description = next(f for f in fields if f['typeName'] == 'dsDescription')
+        description['value'].append({'dsDescriptionValue': _primitive('dsDescriptionValue', note)})
     if dry_run:
         for name in sorted(registry):
             with tempfile.TemporaryDirectory(prefix='fwl-io-mirror-') as tmp:

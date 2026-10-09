@@ -19,6 +19,10 @@ on:
         description: "Only these files of the deposit, separated by spaces (empty: the whole deposit)"
         required: false
         default: ""
+      licence:
+        description: "Dataverse license name for a new draft in place of the Zenodo one, only where the author licenses it so (empty: from Zenodo)"
+        required: false
+        default: ""
       into:
         description: "Persistent id of an existing draft of this record to complete, never published (empty: create one)"
         required: false
@@ -57,10 +61,12 @@ jobs:
           COLLECTION: ${{ inputs.collection }}
           FILES: ${{ inputs.files }}
           INTO: ${{ inputs.into }}
+          LICENCE: ${{ inputs.licence }}
         run: |
           set -f
           file_args=()
           for name in ${FILES}; do file_args+=(--file "${name}"); done
+          if [ -n "${LICENCE}" ]; then file_args+=(--licence "${LICENCE}"); fi
           if [ -n "${INTO}" ]; then file_args+=(--into "${INTO}" --no-publish); fi
           fwl-io mirror "${ZENODO_DOI}" \
             --collection "${COLLECTION}" \

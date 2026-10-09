@@ -3034,3 +3034,45 @@ def test_two_bot_check_uploads_then_only_kept_files_finish_the_run(
         'b.dat',
         'c.dat',
     ]
+
+
+def test_a_licence_override_sets_the_named_licence_and_says_why(
+    http_server, dataverse_server, sleeps
+):
+    """With licence, a record whose Zenodo licence the server does not list gets the named
+    Dataverse license, and the description names it and the Zenodo licence field."""
+    result, calls = _mirror(
+        http_server, dataverse_server, rights=(APACHE,), licence='CC-BY-4.0', publish=False
+    )
+    assert result == 'doi:10.34894/DEMO01'
+    assert _DataverseHandler.license == {
+        'name': 'CC-BY-4.0',
+        'uri': 'http://creativecommons.org/licenses/by/4.0',
+    }
+    create = next(c for c in calls if c['path'].endswith('/datasets'))
+    note = (
+        'Licensed CC-BY-4.0 by the author; the Zenodo licence field of record 55 reads apache-2.0.'
+    )
+    assert note.encode() in create['body']
+
+
+def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, dataverse_server):
+    """No override: a Zenodo licence the server does not list stops the mirror as before."""
+    with pytest.raises(ValueError, match='matches'):
+        _mirror(http_server, dataverse_server, rights=(APACHE,))
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'match'),
+    [
+        ({'licence': 'NO-SUCH'}, "lists no active license 'NO-SUCH'"),
+        ({'licence': 'CC-BY-4.0', 'into': 'doi:x'}, 'licence applies to a new draft only'),
+    ],
+)
+def test_a_licence_override_is_refused_when_it_cannot_apply(
+    http_server, dataverse_server, kwargs, match
+):
+    """An unknown license name or a run into an existing draft is refused before any write."""
+    with pytest.raises(ValueError, match=match):
+        _mirror(http_server, dataverse_server, publish=False, **kwargs)
+    assert all(c['method'] == 'GET' for c in _DataverseHandler.calls)
