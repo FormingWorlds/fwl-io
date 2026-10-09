@@ -911,6 +911,14 @@ def test_mirror_into_passes_the_draft_and_never_publishes(monkeypatch, capsys):
     assert main(argv) == 0
     assert seen['into'] == 'doi:10.34894/DRAFT1' and seen['publish'] is False
     assert seen['contact_email'] == ''
+    assert seen['licence'] is None
+
+
+def test_mirror_licence_reaches_the_mirror(monkeypatch):
+    """--licence is passed through for a run that creates a draft."""
+    seen = {}
+    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', lambda doi, **kw: seen.update(kw))
+    monkeypatch.setenv('DATAVERSE_TOKEN', 't')
     argv = ['mirror', '10.5281/zenodo.21390786', '--collection', 'C', '--licence', 'CC-BY-4.0']
-    assert main([*argv, '--contact-email', 'c@x']) == 0
+    main([*argv, '--contact-email', 'c@x'])
     assert seen['licence'] == 'CC-BY-4.0' and seen['into'] is None

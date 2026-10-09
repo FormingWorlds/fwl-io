@@ -3040,7 +3040,8 @@ def test_a_licence_override_sets_the_named_licence_and_says_why(
     http_server, dataverse_server, sleeps
 ):
     """With licence, a record whose Zenodo licence the server does not list gets the named
-    Dataverse license, and the description names it and the Zenodo licence field."""
+    Dataverse license, and the description keeps its entries and gains one naming the
+    license and the Zenodo licence field."""
     result, calls = _mirror(
         http_server, dataverse_server, rights=(APACHE,), licence='CC-BY-4.0', publish=False
     )
@@ -3049,11 +3050,18 @@ def test_a_licence_override_sets_the_named_licence_and_says_why(
         'name': 'CC-BY-4.0',
         'uri': 'http://creativecommons.org/licenses/by/4.0',
     }
-    create = next(c for c in calls if c['path'].endswith('/datasets'))
-    note = (
+    create = json.loads(next(c for c in calls if c['path'].endswith('/datasets'))['body'])
+    fields = create['datasetVersion']['metadataBlocks']['citation']['fields']
+    values = [
+        item['dsDescriptionValue']['value']
+        for f in fields
+        if f['typeName'] == 'dsDescription'
+        for item in f['value']
+    ]
+    assert len(values) == 3 and 'Mirror of Zenodo deposit' in values[1]
+    assert values[2] == (
         'Licensed CC-BY-4.0 by the author; the Zenodo licence field of record 55 reads apache-2.0.'
     )
-    assert note.encode() in create['body']
 
 
 def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, dataverse_server):
@@ -3063,16 +3071,43 @@ def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, da
 
 
 @pytest.mark.parametrize(
-    ('kwargs', 'match'),
+    ('rights', 'kwargs', 'match', 'reads'),
     [
-        ({'licence': 'NO-SUCH'}, "lists no active license 'NO-SUCH'"),
-        ({'licence': 'CC-BY-4.0', 'into': 'doi:x'}, 'licence applies to a new draft only'),
+        ((APACHE,), {'licence': 'NO-SUCH'}, "0 active licenses named 'NO-SUCH'", True),
+        ((CC_BY,), {'licence': 'CC-BY-4.0'}, 'has a license the server lists', True),
+        ((APACHE,), {'licence': 'CC-BY-4.0', 'into': 'doi:x'}, 'not with into or dry_run', False),
+        ((APACHE,), {'licence': 'CC-BY-4.0', 'dry_run': True}, 'not with into or dry_run', False),
     ],
 )
 def test_a_licence_override_is_refused_when_it_cannot_apply(
-    http_server, dataverse_server, kwargs, match
+    http_server, dataverse_server, rights, kwargs, match, reads
 ):
-    """An unknown license name or a run into an existing draft is refused before any write."""
+    """An unknown name, a record whose Zenodo license the server lists, into and dry run are
+    refused before any write; the first two after reading the license list only."""
     with pytest.raises(ValueError, match=match):
-        _mirror(http_server, dataverse_server, publish=False, **kwargs)
-    assert all(c['method'] == 'GET' for c in _DataverseHandler.calls)
+        _mirror(http_server, dataverse_server, rights=rights, publish=False, **kwargs)
+    seen = [(c['method'], c['path']) for c in _DataverseHandler.calls]
+    assert seen == ([('GET', '/api/licenses')] if reads else [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('licenses', 'name', 'ok'),
+    [
+        ([{'name': 'A'}, {'uri': 'u'}], 'A', True),
+        ([{'name': 'A'}, {'uri': 'u'}], 'x', False),
+        ([{'name': 'A'}, {'name': 'A'}], 'A', False),
+        ([{'name': 'A', 'active': False}], 'A', False),
+        ([{'name': 'A'}], 'a', False),
+    ],
+)
+def test_named_license_needs_exactly_one_active_license_of_that_name(licenses, name, ok):
+    """A nameless entry is skipped, and an inactive, duplicate or differently cased name is
+    refused with the list of names."""
+    from fwl_io.mirror import _named_license
+
+    if ok:
+        assert _named_license(licenses, name) == {'name': 'A'}
+    else:
+        with pytest.raises(ValueError, match=r'it has \['):
+            _named_license(licenses, name)
