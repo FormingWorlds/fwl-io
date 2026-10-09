@@ -2804,3 +2804,45 @@ def test_uploads_are_spaced_and_slow_down_after_a_bot_check_page(
         _mirror(http_server, dataverse_server, publish=False)
     assert sleeps == [30.0, 600.0, 30.0]
     assert not _DataverseHandler.deleted
+
+
+def test_an_upload_missing_from_the_draft_afterwards_is_an_error(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """An upload the draft does not list afterwards stops the run; with nothing of the run
+    in the draft, the draft is deleted."""
+    monkeypatch.setattr(DataverseClient, '_file_arrived', lambda self, pid, path: False)
+    with pytest.raises(
+        DataverseError, match='a.dat is not in doi:10.34894/DEMO01 after its upload'
+    ):
+        _mirror(http_server, dataverse_server)
+    assert _DataverseHandler.deleted
+
+
+def test_a_partial_draft_whose_listing_fails_says_so(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """When the draft cannot be listed for the message, the missing files read as unknown."""
+    _DataverseHandler.script = {('POST', '/add'): ['pass', 400]}
+    listings = iter([True] * 3)  # a.dat before and after its upload, b.dat before
+
+    def listing(self, pid):
+        if next(listings, False):
+            return {f['filename']: f for f in _DataverseHandler.draft_files}
+        raise DataverseError('listing down')
+
+    monkeypatch.setattr(DataverseClient, '_draft_files', listing)
+    with pytest.raises(
+        MirrorIncomplete, match=r'missing: unknown \(listing failed: listing down\)'
+    ):
+        _mirror(http_server, dataverse_server)
+
+
+def test_a_failed_publish_into_a_complete_draft_keeps_it(http_server, dataverse_server, sleeps):
+    """A draft completed with into is kept when its publish fails, and the error is the
+    publish rejection."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('b.dat', b'BBBB\n', 2)]
+    _DataverseHandler.fail_on_publish = True
+    with pytest.raises(DataverseError, match='publish rejected'):
+        _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
+    assert not _DataverseHandler.deleted
