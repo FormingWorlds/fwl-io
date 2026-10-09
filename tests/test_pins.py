@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import ssl
 from types import SimpleNamespace
@@ -488,14 +489,15 @@ def test_check_mirrors_command_exits_by_the_verdict(
     tmp_path, monkeypatch, capsys, client, found, code, text
 ):
     """Exit 0 when every pin is served, 1 for a wrong pin or nothing to check, 3 when only
-    the server could not be read; the given URL reaches the client with no token."""
+    the server could not be read; the given URL reaches the client with no token, and no
+    client is made without a pin."""
     seen = []
     _patch(
         monkeypatch, [_dataset(tmp_path, 'group.good')] if found else [], client=client, seen=seen
     )
     assert main(['check-mirrors', '--dataverse-url', 'https://x.example']) == code
     assert text in capsys.readouterr().out
-    assert seen == [('https://x.example', '')]
+    assert seen == ([('https://x.example', '')] if found else [])
 
 
 @pytest.mark.parametrize(
@@ -635,3 +637,73 @@ def test_the_summary_line_the_nightly_reads_is_stable():
     lines = MirrorReport(unreachable={'a.b': 'down'}).summary().splitlines()
     assert lines[0] == 'UNREACHABLE a.b: down'
     assert lines[1].startswith('pins served by their mirror: 0,')
+
+
+def _handles(monkeypatch, answers):
+    """Serve doi.org handle lookups from ``answers`` (DOI to URL, status or exception)."""
+    asked = []
+
+    def get(url, timeout):
+        doi = url.removeprefix(pins.DOI_HANDLES + '/')
+        asked.append(doi)
+        answer = answers[doi]
+        if isinstance(answer, Exception):
+            raise answer
+        response = requests.Response()
+        response.status_code, response.url = (
+            (answer, url) if isinstance(answer, int) else (200, url)
+        )
+        value = {'type': 'URL', 'data': {'value': answer}}
+        response._content = json.dumps({'values': [] if answer == 'none' else [value]}).encode()
+        return response
+
+    monkeypatch.setattr(pins.requests, 'get', get)
+    return asked
+
+
+def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
+    """A known prefix names its server without a lookup, another prefix is resolved once
+    through doi.org, and each server gets one client; --dataverse-url overrides them all."""
+    asked = _handles(monkeypatch, {'10.9999/B': 'https://dv.example.org/citation?x=1'})
+    found = [
+        _dataset(tmp_path, 'g.one', pin='10.34894/ABCDEF'),
+        _dataset(tmp_path, 'g.two', pin='doi:10.34894/ABCDEF'),
+        _dataset(tmp_path, 'g.three', pin='10.9999/B'),
+        _dataset(tmp_path, 'g.four', pin='10.9999/B'),
+    ]
+    seen = []
+    _patch(monkeypatch, found, seen=seen)
+    assert check_mirrors().passed == ['g.one', 'g.two', 'g.three', 'g.four']
+    assert seen == [('https://dataverse.nl', ''), ('https://dv.example.org', '')]
+    assert asked == ['10.9999/B']
+    seen.clear()
+    assert len(check_mirrors('https://override.example').passed) == 4
+    assert seen == [('https://override.example', '')]
+
+
+@pytest.mark.parametrize(
+    ('answer', 'verdict', 'why'),
+    [
+        (404, 'failed', 'doi.org does not resolve doi:10.9999/B'),
+        ('none', 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        (503, 'unreachable', 'doi.org lookup of doi:10.9999/B'),
+        (requests.ConnectionError('down'), 'unreachable', 'doi.org lookup of doi:10.9999/B'),
+    ],
+)
+def test_a_pin_whose_server_cannot_be_found(tmp_path, monkeypatch, answer, verdict, why):
+    """An unknown DOI is a wrong pin; a doi.org outage leaves the pin unchecked."""
+    _handles(monkeypatch, {'10.9999/B': answer})
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one', pin='10.9999/B')])
+    report = check_mirrors()
+    assert list(getattr(report, verdict)) == ['g.one']
+    assert getattr(report, verdict)['g.one'].startswith(why)
+
+
+def test_a_failed_lookup_does_not_decide_other_pins_of_its_prefix(tmp_path, monkeypatch):
+    """Only a lookup that succeeded is kept for the prefix; each failed DOI is its own verdict."""
+    asked = _handles(monkeypatch, {'10.9999/A': 404, '10.9999/B': 'https://dv.example.org/x'})
+    found = [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in 'AB']
+    _patch(monkeypatch, found)
+    report = check_mirrors()
+    assert list(report.failed) == ['g.A'] and report.passed == ['g.B']
+    assert asked == ['10.9999/A', '10.9999/B']

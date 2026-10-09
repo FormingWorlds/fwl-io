@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+import requests
+
 from fwl_io.manifest import Dataset, _discover
 from fwl_io.mirror import (
     DataverseClient,
@@ -25,6 +27,9 @@ from fwl_io.transient import is_cert_failure, is_transient, is_transient_status
 CERT_ATTEMPTS = 3
 CERT_WAIT_S = 30.0
 ZENODO_HOST = 'zenodo.org'
+# Dataverse server of each known DOI prefix; any other prefix is resolved through doi.org.
+DATAVERSE_SERVERS = {'10.34894': 'https://dataverse.nl'}
+DOI_HANDLES = 'https://doi.org/api/handles'
 
 
 class Unreachable(Exception):
@@ -233,13 +238,47 @@ def pin_problem(
     return '; '.join(problems) or None
 
 
-def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> MirrorReport:
+def dataverse_server(doi: str) -> str:
+    """Return the base URL of the Dataverse server that holds a DOI.
+
+    A prefix in ``DATAVERSE_SERVERS`` names its server; any other DOI is resolved through the
+    doi.org handle API, and the host of its landing page is the server.
+
+    Raises
+    ------
+    Unreachable
+        If doi.org fails in transit.
+    ValueError
+        If doi.org does not know the DOI or gives no landing page.
+    """
+    doi = doi.removeprefix('doi:')
+    if doi.split('/', 1)[0] in DATAVERSE_SERVERS:
+        return DATAVERSE_SERVERS[doi.split('/', 1)[0]]
+    try:
+        response = requests.get(f'{DOI_HANDLES}/{doi}', timeout=30)
+        response.raise_for_status()
+        values = response.json().get('values') or []
+    except Exception as exc:  # noqa: BLE001 -- sorted into transient and permanent below
+        if is_transient(exc):
+            raise Unreachable(f'doi.org lookup of doi:{doi}: {exc}') from exc
+        raise ValueError(f'doi.org does not resolve doi:{doi}: {exc}') from exc
+    urls = [str((v.get('data') or {}).get('value')) for v in values if v.get('type') == 'URL']
+    host = urlparse(urls[0]).netloc if urls else ''
+    if not host:
+        raise ValueError(f'doi.org gives no landing page for doi:{doi}')
+    return f'https://{host}'
+
+
+def check_mirrors(
+    dataverse_url: str | None = None, datasets: list[Dataset] | None = None
+) -> MirrorReport:
     """Check every pinned dataset against its mirror and list the unpinned ones.
 
     Parameters
     ----------
-    dataverse_url : str
-        Base URL of the Dataverse server the pins live on.
+    dataverse_url : str, optional
+        Base URL of the Dataverse server for every pin; by default each pin is read from the
+        server of its DOI (:func:`dataverse_server`), with one client per server.
     datasets : list of Dataset, optional
         Datasets to check; defaults to those of every installed manifest, and a manifest
         that fails to load is reported in ``manifest_errors``.
@@ -255,7 +294,8 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
         found, errors = _discover()
         datasets = [ds for group in found.values() for ds in group]
         report.manifest_errors.update(errors)
-    client = DataverseClient(dataverse_url, token='')
+    servers: dict[str, str] = {}  # DOI prefix to server URL, for lookups that succeeded
+    clients: dict[str, DataverseClient] = {}
     outcomes: dict[str, dict[str, int] | Exception] = {}
     notes: list[str] = []
     cert_failed: set[str] = set()
@@ -278,8 +318,20 @@ def check_mirrors(dataverse_url: str, datasets: list[Dataset] | None = None) -> 
             report.unpinned.append(ds.key)
             continue
         notes = []
+        prefix = ds.dataverse.removeprefix('doi:').split('/', 1)[0]
+        if prefix not in servers:
+            try:
+                servers[prefix] = dataverse_url or dataverse_server(ds.dataverse)
+            except Unreachable as exc:
+                report.unreachable[ds.key] = str(exc)
+                continue
+            except ValueError as exc:
+                report.failed[ds.key] = str(exc)
+                continue
+        if servers[prefix] not in clients:
+            clients[servers[prefix]] = DataverseClient(servers[prefix], token='')
         try:
-            why = pin_problem(ds, client, cached_sizes, notes, cert_failed)
+            why = pin_problem(ds, clients[servers[prefix]], cached_sizes, notes, cert_failed)
         except Unreachable as exc:
             report.unreachable[ds.key] = str(exc)
             continue

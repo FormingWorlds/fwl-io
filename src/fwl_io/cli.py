@@ -338,7 +338,9 @@ def main(argv: list[str] | None = None) -> int:
         '(exit 1 wrong pin, 3 a pin could not be read)',
     )
     p_check_mirrors.add_argument(
-        '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
+        '--dataverse-url',
+        default=None,
+        help='Dataverse base URL for every pin (default: the server of each pin DOI)',
     )
     p_check_mirrors.set_defaults(func=_cmd_check_mirrors)
 
