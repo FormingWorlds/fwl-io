@@ -83,7 +83,7 @@ def _serve_zenodo_record(root, recid, files, rights=(CC_BY,)):
             'description': 'A demo dataset.',
             'rights': list(rights),
         },
-        'files': [{'key': n, 'checksum': h} for n, h in registry.items()],
+        'files': [{'key': n, 'checksum': h, 'size': len(files[n])} for n, h in registry.items()],
     }
     api_dir = root / 'api' / 'records'
     api_dir.mkdir(parents=True, exist_ok=True)
@@ -2945,3 +2945,52 @@ def test_a_run_into_a_draft_accepts_a_doi_prefix(http_server, dataverse_server, 
         into='doi:10.34894/DEMO01',
     )
     assert result == 'doi:10.34894/DEMO01'
+
+
+def test_a_run_into_a_draft_keeps_a_file_of_the_zenodo_size_without_a_download(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """Into a draft, a file of the Zenodo name and size is kept without downloading it (the
+    verify table checks contents); a file of another size is downloaded and sent again."""
+    from fwl_io import mirror
+
+    fetched = []
+    real = mirror._download_zenodo_files
+    monkeypatch.setattr(
+        mirror,
+        '_download_zenodo_files',
+        lambda doi, reg, root, base_urls=None: (
+            fetched.extend(reg) or real(doi, reg, root, base_urls=base_urls)
+        ),
+    )
+    _DataverseHandler.draft_files = [_entry('a.dat', b'XYZ\n', 1), _entry('b.dat', b'BB\n', 2)]
+    _, calls = _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
+    assert fetched == ['b.dat'] and not _adds(calls, 'a.dat') and len(_adds(calls, 'b.dat')) == 1
+
+
+def test_a_failed_upload_into_a_draft_that_cannot_be_listed_keeps_it(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """After a rejected first upload, a draft that cannot be listed may hold the file, so it
+    is kept."""
+    _DataverseHandler.fail_on_add = True
+    real = DataverseClient._draft_files
+    calls = []
+
+    def listing(self, pid):
+        calls.append(pid)
+        if len(calls) > 1:
+            raise DataverseError('listing down')
+        return real(self, pid)
+
+    monkeypatch.setattr(DataverseClient, '_draft_files', listing)
+    with pytest.raises(MirrorIncomplete):
+        _mirror(http_server, dataverse_server)
+    assert not _DataverseHandler.deleted
+
+
+def test_a_draft_file_deletion_is_logged(http_server, dataverse_server, sleeps, caplog):
+    """Every file deletion is logged with its name, id and draft."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('z.dat', b'Z', 9)]
+    _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
+    assert 'deleting z.dat (file 9) from doi:10.34894/DEMO01' in caplog.text

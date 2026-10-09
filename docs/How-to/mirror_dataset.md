@@ -46,7 +46,7 @@ The run holds one file at a time on disk: it downloads a file, uploads it, check
 fwl-io mirror 10.5281/zenodo.17674612 --collection Proteus_Fr --into doi:10.34894/XXXXXX
 ```
 
-It accepts only a draft that was never published and whose description names the same Zenodo record. Files the draft holds with the same size and checksum are not sent again, a file that differs is deleted and sent again, and a file the Zenodo record does not hold is deleted, so a second run into a complete draft sends nothing. Each file is still downloaded from Zenodo to compare it, since DataverseNL stores SHA-1 and the registry MD5. The draft is never deleted and never published: publish it with the **Publish an existing Dataverse draft** workflow below. **into** takes no dry run.
+It accepts only a draft that was never published and whose description names the same Zenodo record. A file the draft holds with the Zenodo name and size is kept without a download, a file of another size is downloaded and sent again, and a file the Zenodo record does not hold is deleted, so a second run into a complete draft sends nothing. The contents are checked by the verify table before the draft is published. Each deletion is logged. The draft is never deleted and never published: publish it with the **Publish an existing Dataverse draft** workflow below. **into** takes no dry run.
 
 ## Mirroring part of a deposit
 
