@@ -30,11 +30,22 @@ CERT_WAIT_S = 30.0
 ZENODO_HOST = 'zenodo.org'
 # Dataverse server of each known DOI prefix; any other prefix is resolved through doi.org.
 DATAVERSE_SERVERS = {'10.34894': 'https://dataverse.nl'}
-DOI_HANDLES = 'https://doi.org/api/handles'
+DOI_HOST = 'doi.org'
+DOI_HANDLES = f'https://{DOI_HOST}/api/handles'
 
 
 class Unreachable(Exception):
     """The Dataverse server or the Zenodo record needed for a check could not be read."""
+
+
+class UnknownServer(Exception):
+    """doi.org names no landing page, so no Dataverse server, for a pinned DOI."""
+
+
+def _transient(exc: BaseException) -> bool:
+    """Return whether a read failed in transit; a certificate failure is not, ``_read``
+    retries it."""
+    return is_transient(exc) and not is_cert_failure(exc)
 
 
 @dataclass
@@ -211,7 +222,7 @@ def pin_problem(
         if name in files and name in registry:
             return f'doi:{pin} holds {name} twice'
         files[name] = {**meta, 'restricted': (entry or {}).get('restricted')}
-    problems, by_size = [], []
+    problems, by_size, today = [], [], date.today().isoformat()
     for name, digest in sorted(registry.items()):
         meta = files.get(name)
         checksum = (meta or {}).get('checksum') or {}
@@ -220,8 +231,8 @@ def pin_problem(
             problems.append(f'{name} missing')
         elif meta['restricted']:
             problems.append(f'{name} restricted')
-        elif str((meta.get('embargo') or {}).get('dateAvailable') or '') > date.today().isoformat():
-            problems.append(f'{name} embargoed until {meta["embargo"]["dateAvailable"]}')
+        elif str(until := (meta.get('embargo') or {}).get('dateAvailable') or '')[:10] > today:
+            problems.append(f'{name} embargoed until {until}')
         elif algorithm == digest.partition(':')[0].lower():
             if f'{algorithm}:{str(checksum.get("value")).lower()}' != digest.lower():
                 problems.append(f'{name} checksum differs')
@@ -231,7 +242,7 @@ def pin_problem(
         try:
             zenodo = sizes(zenodo_doi)
         except Exception as exc:  # noqa: BLE001 -- a non-transient failure is a reason
-            if problems or not is_transient(exc):
+            if problems or not _transient(exc):
                 return '; '.join([*problems, f'Zenodo {zenodo_doi} file sizes: {exc}'])
             raise Unreachable(f'Zenodo {zenodo_doi} file sizes: {exc}') from exc
         for name in by_size:
@@ -245,31 +256,32 @@ def dataverse_server(doi: str) -> str:
     """Return the base URL of the Dataverse server that holds a DOI.
 
     A prefix in ``DATAVERSE_SERVERS`` names its server; any other DOI is resolved through the
-    doi.org handle API, and the host of its landing page is the server.
+    doi.org handle API, and the scheme, host and port of its landing page name the server.
 
     Raises
     ------
     Unreachable
         If doi.org fails in transit.
-    ValueError
+    UnknownServer
         If doi.org does not know the DOI or gives no landing page.
     """
     doi = doi.removeprefix('doi:')
-    if doi.split('/', 1)[0] in DATAVERSE_SERVERS:
-        return DATAVERSE_SERVERS[doi.split('/', 1)[0]]
+    if server := DATAVERSE_SERVERS.get(doi.partition('/')[0]):
+        return server
     try:
         response = requests.get(f'{DOI_HANDLES}/{doi}', timeout=30)
         response.raise_for_status()
-        values = response.json().get('values') or []
-    except Exception as exc:  # noqa: BLE001 -- sorted into transient and permanent below
-        if is_transient(exc):
+        values = response.json()['values']
+        url = urlparse(next(str(v['data']['value']) for v in values if v.get('type') == 'URL'))
+    except Exception as exc:
+        if is_cert_failure(exc):
+            raise
+        if _transient(exc):
             raise Unreachable(f'doi.org lookup of doi:{doi}: {exc}') from exc
-        raise ValueError(f'doi.org does not resolve doi:{doi}: {exc}') from exc
-    urls = [str((v.get('data') or {}).get('value')) for v in values if v.get('type') == 'URL']
-    host = urlparse(urls[0]).netloc if urls else ''
-    if not host:
-        raise ValueError(f'doi.org gives no landing page for doi:{doi}')
-    return f'https://{host}'
+        raise UnknownServer(f'doi.org gives no landing page for doi:{doi}: {exc!r}') from exc
+    if not url.hostname:
+        raise UnknownServer(f'doi.org gives no landing page for doi:{doi}')
+    return f'{url.scheme}://{url.hostname}' + (f':{url.port}' if url.port else '')
 
 
 def check_mirrors(
@@ -297,7 +309,6 @@ def check_mirrors(
         found, errors = _discover()
         datasets = [ds for group in found.values() for ds in group]
         report.manifest_errors.update(errors)
-    servers: dict[str, str] = {}  # DOI prefix to server URL, for lookups that succeeded
     clients: dict[str, DataverseClient] = {}
     outcomes: dict[str, dict[str, int] | Exception] = {}
     notes: list[str] = []
@@ -321,23 +332,22 @@ def check_mirrors(
             report.unpinned.append(ds.key)
             continue
         notes = []
-        prefix = ds.dataverse.removeprefix('doi:').split('/', 1)[0]
-        if prefix not in servers:
-            try:
-                servers[prefix] = dataverse_url or dataverse_server(ds.dataverse)
-            except Unreachable as exc:
-                report.unreachable[ds.key] = str(exc)
-                continue
-            except ValueError as exc:
-                report.failed[ds.key] = str(exc)
-                continue
-        if servers[prefix] not in clients:
-            clients[servers[prefix]] = DataverseClient(servers[prefix], token='')
         try:
-            why = pin_problem(ds, clients[servers[prefix]], cached_sizes, notes, cert_failed)
+            server = dataverse_url or _read(
+                lambda pin=ds.dataverse: dataverse_server(pin),
+                f'doi.org lookup of {ds.dataverse}',
+                notes,
+                DOI_HOST,
+                cert_failed,
+            )
+            if server not in clients:
+                clients[server] = DataverseClient(server, token='')
+            why = pin_problem(ds, clients[server], cached_sizes, notes, cert_failed)
         except Unreachable as exc:
             report.unreachable[ds.key] = str(exc)
             continue
+        except UnknownServer as exc:
+            why = str(exc)
         except Exception as exc:  # noqa: BLE001 -- one bad dataset must not stop the run
             why = f'{type(exc).__name__}: {exc}'
         finally:

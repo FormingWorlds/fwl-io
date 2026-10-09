@@ -1459,7 +1459,7 @@ def _http_error(status: int) -> requests.exceptions.HTTPError:
 
 @pytest.mark.unit
 @pytest.mark.parametrize('status', [408, 429, 500, 502, 503, 504, 520, 599])
-def test_retryable_http_statusis_transient(status):
+def test_retryable_http_status_is_transient(status):
     """Every status in the retryable set is classified transient.
 
     Pinning the whole set (not just the 503 the real-server test exercises) means
@@ -1519,11 +1519,12 @@ def test_checksum_mismatch_and_responseless_http_error_are_permanent():
 
 
 @pytest.mark.unit
-def test_certificate_failure_is_permanent():
-    """A connection error caused by a failed certificate check is not retried."""
+def test_certificate_failure_is_retried_by_the_fetch():
+    """A connection error caused by a failed certificate check is retried, since a mirror's
+    certificate check can fail for a while and then pass."""
     exc = requests.exceptions.SSLError('verify failed')
     exc.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
-    assert is_transient(exc) is False
+    assert is_transient(exc) is True
 
 
 @pytest.mark.unit

@@ -1,4 +1,8 @@
-"""Tell a transient HTTP failure from a permanent one, for the fetch and the mirror checks."""
+"""Tell a transient HTTP failure from a permanent one, for reads: the fetch and the pin check.
+
+A Dataverse write keeps the narrower retry set in :mod:`fwl_io.mirror`, since a write that
+failed with a 500 or a timeout may have been processed.
+"""
 
 from __future__ import annotations
 
@@ -45,12 +49,11 @@ def is_cert_failure(exc: BaseException) -> bool:
 def is_transient(exc: BaseException) -> bool:
     """Return whether a failed request is worth a retry.
 
-    An error that carries a response is decided by its status (:func:`is_transient_status`).
-    Otherwise a transport failure (``TRANSIENT_EXC``) is transient unless a certificate
-    verification failure caused it. A checksum mismatch (a plain ``ValueError``) and an
-    ``HTTPError`` without a response are permanent.
+    An error that carries a response is decided by its status (:func:`is_transient_status`),
+    any other by its type (``TRANSIENT_EXC``), which includes a certificate failure. A checksum
+    mismatch (a plain ``ValueError``) and an ``HTTPError`` without a response are permanent.
     """
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
     if isinstance(status, int):
         return is_transient_status(status)
-    return isinstance(exc, TRANSIENT_EXC) and not is_cert_failure(exc)
+    return isinstance(exc, TRANSIENT_EXC)

@@ -651,11 +651,12 @@ def _handles(monkeypatch, answers):
         if isinstance(answer, Exception):
             raise answer
         response = requests.Response()
-        response.status_code, response.url = (
-            (answer, url) if isinstance(answer, int) else (200, url)
+        response.url = url
+        response.status_code = answer if isinstance(answer, int) else 200
+        values = (
+            answer if isinstance(answer, list) else [{'type': 'URL', 'data': {'value': answer}}]
         )
-        value = {'type': 'URL', 'data': {'value': answer}}
-        response._content = json.dumps({'values': [] if answer == 'none' else [value]}).encode()
+        response._content = json.dumps({'values': [] if answer == 'none' else values}).encode()
         return response
 
     monkeypatch.setattr(pins.requests, 'get', get)
@@ -663,8 +664,8 @@ def _handles(monkeypatch, answers):
 
 
 def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
-    """A known prefix names its server without a lookup, another prefix is resolved once
-    through doi.org, and each server gets one client; --dataverse-url overrides them all."""
+    """A known prefix names its server without a lookup, another DOI is resolved through
+    doi.org, and each server gets one client; --dataverse-url overrides them all."""
     asked = _handles(monkeypatch, {'10.9999/B': 'https://dv.example.org/citation?x=1'})
     found = [
         _dataset(tmp_path, 'g.one', pin='10.34894/ABCDEF'),
@@ -676,7 +677,7 @@ def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
     _patch(monkeypatch, found, seen=seen)
     assert check_mirrors().passed == ['g.one', 'g.two', 'g.three', 'g.four']
     assert seen == [('https://dataverse.nl', ''), ('https://dv.example.org', '')]
-    assert asked == ['10.9999/B']
+    assert asked == ['10.9999/B', '10.9999/B']
     seen.clear()
     assert len(check_mirrors('https://override.example').passed) == 4
     assert seen == [('https://override.example', '')]
@@ -685,14 +686,18 @@ def test_each_pin_is_read_from_the_server_of_its_doi(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ('answer', 'verdict', 'why'),
     [
-        (404, 'failed', 'doi.org does not resolve doi:10.9999/B'),
+        (404, 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        ([{'type': 'URL'}], 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        (['x'], 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
+        ('/no/host', 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
         ('none', 'failed', 'doi.org gives no landing page for doi:10.9999/B'),
         (503, 'unreachable', 'doi.org lookup of doi:10.9999/B'),
         (requests.ConnectionError('down'), 'unreachable', 'doi.org lookup of doi:10.9999/B'),
     ],
 )
 def test_a_pin_whose_server_cannot_be_found(tmp_path, monkeypatch, answer, verdict, why):
-    """An unknown DOI is a wrong pin; a doi.org outage leaves the pin unchecked."""
+    """An unknown DOI or a malformed answer is a wrong pin; a doi.org outage leaves the pin
+    unchecked."""
     _handles(monkeypatch, {'10.9999/B': answer})
     _patch(monkeypatch, [_dataset(tmp_path, 'g.one', pin='10.9999/B')])
     report = check_mirrors()
@@ -721,3 +726,36 @@ def test_an_embargoed_file_does_not_serve_its_registry(tmp_path, until, served):
         entry['dataFile']['embargo'] = {'dateAvailable': until, 'reason': 'r'}
     why = pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes)
     assert why == (None if served else 'a.dat embargoed until 2999-01-01')
+
+
+def test_a_landing_page_names_scheme_host_and_port_without_credentials(monkeypatch):
+    """The server URL keeps the scheme, host and port of the landing page and drops a user."""
+    _handles(monkeypatch, {'10.9999/B': 'http://u:p@dv.example.org:8080/citation?x=1'})
+    assert pins.dataverse_server('doi:10.9999/B') == 'http://dv.example.org:8080'
+
+
+def test_a_certificate_failure_at_doi_org_is_retried(tmp_path, monkeypatch, waits):
+    """A doi.org lookup gets the certificate retries of the other reads, then fails the pin."""
+    _handles(monkeypatch, {'10.9999/B': CERT})
+    _patch(monkeypatch, [_dataset(tmp_path, 'g.one', pin='10.9999/B')])
+    report = check_mirrors()
+    assert waits == [pins.CERT_WAIT_S] * (pins.CERT_ATTEMPTS - 1)
+    assert report.failed['g.one'].startswith('SSLError')
+
+
+def test_check_mirrors_reads_each_pin_from_its_server_by_default(monkeypatch, capsys):
+    """Without --dataverse-url the command lets each pin name its server."""
+    called = []
+    monkeypatch.setattr(pins, 'check_mirrors', lambda url: called.append(url) or MirrorReport())
+    main(['check-mirrors'])
+    assert called == [None]
+
+
+def test_an_embargo_is_read_by_its_date_on_registry_files_only(tmp_path):
+    """An embargo date with a time part ends on its date, and an embargo on a file outside the
+    registry does not affect the pin."""
+    today = _file('a.dat', 'SHA-1', 'f' * 40, 10)
+    today['dataFile']['embargo'] = {'dateAvailable': f'{date.today().isoformat()}T23:00:00'}
+    other = _file('z.dat', 'SHA-1', 'f' * 40, 1)
+    other['dataFile']['embargo'] = {'dateAvailable': '2999-01-01'}
+    assert pin_problem(_dataset(tmp_path), FakeClient(files=[today, other]), sizes=_sizes) is None
