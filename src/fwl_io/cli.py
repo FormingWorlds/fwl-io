@@ -104,11 +104,9 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
 def _cmd_path(args: argparse.Namespace) -> int:
     from fwl_io.manifest import fetcher_for_key
-    from fwl_io.paths import resolve_data_root
+    from fwl_io.paths import existing_data_root
 
-    root = resolve_data_root(args.data_root, create=False)
-    if not root.is_dir():
-        raise NotADirectoryError(f'the data root {root} is not an existing directory')
+    root = existing_data_root(args.data_root)
     fetcher = fetcher_for_key(args.key, root)
     if not fetcher.is_fetched():
         same_root = '' if args.data_root is None else f' --data-root {shlex.quote(str(root))}'

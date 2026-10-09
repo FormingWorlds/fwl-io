@@ -66,7 +66,7 @@ from fwl_io.fs_guard import (
     _same_dir,
     _same_entry,
 )
-from fwl_io.paths import resolve_data_root
+from fwl_io.paths import existing_data_root
 from fwl_io.relocate import _version_dir
 
 log = logging.getLogger('fwl.' + __name__)
@@ -273,21 +273,6 @@ def human_bytes(count: int) -> str:
             return f'{size:.0f} {unit}' if unit == 'B' else f'{size:.1f} {unit}'
         size /= 1024
     return f'{count} B'
-
-
-def _existing_root(data_root: str | Path | None) -> Path:
-    """The data root, which must already exist; this never creates it.
-
-    Raises
-    ------
-    FileNotFoundError
-        When the resolved root is not an existing directory, so a mistyped
-        root fails clearly rather than reading as an empty tree.
-    """
-    root = resolve_data_root(data_root, create=False)
-    if not root.is_dir():
-        raise FileNotFoundError(f'data root {root} does not exist; nothing to prune')
-    return root
 
 
 def _matches_subdir(parent_subdir: str, known_subdirs: set[str], case_insensitive: bool) -> bool:
@@ -579,7 +564,7 @@ def plan_prune(data_root: str | Path | None = None) -> PruneReport:
     FileNotFoundError
         When the data root does not exist. A plan never creates it.
     """
-    return _build(_existing_root(data_root)).report()
+    return _build(existing_data_root(data_root)).report()
 
 
 def _remove_one(
@@ -859,7 +844,7 @@ def prune_versions(
     FileNotFoundError
         When the data root does not exist.
     """
-    root = _existing_root(data_root)
+    root = existing_data_root(data_root)
     unsupported = _delete_unsupported() if delete else None
     build = _build(root, for_delete=delete and unsupported is None)
     report = build.report()
@@ -934,7 +919,7 @@ def apply_prune(
     FileNotFoundError
         When the data root does not exist.
     """
-    root = _existing_root(data_root)
+    root = existing_data_root(data_root)
     unsupported = _delete_unsupported()
     if unsupported is not None:
         return _refused(report, unsupported)

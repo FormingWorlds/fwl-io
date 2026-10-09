@@ -802,7 +802,7 @@ def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch,
             monkeypatch.setenv('FWL_DATA', str(root))
         argv = ['path', 'g.demo'] if via_env else ['path', 'g.demo', '--data-root', str(root)]
         assert main(argv) == 1
-        assert f'the data root {root} is not an existing directory' in capsys.readouterr().err
+        assert f'the data root {root} does not exist or is not a directory' in capsys.readouterr().err
     assert not typo.exists() and file_root.read_text() == 'x'
 
 
@@ -847,3 +847,16 @@ def test_a_missing_key_names_the_unused_manifests(tmp_path, monkeypatch):
     with pytest.raises(LookupError, match=r"'g.other'; 1 manifest\(s\) not used, see fwl-io"):
         fetcher_for_key('g.other', tmp_path / 'data')
     assert fetcher_for_key('g.demo', tmp_path / 'data').target_dir.name == 'r1'
+
+
+@pytest.mark.unit
+def test_the_fetch_hint_quotes_a_data_root_with_a_space(tmp_path, capsys, monkeypatch):
+    """A data root that needs shell quoting is quoted in the suggested fetch command."""
+    import shlex
+
+    _one_dataset(tmp_path, monkeypatch)
+    root = tmp_path / 'my data'
+    root.mkdir()
+    assert main(['path', 'g.demo', '--data-root', str(root)]) == 1
+    hint = f'run: fwl-io fetch --key g.demo --data-root {shlex.quote(str(root))}\n'
+    assert "'" in hint and capsys.readouterr().err.endswith(hint)
