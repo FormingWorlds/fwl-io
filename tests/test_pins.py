@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -707,3 +708,16 @@ def test_a_failed_lookup_does_not_decide_other_pins_of_its_prefix(tmp_path, monk
     report = check_mirrors()
     assert list(report.failed) == ['g.A'] and report.passed == ['g.B']
     assert asked == ['10.9999/A', '10.9999/B']
+
+
+@pytest.mark.parametrize(
+    ('until', 'served'), [('2999-01-01', False), (date.today().isoformat(), True), (None, True)]
+)
+def test_an_embargoed_file_does_not_serve_its_registry(tmp_path, until, served):
+    """A file under an embargo that ends after today (dataFile.embargo.dateAvailable, as the
+    Dataverse JSON printer writes it) is refused for download, so the pin is wrong."""
+    entry = _file('a.dat', 'SHA-1', 'f' * 40, 10)
+    if until:
+        entry['dataFile']['embargo'] = {'dateAvailable': until, 'reason': 'r'}
+    why = pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes)
+    assert why == (None if served else 'a.dat embargoed until 2999-01-01')

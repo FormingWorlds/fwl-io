@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from urllib.parse import urlparse
 
 import requests
@@ -150,11 +151,11 @@ def pin_problem(
     A pin serves its dataset when the DOI names a released dataset whose description names
     the dataset's Zenodo DOI in the note every mirror carries ("Mirror of Zenodo deposit
     <doi>", which tells apart two mirrors whose files share names and sizes) and which holds
-    every registry file once and unrestricted: with the registry checksum where the server
-    uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL
-    stores SHA-1, the registries MD5). Files are matched by name, folder label ignored, as
-    the fetch reads them through pooch. A fetch still verifies each downloaded file against
-    the registry.
+    every registry file once, unrestricted and with no embargo that ends after today: with
+    the registry checksum where the server uses the same algorithm, otherwise with the file
+    size of the Zenodo record (DataverseNL stores SHA-1, the registries MD5). Files are
+    matched by name, folder label ignored, as the fetch reads them through pooch. A fetch
+    still verifies each downloaded file against the registry.
 
     Parameters
     ----------
@@ -219,6 +220,8 @@ def pin_problem(
             problems.append(f'{name} missing')
         elif meta['restricted']:
             problems.append(f'{name} restricted')
+        elif str((meta.get('embargo') or {}).get('dateAvailable') or '') > date.today().isoformat():
+            problems.append(f'{name} embargoed until {meta["embargo"]["dateAvailable"]}')
         elif algorithm == digest.partition(':')[0].lower():
             if f'{algorithm}:{str(checksum.get("value")).lower()}' != digest.lower():
                 problems.append(f'{name} checksum differs')
