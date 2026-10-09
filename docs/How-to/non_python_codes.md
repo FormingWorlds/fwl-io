@@ -21,7 +21,7 @@ fwl-io fetch --key atmos_clim.spectral_files.dayspring.48
 fwl-io fetch --key star.spectra.solar
 ```
 
-Each file is checked against the registry. When Zenodo does not answer, the file comes from the DataverseNL mirror of the dataset. A file already in place is not downloaded again, so the command is safe to repeat, for example at the start of every job. On a compute node without internet, run it on a login node first; see [Run on clusters](clusters.md).
+Each file is checked against the registry. When Zenodo does not answer, the file comes from the DataverseNL mirror of the dataset, for a dataset whose manifest entry has a `dataverse` pin (both examples here have one). A file already in place is not downloaded again, so the command is safe to repeat, for example at the start of every job. On a compute node without internet, run it on a login node first; see [Run on clusters](clusters.md).
 
 ## 3. Get the path
 
@@ -29,7 +29,7 @@ Each file is checked against the registry. When Zenodo does not answer, the file
 fwl-io path atmos_clim.spectral_files.dayspring.48
 ```
 
-prints the version directory of the dataset, `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`. The last segment names the Zenodo record, so a newer version of the dataset goes into a new directory next to it. The command exits 1 when no completed fetch left the dataset in place; a script that checks the exit status, as in the next step, stops there instead of passing a path to missing files. The files are not hashed again; `fwl-io check` does that for a model.
+prints the version directory of the dataset, `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`. The last segment names the Zenodo record, so a newer version of the dataset goes into a new directory next to it. The command exits 1 when no completed fetch left the dataset in place; a script that checks the exit status, as in the next step, stops there instead of passing a path to missing files. The files are not hashed again. `fwl-io check <model>` covers only datasets that name the model in `required_by`, which these two do not; to check them again, run `fwl-io fetch --key` once more: it hashes every file in place and fetches any that differs from the registry.
 
 ## 4. Pass the path to the code
 

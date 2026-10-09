@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -802,7 +803,9 @@ def test_path_does_not_create_a_missing_data_root(tmp_path, capsys, monkeypatch,
             monkeypatch.setenv('FWL_DATA', str(root))
         argv = ['path', 'g.demo'] if via_env else ['path', 'g.demo', '--data-root', str(root)]
         assert main(argv) == 1
-        assert f'the data root {root} does not exist or is not a directory' in capsys.readouterr().err
+        assert (
+            f'the data root {root} does not exist or is not a directory' in capsys.readouterr().err
+        )
     assert not typo.exists() and file_root.read_text() == 'x'
 
 
@@ -860,3 +863,35 @@ def test_the_fetch_hint_quotes_a_data_root_with_a_space(tmp_path, capsys, monkey
     assert main(['path', 'g.demo', '--data-root', str(root)]) == 1
     hint = f'run: fwl-io fetch --key g.demo --data-root {shlex.quote(str(root))}\n'
     assert "'" in hint and capsys.readouterr().err.endswith(hint)
+
+
+@pytest.mark.unit
+def test_fetch_by_key_fails_cleanly_when_a_file_cannot_be_fetched(tmp_path, capsys, monkeypatch):
+    """Offline with an empty tree, fetch --key exits 1 with no file count and no stamp, and
+    path still exits 1."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    root = ['--data-root', str(tmp_path / 'data')]
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+    assert main(['fetch', '--key', 'g.demo', *root]) == 1
+    out, err = capsys.readouterr()
+    assert 'file(s)' not in out and 'offline mode is active' in err
+    assert not (target / '.fwl-io.json').exists()
+    assert main(['path', 'g.demo', *root]) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes into a read-only directory')
+def test_fetch_by_key_fails_when_the_stamp_cannot_be_written(tmp_path, capsys, monkeypatch):
+    """When the version directory cannot take the stamp, fetch --key exits 1 and says so,
+    instead of a success that fwl-io path would then refuse."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    target.mkdir(parents=True)
+    (target / 'a.dat').write_bytes(b'data')
+    target.chmod(0o555)
+    try:
+        monkeypatch.setenv('FWL_IO_OFFLINE', '1')
+        assert main(['fetch', '--key', 'g.demo', '--data-root', str(tmp_path / 'data')]) == 1
+        out, err = capsys.readouterr()
+        assert 'file(s)' not in out and 'its stamp could not be written' in err
+    finally:
+        target.chmod(0o755)

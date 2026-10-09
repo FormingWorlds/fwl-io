@@ -25,7 +25,7 @@ fwl-io fetch <model> [--data-root PATH] [--progress | --no-progress]
 fwl-io fetch --key <dotted.key> [--data-root PATH] [--progress | --no-progress]
 ```
 
-Fetches every dataset that lists `<model>` in its `required_by`, or with `--key` the one dataset of that key, through the same mirrors and checksum checks; `--key` prints the number of files. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
+Fetches every dataset that lists `<model>` in its `required_by`, or with `--key` the one dataset of that key, through the same mirrors and checksum checks. With a model, all datasets are attempted and failures are aggregated into one report. With `--key`, the first file that cannot be fetched stops the command with exit 1, as does a stamp that cannot be written after the fetch (then `fwl-io path` could not confirm the dataset); on success it prints the number of files. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
 
 A download progress bar shows by default when stderr is a terminal; `--progress` forces it on and `--no-progress` off. The bar needs the optional `tqdm` dependency (`pip install fwl-io[progress]`); without it, or when there is no stderr to draw on, the fetch runs with no bar.
 

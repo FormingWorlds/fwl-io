@@ -90,7 +90,13 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
     progress = _resolve_progress(args.progress)
     if args.key is not None:
-        paths = fetcher_for_key(args.key, args.data_root, progress).fetch_all()
+        fetcher = fetcher_for_key(args.key, args.data_root, progress)
+        paths = fetcher.fetch_all()
+        if not fetcher.is_fetched():
+            raise RuntimeError(
+                f'{args.key}: the files are in {fetcher.target_dir}, but its stamp could not be '
+                'written, so fwl-io path cannot confirm them; check that the directory is writable'
+            )
         print(f'{args.key}: {len(paths)} file(s)')
         return 0
     fetched = fetch_for(args.model, data_root=args.data_root, progress=progress)
