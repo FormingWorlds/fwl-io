@@ -61,11 +61,14 @@ class MirrorReport:
 
     @property
     def exit_code(self) -> int:
-        """Return 1 for a wrong pin, a manifest error or nothing checked, 3 when the only
-        problem is an unreachable server, and 0 when every pin is served."""
+        """Return 1 for a wrong pin, a manifest error or nothing checked, 4 when no pin could
+        be read at all, 3 when some could not be read and the rest are served, and 0 when
+        every pin is served."""
         if self.failed or self.manifest_errors or not (self.passed or self.unreachable):
             return 1
-        return 3 if self.unreachable else 0
+        if self.unreachable:
+            return 3 if self.passed else 4
+        return 0
 
     def summary(self) -> str:
         """Return a line per problem, the counts, and the unpinned datasets."""

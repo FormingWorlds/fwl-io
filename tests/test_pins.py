@@ -485,16 +485,16 @@ def test_check_mirrors_reads_each_zenodo_record_once(tmp_path, monkeypatch):
     [
         (FakeClient(), True, 0, 'pins served by their mirror: 1'),
         (FakeClient(state='DRAFT'), True, 1, 'FAIL group.good'),
-        (FakeClient(error=DataverseRetryableError('504')), True, 3, 'UNREACHABLE group.good'),
+        (FakeClient(error=DataverseRetryableError('504')), True, 4, 'UNREACHABLE group.good'),
         (FakeClient(), False, 1, 'pins served by their mirror: 0'),
     ],
 )
 def test_check_mirrors_command_exits_by_the_verdict(
     tmp_path, monkeypatch, capsys, client, found, code, text
 ):
-    """Exit 0 when every pin is served, 1 for a wrong pin or nothing to check, 3 when only
-    the server could not be read; the given URL reaches the client with no token, and no
-    client is made without a pin."""
+    """Exit 0 when every pin is served, 1 for a wrong pin or nothing to check, 4 when no pin
+    could be read; the given URL reaches the client with no token, and no client is made
+    without a pin."""
     seen = []
     _patch(
         monkeypatch, [_dataset(tmp_path, 'group.good')] if found else [], client=client, seen=seen
@@ -509,14 +509,15 @@ def test_check_mirrors_command_exits_by_the_verdict(
     [
         (MirrorReport(passed=['a'], failed={'b': 'x'}, unreachable={'c': 'y'}), 1),
         (MirrorReport(passed=['a'], manifest_errors={'m': 'x'}, unreachable={'c': 'y'}), 1),
-        (MirrorReport(unreachable={'c': 'y'}), 3),
+        (MirrorReport(passed=['a'], unreachable={'c': 'y'}), 3),
+        (MirrorReport(unreachable={'c': 'y'}), 4),
         (MirrorReport(unpinned=['d']), 1),
         (MirrorReport(passed=['a'], unpinned=['d']), 0),
     ],
 )
 def test_exit_code_puts_a_wrong_pin_before_an_outage(report, code):
-    """A wrong pin or manifest error wins over an unreachable server, and 3 stays clear of
-    the 2 that argparse uses for a usage error."""
+    """A wrong pin or manifest error wins over an unreachable server, an outage with no pin
+    read is 4 apart from a partial one (3), and both stay clear of argparse's usage error 2."""
     assert report.exit_code == code
     assert report.ok == (code == 0)
 
@@ -634,13 +635,6 @@ def test_a_mirror_that_unpacked_a_zip_is_a_wrong_pin(tmp_path):
     assert pin_problem(dataset, unpacked, sizes=lambda doi: {'p.zip': 218}) == 'p.zip missing'
     kept = FakeClient(files=[_file('p.zip', 'SHA-1', 'f' * 40, 218)])
     assert pin_problem(dataset, kept, sizes=lambda doi: {'p.zip': 218}) is None
-
-
-def test_the_summary_line_the_nightly_reads_is_stable():
-    """The nightly step reads 'pins served by their mirror: <n>,' to fail when none is served."""
-    lines = MirrorReport(unreachable={'a.b': 'down'}).summary().splitlines()
-    assert lines[0] == 'UNREACHABLE a.b: down'
-    assert lines[1].startswith('pins served by their mirror: 0,')
 
 
 def _handles(monkeypatch, answers):
@@ -799,3 +793,19 @@ def test_an_embargo_is_read_by_its_date_on_registry_files_only(tmp_path):
     other = _file('z.dat', 'SHA-1', 'f' * 40, 1)
     other['dataFile']['embargo'] = {'dateAvailable': '2999-01-01'}
     assert pin_problem(_dataset(tmp_path), FakeClient(files=[today, other]), sizes=_sizes) is None
+
+
+def test_a_certificate_failure_on_one_server_leaves_another_checked(tmp_path, monkeypatch, waits):
+    """A server whose certificate fails every attempt is tried once for its later pins, while
+    a pin on another server gets its own full read and passes."""
+    pins_on = {'A1': 'a', 'A2': 'a', 'B': 'b'}
+    _handles(monkeypatch, {f'10.9999/{c}': f'https://{h}.example/x' for c, h in pins_on.items()})
+    _patch(monkeypatch, [_dataset(tmp_path, f'g.{c}', pin=f'10.9999/{c}') for c in pins_on])
+    bad, good = FakeClient(error=CERT), FakeClient()
+    bad.base_url, good.base_url = 'https://a.example', 'https://b.example'
+    monkeypatch.setattr(pins, 'DataverseClient', lambda url, token: bad if 'a.' in url else good)
+    report = check_mirrors()
+    assert sorted(report.failed) == ['g.A1', 'g.A2'] and report.passed == ['g.B']
+    assert len(bad.calls) == pins.CERT_ATTEMPTS + 1
+    assert 'not retried since a.example failed' in report.warnings['g.A2']
+    assert 'g.B' not in report.warnings and report.exit_code == 1
