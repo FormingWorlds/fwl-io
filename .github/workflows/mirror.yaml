@@ -36,7 +36,8 @@ on:
         type: boolean
         default: true
 
-# One run at a time per draft (into) or per deposit, so two runs never write one draft.
+# Runs with the same into value (or the same Zenodo DOI) wait for each other; a second
+# pending run replaces the first, and other spellings of one DOI are not grouped.
 concurrency:
   group: mirror-${{ inputs.into || inputs.zenodo_doi }}
   cancel-in-progress: false

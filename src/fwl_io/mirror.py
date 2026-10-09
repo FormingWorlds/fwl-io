@@ -815,9 +815,10 @@ def _fill_draft(
 ) -> None:
     """Upload every registry file the draft does not hold, one at a time.
 
-    With ``replace`` (a run into an own draft), a draft file of the Zenodo name and size in
-    ``sizes`` is kept without a download, so its contents are not compared; any other file
-    is compared byte for byte as below.
+    With ``replace`` (a run into an own draft), a draft file that matches the record (see
+    :func:`_matches_record`: the Zenodo size, and the registry checksum where the draft lists
+    one of that type) is kept without a download; any other file is compared byte for byte
+    as below, and a file that fails its check after the upload is deleted from the draft.
 
     ``draft()`` returns the draft's persistent id; it is called only once the first file
     has arrived from Zenodo, so a Zenodo failure on it leaves Dataverse untouched.
@@ -879,22 +880,27 @@ def _fill_draft(
                 f'check of {name} in {persistent_id}',
             ).get(_draft_path(None, name))
             if landed is None or not _same_file(landed, path):
+                bad = DataverseError(f'{name} is not intact in {persistent_id} after its upload')
                 if landed is not None:  # known bad: removed so no later run keeps it
-                    client.delete_file(persistent_id, landed)
-                raise DataverseError(f'{name} is not intact in {persistent_id} after its upload')
+                    try:
+                        client.delete_file(persistent_id, landed)
+                    except Exception as cleanup:
+                        raise bad from cleanup
+                raise bad
             log.info('uploaded %s', name)
         streak = streak + 1 if client.bot_checks > checks else 0
         wait = BOT_CHECK_SPACING_S if streak else UPLOAD_SPACING_S
 
 
 def _matches_record(entry: dict, digest: str, size: int | None) -> bool:
-    """Return whether a draft entry has the Zenodo size and, where its checksum type is the
-    registry's, the registry checksum; with another checksum type only the size is known."""
-    if size is None or entry.get('filesize') != size:
+    """Return whether a draft entry matches the record: the Zenodo size where known and,
+    where its checksum type is the registry's, the registry checksum. With another checksum
+    type only the size is known, and with neither nothing matches."""
+    if size is not None and entry.get('filesize') != size:
         return False
-    algorithm, _, value = digest.partition(':')
+    algorithm, value = digest.split(':', 1) if ':' in digest else ('sha256', digest)
     if checksum_algorithm(entry) != algorithm.lower():
-        return True
+        return size is not None
     return str((entry.get('checksum') or {}).get('value')).lower() == value.lower()
 
 
@@ -904,7 +910,9 @@ def _draft_state(
     """Return the registry files a draft lacks or holds wrong, and the files it holds that
     are not selected, or None if the draft cannot be listed."""
     try:
-        listed = client._draft_files(persistent_id)
+        listed = client._retry(
+            lambda: client._draft_files(persistent_id), f'file listing of {persistent_id}'
+        )
     except Exception:  # noqa: BLE001 -- the caller reports an unknown state instead
         return None
     keys = {_draft_path(None, n): n for n in registry}
@@ -1214,10 +1222,13 @@ def mirror_to_dataverse(
                 else f'missing {state["missing"]}, wrong {state["wrong"]}, '
                 f'not selected {state["extra"]}'
             )
-            message = (
-                f'{persistent_id} is kept as a draft ({found}); run the mirror again into '
-                f'{persistent_id} with the same files and server ({exc})'
+            complete = state is not None and not any(state.values())
+            advice = (
+                f'it holds every file; publish it with fwl-io mirror-publish {persistent_id}'
+                if complete
+                else f'run the mirror again into {persistent_id} with the same files and server'
             )
+            message = f'{persistent_id} is kept as a draft ({found}); {advice} ({exc})'
             log.error('%s', message)
             raise MirrorIncomplete(message, persistent_id, state) from exc
         try:

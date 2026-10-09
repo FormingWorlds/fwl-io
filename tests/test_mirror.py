@@ -2847,7 +2847,7 @@ def test_a_failed_check_after_the_first_upload_keeps_the_draft(
 ):
     """When the check after the first upload runs out of retries, the file may be in the
     draft, so the draft is kept and reported."""
-    _DataverseHandler.script = {('GET', '/versions/:draft/files'): ['pass'] + ['challenge'] * 6}
+    _DataverseHandler.script = {('GET', '/versions/:draft/files'): ['pass'] + ['challenge'] * 10}
     with pytest.raises(MirrorIncomplete, match='its files could not be listed'):
         _mirror(http_server, dataverse_server)
     assert not _DataverseHandler.deleted
@@ -3103,7 +3103,7 @@ def test_a_run_into_refuses_a_dataset_published_before_or_without_a_version(
     assert _writes(_DataverseHandler.calls) == []
 
 
-def test_a_file_that_fails_its_check_is_removed_and_reported_wrong(
+def test_a_file_that_fails_its_check_is_removed_and_reported_missing(
     http_server, dataverse_server, sleeps, monkeypatch
 ):
     """An upload stored with other bytes is deleted from the draft at once, so a later run
@@ -3216,6 +3216,6 @@ def test_a_fresh_run_stops_when_a_selected_file_is_absent_at_the_end(
 def test_a_403_on_publish_keeps_the_complete_draft(http_server, dataverse_server, sleeps):
     """A 403 on the publish request keeps the complete draft."""
     _DataverseHandler.script = {('POST', '/actions/:publish'): [403]}
-    with pytest.raises(MirrorIncomplete):
+    with pytest.raises(MirrorIncomplete, match='publish it with fwl-io mirror-publish'):
         _mirror(http_server, dataverse_server)
-    assert not _DataverseHandler.deleted
+    assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)
