@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import ssl
 import tempfile
 import time
 import zipfile
@@ -38,6 +37,7 @@ from pathlib import Path
 import requests
 
 from fwl_io.sync import ZENODO_API, fetch_zenodo_record, zenodo_record_id
+from fwl_io.transient import is_cert_failure
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -91,21 +91,6 @@ def _wait(attempt: int, retry_after=None) -> float:
     return min(
         BACKOFF_S * 2 ** (attempt - 1) if retry_after is None else retry_after, BACKOFF_CAP_S
     )
-
-
-def _cert_failure(exc: BaseException) -> bool:
-    """Return whether a certificate verification failure is anywhere in the exception chain."""
-    todo, seen = [exc], set()
-    while todo:
-        e = todo.pop()
-        if id(e) in seen:
-            continue
-        seen.add(id(e))
-        if isinstance(e, ssl.SSLCertVerificationError):
-            return True
-        links = (e.__cause__, e.__context__, getattr(e, 'reason', None), *e.args)
-        todo += [x for x in links if isinstance(x, BaseException)]
-    return False
 
 
 class DataversePublishUnconfirmed(DataverseError):
@@ -345,7 +330,7 @@ class DataverseClient:
         ) as exc:
             # The request may have reached Dataverse, like a gateway error; a
             # certificate failure is final (SSLError is a ConnectionError).
-            cls = DataverseError if _cert_failure(exc) else DataverseRetryableError
+            cls = DataverseError if is_cert_failure(exc) else DataverseRetryableError
             raise cls(f'Dataverse {method} {path} failed: {exc}') from exc
         except requests.RequestException as exc:
             raise DataverseError(f'Dataverse {method} {path} failed: {exc}') from exc

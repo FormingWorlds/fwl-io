@@ -1997,14 +1997,14 @@ def test_any_error_after_an_unclear_publish_keeps_it_unconfirmed(sleeps, monkeyp
 @pytest.mark.timeout(10)
 def test_the_certificate_check_ends_on_a_cyclic_exception_chain():
     """An exception chain that loops back on itself is walked once, not forever."""
-    from fwl_io.mirror import _cert_failure
+    from fwl_io.transient import is_cert_failure
 
     first = ValueError('outer')
     second = KeyError(first)
     first.__context__ = second
-    assert _cert_failure(first) is False
+    assert is_cert_failure(first) is False
     second.__cause__ = ssl.SSLCertVerificationError(1, 'certificate verify failed')
-    assert _cert_failure(first) is True
+    assert is_cert_failure(first) is True
 
 
 @pytest.mark.unit

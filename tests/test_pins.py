@@ -192,7 +192,7 @@ CERT = requests.exceptions.SSLError(ssl.SSLCertVerificationError(1, 'certificate
         requests.exceptions.JSONDecodeError('down', '<html>', 0),
         ConnectionError('down'),
         TimeoutError('down'),
-        *(_http(status) for status in (408, 429, 500, 501, 503, 599)),
+        *(_http(status) for status in (408, 429, 500, 503, 599)),
     ],
 )
 def test_a_transient_zenodo_error_is_unreachable(tmp_path, error):
@@ -213,7 +213,7 @@ def test_a_transient_dataverse_error_is_unreachable(tmp_path):
 @pytest.mark.parametrize(
     'error',
     [
-        *(_http(status) for status in (404, 407, 409, 499)),
+        *(_http(status) for status in (404, 407, 409, 499, 501, 505)),
         ValueError('concept DOI'),
         CERT,
         requests.exceptions.InvalidURL('bad url'),
@@ -223,8 +223,8 @@ def test_a_transient_dataverse_error_is_unreachable(tmp_path):
     ],
 )
 def test_a_permanent_zenodo_error_is_a_reason(tmp_path, error):
-    """A 4xx other than 408 and 429, a concept DOI, a certificate failure, a bad URL, a
-    redirect loop or a malformed record makes the pin wrong."""
+    """A 4xx other than 408 and 429, a 501 or 505, a concept DOI, a certificate failure, a bad
+    URL, a redirect loop or a malformed record makes the pin wrong."""
     why = pin_problem(_dataset(tmp_path), FakeClient(), sizes=Mock(side_effect=error))
     assert why == f'Zenodo 10.5281/zenodo.1 file sizes: {error}'
 
@@ -322,7 +322,6 @@ def _served(status, text, content_type='application/json'):
         (408, 'timeout', 'text/plain'),
         (429, 'slow down', 'text/plain'),
         (500, 'error', 'text/plain'),
-        (501, 'error', 'text/plain'),
         (520, 'error', 'text/plain'),
         (200, '<html>maintenance</html>', 'text/html'),
     ],
@@ -330,20 +329,21 @@ def _served(status, text, content_type='application/json'):
 def test_a_transient_dataverse_answer_is_unreachable(
     tmp_path, monkeypatch, status, text, content_type
 ):
-    """An HTTP 408, 429 or 5xx, or an HTML page in place of the API answer, from the real
-    client is an outage (exit 3), as on the Zenodo side."""
+    """An HTTP 408, 429 or 5xx other than 501 and 505, or an HTML page in place of the API
+    answer, from the real client is an outage (exit 3), as on the Zenodo side."""
     monkeypatch.setattr('fwl_io.mirror.requests.request', _served(status, text, content_type))
     client = DataverseClient('https://dataverse.example', token='')
     with pytest.raises(Unreachable, match=f'doi:10.34894/ABCDEF: .*{status}'):
         pin_problem(_dataset(tmp_path), client, sizes=_sizes)
 
 
-def test_a_missing_dataverse_dataset_is_a_wrong_pin(tmp_path, monkeypatch):
-    """A 404 from the real client makes the pin wrong (exit 1)."""
-    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(404, '{"status": "ERROR"}'))
+@pytest.mark.parametrize('status', [404, 501, 505])
+def test_a_permanent_dataverse_answer_is_a_wrong_pin(tmp_path, monkeypatch, status):
+    """A 404, 501 or 505 from the real client makes the pin wrong (exit 1)."""
+    monkeypatch.setattr('fwl_io.mirror.requests.request', _served(status, '{"status": "ERROR"}'))
     client = DataverseClient('https://dataverse.example', token='')
     why = pin_problem(_dataset(tmp_path), client, sizes=_sizes)
-    assert why.startswith('cannot read doi:10.34894/ABCDEF:') and '404' in why
+    assert why.startswith('cannot read doi:10.34894/ABCDEF:') and str(status) in why
 
 
 def test_a_doi_prefix_on_either_pin_is_accepted(tmp_path):

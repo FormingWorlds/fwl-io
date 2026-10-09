@@ -68,13 +68,13 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import pooch
-import requests
 from filelock import FileLock, Timeout
 
 from fwl_io.archive import ARCHIVE_KINDS, extract_archive
 from fwl_io.doi import zenodo_record_id
 from fwl_io.paths import is_offline, resolve_cache_root, resolve_data_root
 from fwl_io.registry import load_registry, validate_entry_name
+from fwl_io.transient import is_transient
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -101,25 +101,6 @@ _RESERVED_DIRNAMES = frozenset({_LOCK_DIRNAME, _STAGING_DIRNAME})
 # success. A read timeout, a dropped connection, or a 429/5xx response is retried
 # on this schedule; a 404 or a checksum mismatch is permanent and is not retried.
 _RETRY_BACKOFF_S: tuple[float, ...] = (10.0, 30.0, 60.0)
-
-# HTTP status codes worth retrying: request timeout, rate limiting, and the
-# transient server and gateway errors. Other 4xx (a 404) and 501/505 are
-# permanent and are not retried.
-_RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
-
-# requests exception types that signal a transport-level failure worth retrying:
-# a connect or read timeout, a connection refused or reset before the body, a
-# connection dropped or the stream truncated mid-download, a corrupt compressed
-# body, and a malformed Zenodo-metadata response (pooch reads the record through
-# an API call whose non-JSON error body raises JSONDecodeError). A Dataverse
-# resolution error instead surfaces as a plain ValueError and stays permanent.
-_TRANSIENT_EXC = (
-    requests.exceptions.Timeout,
-    requests.exceptions.ConnectionError,
-    requests.exceptions.ChunkedEncodingError,
-    requests.exceptions.ContentDecodingError,
-    requests.exceptions.JSONDecodeError,
-)
 
 # Explicit (connect, read) timeout handed to pooch's downloaders, so a mirror
 # that will not connect fails fast and a stalled transfer fails in bounded time,
@@ -148,23 +129,6 @@ def _hash_matches(path: Path, known_hash: str) -> bool:
     algorithm = known_hash.split(':', 1)[0] if ':' in known_hash else 'sha256'
     digest = known_hash.split(':', 1)[-1]
     return pooch.file_hash(str(path), alg=algorithm) == digest
-
-
-def _is_transient(exc: BaseException) -> bool:
-    """Return whether a failed download is worth retrying.
-
-    An HTTP error is decided by its status: a request timeout, rate limiting, or
-    a transient server or gateway error (``_RETRYABLE_STATUS``) is retried, while
-    a 404 or any other status is permanent. A non-HTTP failure is retried when it
-    is a transport-level error (``_TRANSIENT_EXC``): a timeout, a refused or reset
-    connection, a stream dropped or truncated mid-download, or a malformed
-    response from resolving a Zenodo DOI. A checksum mismatch (pooch raises a
-    plain ``ValueError``, which is not one of those types) is permanent.
-    """
-    if isinstance(exc, requests.exceptions.HTTPError):
-        status = getattr(getattr(exc, 'response', None), 'status_code', None)
-        return status in _RETRYABLE_STATUS
-    return isinstance(exc, _TRANSIENT_EXC)
 
 
 def _progressbar_unavailable() -> str | None:
@@ -511,7 +475,7 @@ class Fetcher:
                     got = self._retrieve_once(mirror, fname, known_hash, into_dir)
                 except Exception as exc:  # noqa: BLE001 -- classified for retry, tried per mirror
                     errors.append(f'{mirror}: {exc}')
-                    retriable = retriable or _is_transient(exc)
+                    retriable = retriable or is_transient(exc)
                     log.warning('mirror failed for %s: %s', fname, exc)
                     continue
                 return got, mirror
