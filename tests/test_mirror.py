@@ -1633,7 +1633,7 @@ def test_bot_check_detection_ignores_header_case_and_needs_html():
 )
 def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
     """A listed file matches only with its size and a checksum of a known type."""
-    from fwl_io.mirror import _ALGORITHMS, _same_file
+    from fwl_io.mirror import _ALGORITHMS, _same_file, checksum_algorithm
 
     path = tmp_path / 'a.dat'
     path.write_bytes(b'AAAA')
@@ -1641,6 +1641,7 @@ def test_same_file_needs_a_known_checksum_type(tmp_path, kind, expected):
     value = hashlib.new(algorithm, b'AAAA').hexdigest()
     entry = {'filesize': 4, 'checksum': {'type': kind, 'value': value}}
     assert _same_file(entry, path) is expected
+    assert (checksum_algorithm(entry) is not None) is expected
     other = {
         'filesize': 4,
         'checksum': {'type': kind, 'value': hashlib.new(algorithm, b'ZZZZ').hexdigest()},

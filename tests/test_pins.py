@@ -97,6 +97,14 @@ def test_a_released_mirror_with_every_registry_file_passes(tmp_path):
         assert pin_problem(_dataset(tmp_path), FakeClient(note=note), sizes=_sizes) is None
 
 
+def test_a_file_in_a_folder_serves_its_name(tmp_path):
+    """A mirror file under a folder label serves the registry entry of its file name, since
+    the fetch (pooch's Dataverse download) maps files by name alone."""
+    entry = _file('a.dat', 'SHA-1', 'f' * 40, 10)
+    entry['directoryLabel'] = entry['dataFile']['directoryLabel'] = 'sub'
+    assert pin_problem(_dataset(tmp_path), FakeClient(files=[entry]), sizes=_sizes) is None
+
+
 def test_the_note_written_by_mirror_passes_the_source_check(tmp_path):
     """The description a mirror is created with (record text, then the source note) names its
     own Zenodo DOI and no other."""

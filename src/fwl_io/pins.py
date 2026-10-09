@@ -14,10 +14,10 @@ from urllib.parse import urlparse
 
 from fwl_io.manifest import Dataset, _discover
 from fwl_io.mirror import (
-    _ALGORITHMS,
     DataverseClient,
     DataverseError,
     DataverseRetryableError,
+    checksum_algorithm,
 )
 from fwl_io.sync import fetch_zenodo_record
 from fwl_io.transient import is_cert_failure, is_transient, is_transient_status
@@ -147,7 +147,8 @@ def pin_problem(
     <doi>", which tells apart two mirrors whose files share names and sizes) and which holds
     every registry file once and unrestricted: with the registry checksum where the server
     uses the same algorithm, otherwise with the file size of the Zenodo record (DataverseNL
-    stores SHA-1, the registries MD5). A fetch still verifies each downloaded file against
+    stores SHA-1, the registries MD5). Files are matched by name, folder label ignored, as
+    the fetch reads them through pooch. A fetch still verifies each downloaded file against
     the registry.
 
     Parameters
@@ -209,7 +210,7 @@ def pin_problem(
     for name, digest in sorted(registry.items()):
         meta = files.get(name)
         checksum = (meta or {}).get('checksum') or {}
-        algorithm = _ALGORITHMS.get(checksum.get('type'))
+        algorithm = checksum_algorithm(meta or {})
         if meta is None:
             problems.append(f'{name} missing')
         elif meta['restricted']:

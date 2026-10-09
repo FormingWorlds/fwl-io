@@ -187,6 +187,11 @@ def zenodo_record_to_citation(
 _ALGORITHMS = {'MD5': 'md5', 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-512': 'sha512'}
 
 
+def checksum_algorithm(entry: dict) -> str | None:
+    """Return the hashlib name of a Dataverse file entry's checksum type, or None if unknown."""
+    return _ALGORITHMS.get((entry.get('checksum') or {}).get('type'))
+
+
 def _zenodo_record_rights(recid: str, api_base: str) -> dict:
     """Return the single license entry of a checked Zenodo record id (InvenioRDM ``rights``).
 
@@ -260,13 +265,13 @@ def _same_file(entry: dict, path: Path) -> bool:
 
     An entry without a checksum of a known type does not count as the same file.
     """
-    checksum = entry.get('checksum') or {}
-    algorithm = _ALGORITHMS.get(checksum.get('type'))
+    algorithm = checksum_algorithm(entry)
     if algorithm is None or entry.get('filesize') != path.stat().st_size:
         return False
     with path.open('rb') as handle:
         return (
-            hashlib.file_digest(handle, algorithm).hexdigest() == str(checksum.get('value')).lower()
+            hashlib.file_digest(handle, algorithm).hexdigest()
+            == str(entry['checksum'].get('value')).lower()
         )
 
 
