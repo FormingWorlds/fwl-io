@@ -643,6 +643,68 @@ def discover_manifests() -> dict[str, list[Dataset]]:
 _TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'
 
 
+def _usable_progress(progress: bool) -> bool:
+    """Return ``progress`` when a bar can be drawn, else False; name the fix when it is tqdm."""
+    from fwl_io.fetch import _progressbar_unavailable
+
+    if not progress:
+        return False
+    reason = _progressbar_unavailable()
+    if reason == 'tqdm':
+        log.warning(_TQDM_HINT)
+    return reason is None
+
+
+def _fetcher_of(ds: Dataset, data_root: str | Path | None = None, progress: bool = False):
+    """Return the fetcher of one declared dataset."""
+    from fwl_io.fetch import create_fetcher
+
+    return create_fetcher(
+        subdir=ds.subdir,
+        zenodo=ds.zenodo,
+        dataverse=ds.dataverse,
+        registry=ds.registry(),
+        data_root=data_root,
+        progress=progress,
+        extract=ds.extract,
+    )
+
+
+def fetcher_for_key(key: str, data_root: str | Path | None = None, progress: bool = False):
+    """Return the fetcher of the dataset ``key`` declared in an installed manifest.
+
+    It is the fetcher :func:`fetch_for` uses, with the same mirrors and checks, so a code
+    that cannot import fwl-io can fetch or locate one dataset through the CLI.
+
+    Parameters
+    ----------
+    key : str
+        Dotted manifest key of the dataset, e.g. ``atmos_clim.refractive.agni_aerosols``.
+    data_root : str | Path | None
+        Override for the data root; defaults to the resolved FWL_DATA tree.
+    progress : bool
+        Show a per-file download progress bar when one can be drawn.
+
+    Returns
+    -------
+    fwl_io.Fetcher
+        Fetcher bound to the dataset's version directory.
+
+    Raises
+    ------
+    LookupError
+        No usable installed manifest declares ``key``.
+    """
+    discovery = _discover_all()
+    for datasets in discovery.found.values():
+        for ds in datasets:
+            if ds.key == key:
+                return _fetcher_of(ds, data_root, _usable_progress(progress))
+    n = len(discovery.errors)
+    unused = f'; {n} manifest(s) not used, see fwl-io list' if n else ''
+    raise LookupError(f'no installed manifest declares the dataset {key!r}{unused}')
+
+
 def fetch_for(
     model: str, data_root: str | Path | None = None, progress: bool = False
 ) -> dict[str, list[Path]]:
@@ -669,14 +731,7 @@ def fetch_for(
         there is no ``sys.stderr`` to draw on, the bar is skipped and the fetch
         continues.
     """
-    from fwl_io.fetch import _progressbar_unavailable, create_fetcher
-
-    if progress:
-        # Never fail a fetch over a cosmetic bar; name the fix only when it is tqdm.
-        reason = _progressbar_unavailable()
-        if reason == 'tqdm':
-            log.warning(_TQDM_HINT)
-        progress = reason is None
+    progress = _usable_progress(progress)
     model = model.lower()
     fetched: dict[str, list[Path]] = {}
     failures: dict[str, str] = {}
@@ -688,16 +743,7 @@ def fetch_for(
             if model not in tuple(r.lower() for r in ds.required_by):
                 continue
             try:
-                fetcher = create_fetcher(
-                    subdir=ds.subdir,
-                    zenodo=ds.zenodo,
-                    dataverse=ds.dataverse,
-                    registry=ds.registry(),
-                    data_root=data_root,
-                    progress=progress,
-                    extract=ds.extract,
-                )
-                fetched[ds.key] = fetcher.fetch_all()
+                fetched[ds.key] = _fetcher_of(ds, data_root, progress).fetch_all()
             except Exception as exc:  # noqa: BLE001 -- aggregate and re-raise below
                 failures[ds.key] = str(exc)
     if failures or provider_errors:

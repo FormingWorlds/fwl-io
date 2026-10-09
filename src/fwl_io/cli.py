@@ -85,15 +85,34 @@ def _resolve_progress(requested: bool | None) -> bool:
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
-    from fwl_io.manifest import fetch_for
+    from fwl_io.manifest import fetch_for, fetcher_for_key
 
     progress = _resolve_progress(args.progress)
+    if args.key:
+        paths = fetcher_for_key(args.key, args.data_root, progress).fetch_all()
+        print(f'{args.key}: {len(paths)} file(s)')
+        return 0
     fetched = fetch_for(args.model, data_root=args.data_root, progress=progress)
     if not fetched:
         print(f'no datasets declare required_by = {args.model!r}', file=sys.stderr)
         return 1
     for key, paths in sorted(fetched.items()):
         print(f'{key}: {len(paths)} file(s)')
+    return 0
+
+
+def _cmd_path(args: argparse.Namespace) -> int:
+    from fwl_io.manifest import fetcher_for_key
+
+    fetcher = fetcher_for_key(args.key, args.data_root)
+    if not fetcher.is_fetched():
+        print(
+            f'fwl-io: {args.key} is not fetched in {fetcher.target_dir}; '
+            f'run: fwl-io fetch --key {args.key}',
+            file=sys.stderr,
+        )
+        return 1
+    print(fetcher.target_dir)
     return 0
 
 
@@ -236,8 +255,12 @@ def main(argv: list[str] | None = None) -> int:
     p_list = sub.add_parser('list', help='list datasets from all installed manifests')
     p_list.set_defaults(func=_cmd_list)
 
-    p_fetch = sub.add_parser('fetch', help='fetch every dataset a model requires')
-    p_fetch.add_argument('model', help='model name matched against required_by')
+    p_fetch = sub.add_parser(
+        'fetch', help='fetch every dataset a model requires, or one dataset with --key'
+    )
+    target = p_fetch.add_mutually_exclusive_group(required=True)
+    target.add_argument('model', nargs='?', help='model name matched against required_by')
+    target.add_argument('--key', help='dotted key of one dataset to fetch')
     p_fetch.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_fetch.add_argument(
         '--progress',
@@ -246,6 +269,13 @@ def main(argv: list[str] | None = None) -> int:
         help='show a download progress bar (default: on when stderr is a terminal); needs tqdm',
     )
     p_fetch.set_defaults(func=_cmd_fetch)
+
+    p_path = sub.add_parser(
+        'path', help='print the version directory of a fetched dataset (exit 1 if not fetched)'
+    )
+    p_path.add_argument('key', help='dotted key of the dataset')
+    p_path.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+    p_path.set_defaults(func=_cmd_path)
 
     p_check = sub.add_parser(
         'check',

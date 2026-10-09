@@ -547,6 +547,19 @@ class Fetcher:
         self._write_stamp()
         return paths
 
+    def is_fetched(self) -> bool:
+        """Return whether a completed :meth:`fetch_all` left this dataset in place.
+
+        That is a current stamp and every registry file present, or for an archive dataset
+        every member the stamp records. Contents are not hashed again; ``fwl-io check``
+        does that.
+        """
+        if self.extract is not None:
+            return self._archive_tree_intact()
+        return self._stamp_is_current(self.target_dir) and all(
+            (self.target_dir / name).is_file() for name in self.registry
+        )
+
     def _extracted_files(self) -> list[Path]:
         """Return the extracted data files under the version directory.
 

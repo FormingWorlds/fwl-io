@@ -713,3 +713,86 @@ def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, ca
     assert 'package-a: MANIFEST NOT USED' in out
     assert 'package-b: MANIFEST NOT USED' in out
     assert 'FAILED TO LOAD' not in out
+
+
+def _one_dataset(tmp_path, monkeypatch, extra=''):
+    """Install one manifest declaring g.demo (one file, a.dat) with a DataverseNL pin."""
+    import hashlib
+
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(
+        f'[g.demo]\nzenodo = "10.5281/zenodo.1"\ndataverse = "10.34894/ABCDEF"\n{extra}'
+    )
+    digest = hashlib.md5(b'data').hexdigest()
+    (tmp_path / 'g.demo.registry.txt').write_text(f'a.dat md5:{digest}\n')
+
+    class _EP:
+        name = 'demo'
+
+        def load(self):
+            return lambda: manifest
+
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [_EP()])
+    return tmp_path / 'data' / 'g' / 'demo' / 'r1'
+
+
+@pytest.mark.unit
+def test_fetch_by_key_then_path_prints_the_version_dir(tmp_path, capsys, monkeypatch):
+    """fwl-io path refuses a dataset no completed fetch left in place, and prints its version
+    directory once fwl-io fetch --key has verified and stamped it."""
+    target = _one_dataset(tmp_path, monkeypatch)
+    root = ['--data-root', str(tmp_path / 'data')]
+    assert main(['path', 'g.demo', *root]) == 1
+    assert 'g.demo is not fetched' in capsys.readouterr().err
+    target.mkdir(parents=True)
+    (target / 'a.dat').write_bytes(b'data')
+    assert main(['path', 'g.demo', *root]) == 1, 'a file without a completed fetch is not enough'
+    capsys.readouterr()
+    monkeypatch.setenv('FWL_IO_OFFLINE', '1')  # the file is pre-seeded; no network
+    assert main(['fetch', '--key', 'g.demo', *root]) == 0
+    assert capsys.readouterr().out == 'g.demo: 1 file(s)\n'
+    assert main(['path', 'g.demo', *root]) == 0
+    assert capsys.readouterr().out == f'{target}\n'
+    (target / 'a.dat').unlink()
+    assert main(['path', 'g.demo', *root]) == 1, 'a file deleted after the fetch'
+
+
+@pytest.mark.unit
+def test_fetch_by_key_uses_the_dataset_mirrors(tmp_path, monkeypatch):
+    """The key fetcher carries the Zenodo and DataverseNL mirrors of the dataset."""
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch)
+    fetcher = fetcher_for_key('g.demo', tmp_path / 'data')
+    assert fetcher.mirrors == ['doi:10.5281/zenodo.1/', 'doi:10.34894/ABCDEF/']
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('command', ['path', 'fetch'])
+def test_an_unknown_key_is_named(tmp_path, capsys, monkeypatch, command):
+    """A key no installed manifest declares is a message and exit 1."""
+    _one_dataset(tmp_path, monkeypatch)
+    argv = [command, 'g.other'] if command == 'path' else [command, '--key', 'g.other']
+    assert main([*argv, '--data-root', str(tmp_path / 'data')]) == 1
+    assert "no installed manifest declares the dataset 'g.other'" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('argv', [['fetch'], ['fetch', 'demo', '--key', 'g.demo']])
+def test_fetch_takes_a_model_or_a_key(argv):
+    """fetch needs exactly one of a model and --key."""
+    with pytest.raises(SystemExit) as raised:
+        main(argv)
+    assert raised.value.code == 2
+
+
+@pytest.mark.unit
+def test_an_archive_dataset_is_fetched_when_its_tree_is_intact(tmp_path, monkeypatch):
+    """For an archive dataset, is_fetched is the stamp-recorded tree check."""
+    from fwl_io.manifest import fetcher_for_key
+
+    _one_dataset(tmp_path, monkeypatch, extra='extract = "zip"\n')
+    fetcher = fetcher_for_key('g.demo', tmp_path / 'data')
+    for intact in (True, False):
+        monkeypatch.setattr(type(fetcher), '_archive_tree_intact', lambda self, v=intact: v)
+        assert fetcher.is_fetched() is intact
