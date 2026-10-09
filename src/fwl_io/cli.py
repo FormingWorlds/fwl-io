@@ -186,6 +186,7 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
         publish=not args.no_publish,
         dry_run=args.dry_run,
         files=args.file or None,
+        into=args.into,
     )
     if persistent_id is None:
         print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
@@ -313,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
         help='mirror only this file of the record (repeatable); match the dataset "files" list',
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
+    p_mirror.add_argument(
+        '--into',
+        metavar='PERSISTENT_ID',
+        help='complete this existing draft of the record instead of creating one',
+    )
     p_mirror.add_argument(
         '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'
     )

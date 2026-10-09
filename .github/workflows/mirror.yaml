@@ -19,6 +19,10 @@ on:
         description: "Only these files of the deposit, separated by spaces (empty: the whole deposit)"
         required: false
         default: ""
+      into:
+        description: "Persistent id of an existing draft of this record to complete (empty: create one)"
+        required: false
+        default: ""
       dry_run:
         description: "Download and map metadata only; make no Dataverse changes"
         type: boolean
@@ -52,10 +56,12 @@ jobs:
           ZENODO_DOI: ${{ inputs.zenodo_doi }}
           COLLECTION: ${{ inputs.collection }}
           FILES: ${{ inputs.files }}
+          INTO: ${{ inputs.into }}
         run: |
           set -f
           file_args=()
           for name in ${FILES}; do file_args+=(--file "${name}"); done
+          if [ -n "${INTO}" ]; then file_args+=(--into "${INTO}"); fi
           fwl-io mirror "${ZENODO_DOI}" \
             --collection "${COLLECTION}" \
             --contact-email "${DATAVERSE_CONTACT_EMAIL}" \
