@@ -25,7 +25,6 @@ from fwl_io.mirror import (
     checksum_algorithm,
     descriptions,
     mirror_to_dataverse,
-    names_source,
     source_record,
 )
 from fwl_io.mirror_status import mirror_status
@@ -93,7 +92,8 @@ def verify_draft(
 ) -> list[str]:
     """Return why a draft does not hold the files of its Zenodo record; empty when it does.
 
-    The draft must be a DRAFT with a license, name the record in its description, and hold
+    The draft must be a DRAFT with a license, name the record and no other in the source
+    notes of its description (the rule of the publish check), and hold
     exactly the record's files (those in ``files`` when given). Each file is downloaded
     from Dataverse and hashed: against the Zenodo checksum, and against the checksum
     Dataverse lists for it.
@@ -117,8 +117,8 @@ def verify_draft(
         problems.append(f'state is {version.get("versionState")!r}, not DRAFT')
     if not (version.get('license') or {}).get('name'):
         problems.append('no license')
-    if not names_source(descriptions(version), f'10.5281/zenodo.{zenodo_record_id(zenodo_doi)}'):
-        problems.append('the description does not name the Zenodo record')
+    if source_record(descriptions(version)) != zenodo_record_id(zenodo_doi):
+        problems.append('the description does not name the Zenodo record and no other')
     listed = _listing(client, persistent_id)
     problems += [f'{name} missing' for name in sorted(set(registry) - set(listed))]
     problems += [f'{name} is not in the record' for name in sorted(set(listed) - set(registry))]

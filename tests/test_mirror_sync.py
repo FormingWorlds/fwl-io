@@ -154,6 +154,11 @@ def test_a_draft_with_the_bytes_of_its_record_is_verified(monkeypatch):
     client = _draft()
     asked = _serve(monkeypatch, client.files)
     assert verify_draft(client, PID, '10.5281/zenodo.55') == []
+    spaced = _draft(note='x  MIRROR of zenodo\tdeposit  10.5281/ZENODO.55. y')
+    _serve(monkeypatch, spaced.files)
+    assert verify_draft(spaced, PID, 'doi:10.5281/zenodo.55') == [], 'another case and spacing'
+    asked = _serve(monkeypatch, client.files)
+    assert verify_draft(client, PID, '10.5281/zenodo.55') == []
     options = {'headers': client._headers, 'allow_redirects': False, 'stream': True, 'timeout': 5}
     assert asked == [(f'https://dv.example/api/access/datafile/{i}', options) for i in (1, 2)]
     del client.files['b.dat']
@@ -253,6 +258,8 @@ def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monke
         ({'state': 'RELEASED'}, None, "state is 'RELEASED', not DRAFT"),
         ({'license_name': None}, None, 'no license'),
         ({'note': 'Mirror of Zenodo deposit 10.5281/zenodo.556.'}, None, 'does not name'),
+        ({'note': f'{NOTE} Mirror of Zenodo deposit 10.5281/zenodo.77.'}, None, 'does not name'),
+        ({'note': 'Mirror of Zenodo deposit 10.5281/zenodo.55x.'}, None, 'does not name'),
         ({}, 'drop b', 'b.dat missing'),
         ({}, 'extra', 'z.dat is not in the record'),
         ({}, 'other bytes', 'a.dat differs from Zenodo (md5)'),
