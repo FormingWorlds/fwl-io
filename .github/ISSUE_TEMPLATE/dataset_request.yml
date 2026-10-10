@@ -1,94 +1,42 @@
 name: Dataset request
-description: Ask for a new dataset, or a new version of a dataset, in the PROTEUS Framework community on Zenodo.
+description: Ask for a new dataset, a new version of a dataset, or a mirror, in the PROTEUS Framework community on Zenodo.
 title: "Dataset request: "
 body:
   - type: markdown
     attributes:
       value: |
-        A dataset of the framework is a record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework). This form asks the maintainers to bring your data there. The steps of each route are in [Add a dataset](https://proteus-framework.org/fwl-io/How-to/add_dataset/).
+        A dataset of the framework is a record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework), accepted by a maintainer. The steps of each route are in [Add a dataset](https://proteus-framework.org/fwl-io/How-to/add_dataset/). A field marked "Needed for" can stay empty for the other routes.
   - type: dropdown
     id: route
     attributes:
       label: Route
-      description: Who uploads the data to Zenodo?
+      description: What do you ask for?
       options:
         - A maintainer uploads my data
         - I upload the record myself and submit it to the community
         - My record exists on Zenodo; add it to the community
-    validations:
-      required: true
-  - type: dropdown
-    id: kind
-    attributes:
-      label: New dataset or new version
-      options:
-        - A new dataset
-        - A new version of a record that exists
-    validations:
-      required: true
-  - type: input
-    id: zenodo_doi
-    attributes:
-      label: Zenodo DOI
-      description: The version DOI (10.5281/zenodo.<record-id>) of the record to add, when it is on Zenodo. For a new version that a maintainer uploads, the DOI of the version that it replaces. Leave empty for data that is not on Zenodo.
-    validations:
-      required: false
-  - type: input
-    id: download_link
-    attributes:
-      label: Download link
-      description: 'Required for the route "A maintainer uploads my data": a folder on Google Drive, Dropbox or another service that the maintainers can read. Leave empty for the other routes.'
-    validations:
-      required: false
-  - type: input
-    id: dataset_title
-    attributes:
-      label: Title
-      description: The title of the dataset, as the Zenodo record must show it.
-    validations:
-      required: true
-  - type: textarea
-    id: description
-    attributes:
-      label: Short description
-      description: What the data is and how it was made, in a few sentences. It becomes the description of the Zenodo record.
-    validations:
-      required: true
-  - type: input
-    id: models
-    attributes:
-      label: Models that read the data
-      description: For example aragog, zalmoxis, agni.
+        - My record is in the community; I ask for a mirror
     validations:
       required: true
   - type: input
     id: dataset_key
     attributes:
       label: Proposed dataset key
-      description: The dotted key, which is also the place of the files below FWL_DATA, for example interior.eos.my_table.
-    validations:
-      required: true
-  - type: textarea
-    id: files
-    attributes:
-      label: Files
-      description: One line per file, with its name and its size.
-      render: text
+      description: The dotted key, which is also the place of the files below FWL_DATA, for example interior.eos.my_table. For a dataset that exists, its key.
     validations:
       required: true
   - type: input
-    id: licence
+    id: models
     attributes:
-      label: Licence
-      description: The licence of the data, for example CC-BY-4.0.
+      label: Models that read the data
+      description: The names that required_by takes, for example aragog, zalmoxis. Write "none" for data that no model fetches by its name.
     validations:
       required: true
-  - type: textarea
-    id: authors
+  - type: input
+    id: repository
     attributes:
-      label: Authors
-      description: One line per author, with name, affiliation and ORCID.
-      render: text
+      label: Repository that holds the manifest
+      description: FormingWorlds/fwl-io for the shared manifest, or the repository of the model.
     validations:
       required: true
   - type: input
@@ -99,16 +47,92 @@ body:
     validations:
       required: true
   - type: input
+    id: zenodo_doi
+    attributes:
+      label: Zenodo DOI
+      description: 'Needed for: every route with a record on Zenodo. The version DOI (10.5281/zenodo.<record-id>) of the record to add or to mirror. For a new upload of your own, add it when the record is published. For a new version that a maintainer uploads, the DOI of the version that it replaces.'
+    validations:
+      required: false
+  - type: dropdown
+    id: kind
+    attributes:
+      label: New dataset or new version
+      description: 'Needed for: every route except a mirror alone.'
+      options:
+        - A new dataset
+        - A new version of a record that exists
+    validations:
+      required: false
+  - type: input
+    id: download_link
+    attributes:
+      label: Download link
+      description: 'Needed for: a maintainer uploads my data. A folder on Google Drive, Dropbox or another service, shared so that anyone with the link can read it.'
+    validations:
+      required: false
+  - type: input
+    id: dataset_title
+    attributes:
+      label: Title
+      description: 'Needed for: a maintainer uploads my data. The title of the Zenodo record.'
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 'Needed for: a maintainer uploads my data. What the data is and how it was made, in a few sentences. This text becomes the public description of the Zenodo record.'
+    validations:
+      required: false
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: 'Needed for: a maintainer uploads my data. One line per file, the README too, with its size in any unit.'
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: licence
+    attributes:
+      label: Licence
+      description: 'Needed for: a maintainer uploads my data. Your choice among the licences that Zenodo offers, for example CC-BY-4.0.'
+    validations:
+      required: false
+  - type: textarea
+    id: authors
+    attributes:
+      label: Authors
+      description: 'Needed for: a maintainer uploads my data. One line per author, with name, affiliation and ORCID.'
+      render: text
+    validations:
+      required: false
+  - type: input
     id: reference
     attributes:
       label: Reference to cite
-      description: The DOI of the publication that users of the data must cite.
+      description: 'Needed for: a maintainer uploads my data. The DOI of the publication that users of the data must cite.'
     validations:
-      required: true
+      required: false
+  - type: input
+    id: used_files
+    attributes:
+      label: Files that the dataset uses
+      description: 'Needed for: a dataset that uses only some files of its record. The names of those files, separated by spaces.'
+    validations:
+      required: false
   - type: checkboxes
     id: readme
     attributes:
       label: README
+      description: 'Needed for: every route except a mirror alone.'
       options:
         - label: The data holds a README that describes each file (format, columns, units, source).
-          required: true
+          required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes for the maintainers
+      description: 'Optional, not part of the Zenodo record. For example: you want no mirror; you ask a maintainer to write the manifest and open the pull request for you; you are not a developer of the model; Zenodo did not let you submit the record.'
+    validations:
+      required: false
