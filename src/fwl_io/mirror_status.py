@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import requests
 
 from fwl_io.doi import zenodo_record_id
-from fwl_io.manifest import Dataset, _discover
+from fwl_io.manifest import Dataset, _discover_all
 from fwl_io.sync import ZENODO_API
 
 
@@ -77,9 +77,9 @@ def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusR
     """
     report, latest = StatusReport(), latest or latest_record_id
     if datasets is None:
-        found, errors = _discover()
-        datasets = [ds for group in found.values() for ds in group]
-        report.manifest_errors.update(errors)
+        discovery = _discover_all()
+        datasets = [ds for group in discovery.found.values() for ds in group]
+        report.manifest_errors.update({p: e.message for p, e in discovery.errors.items()})
     newest: dict[str, str | Exception] = {}
     for ds in datasets:
         recid = zenodo_record_id(ds.zenodo)

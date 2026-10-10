@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has eleven subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has thirteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -130,6 +130,23 @@ fwl-io mirror-status
 ```
 
 Lists the datasets of the installed manifests whose Dataverse mirror needs work: one without a `dataverse` pin (UNPINNED, with its Zenodo DOI), and one whose Zenodo record has a newer version than the one pinned (STALE: the manifest needs a new pin, and that version a mirror). A dataset can be both. It reads only Zenodo, once per record, through `<record>/versions/latest`; a record that cannot be read is listed as UNREADABLE. Exit is 1 when a manifest fails to load, 5 when a dataset needs work, 3 when the only problem is a record that could not be read, and 0 otherwise.
+
+## fwl-io mirror-sync
+
+```bash
+DATAVERSE_TOKEN=... fwl-io mirror-sync --collection <alias> \
+    [--dataverse-url URL] [--contact-email EMAIL] [--dry-run]
+```
+
+Creates a draft mirror for one Zenodo record that has none. It prints the `fwl-io mirror-status` report, lists the datasets of the collection (with the token, so that drafts are seen) and sorts each dataset without a pin: `SKIPPED` when its Zenodo record has a newer version, which needs a new pin in the manifest first; `PIN MISSING` when the record already has a published mirror, either one another dataset pins or one in the collection, with the `fwl-io mirror-pin` command to run; `WAITING` when the collection holds a draft of the record that is not published yet. The first record left gets a draft, created as `fwl-io mirror --no-publish` creates it and holding the files every dataset of that record asks for (the whole record when one of them names no files). One draft is created per run. The draft is then checked: it must be a draft with a license and the source note, hold exactly those files, and each file, downloaded from Dataverse, must have the Zenodo checksum and the checksum Dataverse lists. `--dry-run` stops before the creation and says which record a run would take. The command never publishes, deletes or edits a manifest. Exit is 0 when there was nothing to create, or the draft is verified; 1 when a manifest was left out or the draft is not verified. The listing comes from the Dataverse search index, which can lag a dataset created seconds ago.
+
+## fwl-io mirror-pin
+
+```bash
+fwl-io mirror-pin <persistent-id> [--manifest FILE]
+```
+
+Writes the pin of a published mirror into the shared manifest. The dataset must be published and name its Zenodo record in the source note. Every installed dataset of that record is checked against the mirror as `fwl-io check-mirrors` checks a pin; one that the mirror serves gets `dataverse = "<doi>"` written after the `zenodo` line of its table when the manifest file declares it (`PINNED`), and otherwise a line with the pin to add in the package that declares it. A dataset the mirror does not serve is a `FAIL` line and exit 1. It needs no token, makes no Dataverse changes and does not commit: the edit is yours to commit. `--manifest FILE` edits another manifest file in place of the shared one.
 
 ## fwl-io check-mirrors
 

@@ -6,7 +6,7 @@ import requests
 
 from fwl_io import mirror_status as status
 from fwl_io.cli import main
-from fwl_io.manifest import Dataset
+from fwl_io.manifest import Dataset, ErrorKind, ProviderError, _Discovery
 from fwl_io.mirror_status import StatusReport, latest_record_id, mirror_status
 
 pytestmark = pytest.mark.unit
@@ -61,9 +61,8 @@ def test_the_exit_code_puts_a_manifest_error_before_work_before_an_outage(report
 
 def test_the_command_prints_the_rows_and_exits_by_the_verdict(monkeypatch, capsys):
     """The command reads every installed manifest and prints one line per dataset to act on."""
-    monkeypatch.setattr(
-        status, '_discover', lambda: ({'m': [_ds('g.ok', 1), _ds('g.new', 2, pin=None)]}, {})
-    )
+    found = {'m': [_ds('g.ok', 1), _ds('g.new', 2, pin=None)]}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery(found, {}))
     monkeypatch.setattr(status, 'latest_record_id', lambda recid: recid)
     assert main(['mirror-status']) == 5
     out = capsys.readouterr().out.splitlines()
@@ -76,7 +75,8 @@ def test_the_command_prints_the_rows_and_exits_by_the_verdict(monkeypatch, capsy
 
 def test_a_manifest_that_fails_to_load_is_reported(monkeypatch):
     """A manifest error is listed and fails the run."""
-    monkeypatch.setattr(status, '_discover', lambda: ({}, {'broken': 'cannot load'}))
+    broken = {'broken': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({}, broken))
     report = mirror_status(latest=lambda recid: recid)
     assert report.manifest_errors == {'broken': 'cannot load'}
     assert report.summary().splitlines()[0] == 'FAIL manifest broken: cannot load'

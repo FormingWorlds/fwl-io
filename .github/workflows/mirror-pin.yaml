@@ -1,0 +1,50 @@
+name: Pin a published Dataverse mirror
+
+# Checks a published mirror against the datasets of its Zenodo record, writes its pin into
+# the shared manifest and pushes that edit as a branch. It opens no pull request and makes
+# no Dataverse changes; it needs no Dataverse token, since a published dataset is public.
+
+on:
+  workflow_dispatch:
+    inputs:
+      persistent_id:
+        description: "Persistent id (DOI) of the published mirror, e.g. doi:10.34894/EXAMPLE"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  mirror-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Check the mirror and write the pin
+        shell: bash
+        env:
+          # Bound to an environment variable, not interpolated into the script, so a
+          # crafted persistent id cannot inject commands.
+          PERSISTENT_ID: ${{ inputs.persistent_id }}
+        run: |
+          fwl-io mirror-pin "${PERSISTENT_ID}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Push the manifest edit as a branch
+        shell: bash
+        env:
+          PERSISTENT_ID: ${{ inputs.persistent_id }}
+        run: |
+          if git diff --quiet; then echo "the manifest did not change"; exit 0; fi
+          branch="tl/pin-$(printf '%s' "${PERSISTENT_ID##*/}" | tr -c 'A-Za-z0-9' '-')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git commit -am "Pin the Dataverse mirror ${PERSISTENT_ID}"
+          git push origin "${branch}"

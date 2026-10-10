@@ -240,6 +240,33 @@ def _cmd_mirror_status(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _cmd_mirror_sync(args: argparse.Namespace) -> int:
+    from fwl_io.mirror_sync import mirror_sync
+
+    token = os.environ.get('DATAVERSE_TOKEN', '')
+    if not token:
+        print('fwl-io: set DATAVERSE_TOKEN to list and create drafts', file=sys.stderr)
+        return 1
+    lines, code = mirror_sync(
+        args.collection,
+        dataverse_url=args.dataverse_url,
+        token=token,
+        contact_name=args.contact_name,
+        contact_email=args.contact_email,
+        dry_run=args.dry_run,
+    )
+    print('\n'.join(lines))
+    return code
+
+
+def _cmd_mirror_pin(args: argparse.Namespace) -> int:
+    from fwl_io.mirror_sync import mirror_pin
+
+    lines, code = mirror_pin(args.persistent_id, manifest=args.manifest)
+    print('\n'.join(lines))
+    return code
+
+
 def _cmd_check_mirrors(args: argparse.Namespace) -> int:
     from fwl_io.pins import check_mirrors
 
@@ -398,6 +425,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Dataverse publish version bump: 'major' or 'minor'",
     )
     p_mirror_publish.set_defaults(func=_cmd_mirror_publish)
+
+    p_mirror_sync = sub.add_parser(
+        'mirror-sync',
+        help='create one draft mirror for a record that has none (never publishes)',
+    )
+    p_mirror_sync.add_argument('--collection', required=True, help='Dataverse collection alias')
+    p_mirror_sync.add_argument(
+        '--dataverse-url', default=DEFAULT_DATAVERSE_URL, help='Dataverse base URL'
+    )
+    p_mirror_sync.add_argument(
+        '--contact-name', default='PROTEUS Framework', help='dataset contact'
+    )
+    p_mirror_sync.add_argument('--contact-email', default='', help='dataset contact email')
+    p_mirror_sync.add_argument(
+        '--dry-run', action='store_true', help='say which draft a run would create; no write'
+    )
+    p_mirror_sync.set_defaults(func=_cmd_mirror_sync)
+
+    p_mirror_pin = sub.add_parser(
+        'mirror-pin', help='write the pin of a published mirror into the shared manifest'
+    )
+    p_mirror_pin.add_argument('persistent_id', help='persistent id (DOI) of the published mirror')
+    p_mirror_pin.add_argument(
+        '--manifest', default=None, help='manifest file to edit (default: the shared manifest)'
+    )
+    p_mirror_pin.set_defaults(func=_cmd_mirror_pin)
 
     p_check_mirrors = sub.add_parser(
         'check-mirrors',

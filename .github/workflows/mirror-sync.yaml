@@ -1,0 +1,52 @@
+name: Create a draft mirror for a dataset without one
+
+# Finds the datasets of the installed manifests whose Zenodo record has no Dataverse
+# dataset and creates one draft per run. It never publishes, deletes or edits a manifest.
+# The weekly run only reports; a draft is created by a manual run with dry run unchecked.
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      collection:
+        description: "Dataverse collection alias"
+        required: true
+        default: "Proteus_Fr"
+      dry_run:
+        description: "Only say which draft a run would create; make no Dataverse changes"
+        type: boolean
+        default: true
+
+# One run at a time: a second run must see the draft the first one created.
+concurrency:
+  group: mirror-sync
+  cancel-in-progress: false
+
+jobs:
+  mirror-sync:
+    runs-on: ubuntu-latest
+    environment: dataverse
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Report, and create one draft when asked
+        shell: bash
+        env:
+          DATAVERSE_TOKEN: ${{ secrets.DATAVERSE_TOKEN }}
+          DATAVERSE_CONTACT_EMAIL: ${{ secrets.DATAVERSE_CONTACT_EMAIL }}
+          COLLECTION: ${{ inputs.collection || 'Proteus_Fr' }}
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+        run: |
+          args=()
+          if [ "${DRY_RUN}" != "false" ]; then args+=(--dry-run); fi
+          fwl-io mirror-sync --collection "${COLLECTION}" \
+            --contact-email "${DATAVERSE_CONTACT_EMAIL}" "${args[@]}" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
