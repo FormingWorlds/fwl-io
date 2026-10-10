@@ -44,7 +44,7 @@ A draft created with **publish** unchecked stays private until it is published. 
 Mirror of Zenodo deposit 10.5281/zenodo.<record-id>. Zenodo is the primary source.
 ```
 
-Do not edit or remove that line in a draft. Before it publishes, the run reads the description, takes every DOI that follows the words "Mirror of Zenodo deposit", and reads that record from Zenodo. It publishes only when the description names exactly one DOI in this way, Zenodo serves it as a version record, and the record is an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)). Each other case stops the run with its own message, and nothing is published. A dataset that is published already gives "already published" before this check. The check reads the description of the draft, not its files.
+Do not edit or remove that line in a draft. Before it publishes, the run reads the description, takes every DOI that follows the words "Mirror of Zenodo deposit", and reads that record from Zenodo. It publishes only when the description names exactly one DOI in this way, Zenodo serves it as a version record, and the record is an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)). Each other case stops the run with its own message, and nothing is published. Only a draft is published: a dataset that is published already gives "already published" before this check, and a dataset in another state (deaccessioned, or a reply without a state) is refused with the state that was found. The check reads the description of the draft, not its files.
 
 ## What the mirror does
 

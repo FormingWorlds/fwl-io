@@ -1284,12 +1284,15 @@ def mirror_to_dataverse(
 
 
 def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: str) -> None:
-    """Refuse the publish of a dataset that is published already, of a draft whose
-    description does not name exactly one Zenodo DOI in a source note, and of one whose
-    record is not read or is outside the communities of the framework."""
+    """Refuse the publish of a dataset that is not a draft, of a draft whose description
+    does not name exactly one Zenodo DOI in a source note, and of one whose record is not
+    read or is outside the communities of the framework."""
     version = client._dataset(persistent_id).get('latestVersion') or {}
-    if version.get('versionState') == 'RELEASED':
+    state = version.get('versionState')
+    if state == 'RELEASED':
         raise DataverseAlreadyPublished(f'{persistent_id} is already published')
+    if state != 'DRAFT':
+        raise DataverseError(f'{persistent_id} is in the state {state!r}, not DRAFT; not published')
     text = descriptions(version)
     named = {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
     if len(named) != 1:
@@ -1351,9 +1354,9 @@ def publish_existing_dataverse_draft(
     DataverseAlreadyPublished
         If the dataset is already published before the publish request.
     DataverseError
-        If the dataset does not exist, its description does not name exactly one Zenodo
-        record, that record could not be read, or Dataverse rejects the publish request with a 4xx
-        status.
+        If the dataset does not exist, its latest version is not a draft, its description
+        does not name exactly one Zenodo record, that record could not be read, or
+        Dataverse rejects the publish request with a 4xx status.
     DataversePublishUnconfirmed
         If the dataset is not RELEASED after the wait that follows the publish
         request, or every attempt got the bot-check page or a 429; check the

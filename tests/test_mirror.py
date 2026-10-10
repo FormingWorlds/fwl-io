@@ -125,6 +125,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     draft_files: list = []  # files the fake draft holds, as the listing reports them
     other_files: list = []  # files of a second dataset, OTHER_PID
     released: bool = False
+    state: str | None = None  # set by a test to answer another version state
     deleted: bool = False
     license: dict | None = None
     source_note: str = 'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
@@ -198,7 +199,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             note = [{'dsDescriptionValue': {'value': self.source_note}}]
             citation = {'fields': [{'typeName': 'dsDescription', 'value': note}]}
             version = {
-                'versionState': 'RELEASED' if self.released else 'DRAFT',
+                'versionState': self.state or ('RELEASED' if self.released else 'DRAFT'),
                 'metadataBlocks': {'citation': citation},
             }
             if self.license is not None:
@@ -336,6 +337,7 @@ def dataverse_server():
     _DataverseHandler.draft_files = []
     _DataverseHandler.other_files = []
     _DataverseHandler.released = False
+    _DataverseHandler.state = None
     _DataverseHandler.deleted = False
     _DataverseHandler.license = None
     _DataverseHandler.version_number = None
@@ -583,6 +585,25 @@ def test_a_published_dataset_gives_already_published_before_the_source_check(
     _DataverseHandler.source_note = 'Some other data.'
     with pytest.raises(DataverseAlreadyPublished, match='is already published'):
         _publish(http_server, dataverse_server)
+    assert _published(dataverse_server) == []
+
+
+@pytest.mark.parametrize(
+    ('change', 'found'),
+    [({'state': 'DEACCESSIONED'}, "'DEACCESSIONED'"), ({'omit_latest': True}, 'None')],
+)
+def test_no_publish_for_a_dataset_whose_latest_version_is_not_a_draft(
+    http_server, dataverse_server, source_check, change, found
+):
+    """A deaccessioned version, or a reply without a version state, is refused with the
+    state that was found, also for a record of the community, and no publish request is
+    sent."""
+    _serve_zenodo_record(http_server[1], 55, {'a.dat': b'AAA\n'})
+    for name, value in change.items():
+        setattr(_DataverseHandler, name, value)
+    with pytest.raises(DataverseError, match=f'is in the state {found}, not DRAFT') as err:
+        _publish(http_server, dataverse_server)
+    assert not isinstance(err.value, DataverseAlreadyPublished)
     assert _published(dataverse_server) == []
 
 
