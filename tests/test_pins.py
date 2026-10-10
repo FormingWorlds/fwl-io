@@ -607,11 +607,11 @@ def test_spectral_file_entries_match_their_key():
             assert {f'{stem}.sf', f'{stem}.sf_k'} <= names
 
 
-def test_only_phoenix_is_unpinned_in_the_shared_manifest():
-    """Every shared dataset has a DataverseNL mirror except the PHOENIX spectra."""
-    datasets = load_manifest(shared_manifest_path())
-    assert {ds.key for ds in datasets if not ds.dataverse} == {'star.spectra.phoenix'}
-    assert len(datasets) > 1
+def test_every_dataset_of_the_shared_manifest_has_a_mirror():
+    """Every shared dataset names a DataverseNL mirror, the PHOENIX spectra included."""
+    datasets = {ds.key: ds.dataverse for ds in load_manifest(shared_manifest_path())}
+    assert [key for key, pin in datasets.items() if not pin] == []
+    assert datasets['star.spectra.phoenix'] == '10.34894/YSN9JJ'
 
 
 def test_seager_and_zeng_are_shared_beside_the_proteus_copies(tmp_path):
