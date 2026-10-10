@@ -28,8 +28,8 @@ from fwl_io.mirror import (
     names_source,
     source_record,
 )
-from fwl_io.mirror_status import manifest_lines, mirror_status
-from fwl_io.pins import dataverse_server, pin_problem
+from fwl_io.mirror_status import mirror_status
+from fwl_io.pins import Unreachable, dataverse_server, manifest_lines, pin_problem
 from fwl_io.sync import ZENODO_API, fetch_zenodo_registry, select_files
 
 
@@ -38,7 +38,9 @@ def collection_mirrors(
 ) -> dict[str, list[tuple[str | None, str]]]:
     """Return the datasets of a collection by the Zenodo record id their description names,
     each as ``(version state, persistent id)``; drafts are listed when the client holds a
-    token. The search index can lag a dataset created seconds ago."""
+    token. The search index can lag a dataset created seconds ago. Raises
+    :class:`~fwl_io.mirror.DataverseError` when the items read differ from the count the
+    server gives."""
     found: dict[str, list[tuple[str | None, str]]] = {}
     start = read = 0
 
@@ -72,7 +74,12 @@ def _download(client: DataverseClient, file_id) -> requests.Response:
     response = requests.get(url, headers=client._headers, allow_redirects=False, **options)
     if response.is_redirect:
         response.close()
-        response = requests.get(urljoin(url, response.headers['Location']), **options)
+        target = urljoin(url, response.headers['Location'])
+        try:
+            response = requests.get(target, **options)
+        except requests.RequestException as exc:  # its text holds the signed query
+            where = target.split('?')[0]
+            raise DataverseError(f'download from {where} failed: {type(exc).__name__}') from None
     return response
 
 
@@ -244,6 +251,8 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
         If the manifest has no ``[key]`` table with a ``zenodo`` line, if the edit would
         change anything but that pin, or if the manifest does not load with the pin
         afterwards; the file is left as it was.
+    OSError
+        If the file cannot be read or written; after a failed write it can differ.
     """
     before = manifest.read_bytes()
     old = before.decode('utf-8')
@@ -324,7 +333,11 @@ def mirror_pin(
     code, to_write = (1 if lines else 0), {}
     for ds in record:
         old = (ds.dataverse or '').removeprefix('doi:')
-        if problem := pin_problem(replace(ds, dataverse=pin), client):
+        try:
+            problem = pin_problem(replace(ds, dataverse=pin), client)
+        except Unreachable as exc:
+            problem = f'could not be checked: {exc}'
+        if problem:
             lines.append(f'FAIL {ds.key}: {problem}')
             code = 1
         elif old == pin:

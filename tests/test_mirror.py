@@ -625,8 +625,9 @@ def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id(
 @pytest.mark.unit
 @pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
 def test_a_request_with_a_token_does_not_follow_a_redirect(monkeypatch, status):
-    """With a token, a redirect is an error that names its target without the query, so
-    the token header reaches no other server; without a token, redirects are followed."""
+    """With a token, a redirect of a read or a write is an error that names its target
+    without the query, and no second request follows; without a token, redirects are
+    followed."""
     import requests
 
     seen = []
@@ -638,11 +639,14 @@ def test_a_request_with_a_token_does_not_follow_a_redirect(monkeypatch, status):
         return response
 
     monkeypatch.setattr(requests, 'request', request)
-    with pytest.raises(DataverseError, match=r'redirect to https://store.example/x, not') as err:
-        DataverseClient('http://unused', 'tok')._request('GET', '/api/search')
-    assert err.value.status_code == status and 'signature' not in str(err.value)
+    for method in ('GET', 'POST'):
+        with pytest.raises(
+            DataverseError, match=r'redirect to https://store.example/x, not'
+        ) as err:
+            DataverseClient('http://unused', 'tok')._request(method, '/api/search')
+        assert err.value.status_code == status and 'signature' not in str(err.value)
     assert DataverseClient('http://unused', '')._request('GET', '/api/search') == {}
-    assert seen == [False, True]
+    assert seen == [False, False, True], 'one request per call, none after a redirect'
 
 
 @pytest.mark.unit

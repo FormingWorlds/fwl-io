@@ -13,12 +13,8 @@ import requests
 
 from fwl_io.doi import zenodo_record_id
 from fwl_io.manifest import Dataset, ProviderError, _discover_all
+from fwl_io.pins import manifest_lines
 from fwl_io.sync import ZENODO_API
-
-
-def manifest_lines(errors: dict[str, ProviderError]) -> list[str]:
-    """Return one ``FAIL`` line per manifest left out, worded as ``fwl-io check-mirrors``."""
-    return [f'FAIL {p}: MANIFEST {e.verdict}, {e.message}' for p, e in sorted(errors.items())]
 
 
 @dataclass

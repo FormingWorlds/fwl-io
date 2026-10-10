@@ -3,6 +3,7 @@ the check of a draft against its Zenodo record, and the pin written into a manif
 against fakes."""
 
 import hashlib
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -20,6 +21,7 @@ from fwl_io.mirror_sync import (
     verify_draft,
     write_pin,
 )
+from fwl_io.pins import Unreachable
 
 pytestmark = pytest.mark.unit
 
@@ -165,6 +167,30 @@ def test_a_draft_with_the_bytes_of_its_record_is_verified(monkeypatch):
     assert _serve.closed == [True], 'the redirect answer is closed'
 
 
+def test_a_storage_download_that_fails_does_not_name_the_signed_query(monkeypatch):
+    """A lost connection to the storage server is an error that names the storage path
+    without its query, which holds the signature."""
+    client = _draft()
+    monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: REGISTRY)
+
+    class _Redirect:
+        is_redirect, headers = True, {'Location': 'https://store.example/f/1?X-Amz-Signature=MARK'}
+
+        def close(self):
+            pass
+
+    def get(url, **kwargs):
+        if 'store.example' in url:
+            raise sync.requests.ConnectionError(f'Max retries exceeded with url: {url}')
+        return _Redirect()
+
+    monkeypatch.setattr(sync.requests, 'get', get)
+    with pytest.raises(DataverseError) as error:
+        verify_draft(client, PID, '10.5281/zenodo.55')
+    assert str(error.value) == 'download from https://store.example/f/1 failed: ConnectionError'
+    assert error.value.__cause__ is None and error.value.__suppress_context__
+
+
 def _server(reply, seen):
     """Start a local server that records the token header of each GET, then calls ``reply``."""
 
@@ -204,6 +230,7 @@ def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monke
         handler.end_headers()
 
     dataverse = _server(redirect, at_dataverse)
+    monkeypatch.setenv('NO_PROXY', '127.0.0.1')
     try:
         client = _draft()
         client.base_url = f'http://127.0.0.1:{dataverse.server_port}'
@@ -505,6 +532,13 @@ def test_a_pin_that_cannot_be_written_leaves_the_manifest_as_it_was(tmp_path, ke
     assert manifest.read_text() == MANIFEST
 
 
+def _problem(problem):
+    """Return a pin problem, or raise it when it is an exception."""
+    if isinstance(problem, Exception):
+        raise problem
+    return problem
+
+
 def _pin(monkeypatch, tmp_path, version, others=(), problem=None, errors=None, text=MANIFEST):
     """Run mirror-pin on a manifest file; ``problem`` is the pin problem of ``g.first``,
     or of each key of a dict."""
@@ -517,7 +551,7 @@ def _pin(monkeypatch, tmp_path, version, others=(), problem=None, errors=None, t
     monkeypatch.setattr(
         sync,
         'pin_problem',
-        lambda ds, client: checked.append((ds.key, ds.dataverse)) or problems.get(ds.key),
+        lambda ds, client: checked.append((ds.key, ds.dataverse)) or _problem(problems.get(ds.key)),
     )
     client = FakeClient({'/api/datasets/:persistentId': {'data': {'latestVersion': version}}})
     return manifest, checked, mirror_pin('doi:10.34894/NEWPIN', manifest=manifest, client=client)
@@ -595,49 +629,89 @@ def _locks_after(write):
     return writer
 
 
-def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp_path):
-    """With two datasets of one record, a mirror that does not serve the second, or a second
-    pin that cannot be written, leaves the file as it was and says which pins wait; a
-    read-only file gives a FAIL line, as does a file that cannot be restored."""
-    version = _version('RELEASED')
-    manifest, checked, (lines, code) = _pin(
-        monkeypatch, tmp_path, version, problem={'g.third': 'a.dat missing'}, text=TWO_OF_ONE_RECORD
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason='root writes a read-only file')
+WAIT = [f'NOT PINNED {key}: nothing is written after a FAIL' for key in ('g.first', 'g.third')]
+
+
+def _pin_two(monkeypatch, tmp_path, **kwargs):
+    """Run mirror-pin on a manifest with two datasets of the record of the mirror."""
+    return _pin(monkeypatch, tmp_path, _version('RELEASED'), text=TWO_OF_ONE_RECORD, **kwargs)
+
+
+def test_both_datasets_of_a_record_get_the_pin(monkeypatch, tmp_path):
+    """Two datasets of one record that the mirror serves are both pinned."""
+    manifest, _, (lines, code) = _pin_two(monkeypatch, tmp_path)
+    assert code == 0 and [line.split()[:2] for line in lines] == [
+        ['PINNED', 'g.first'],
+        ['PINNED', 'g.third'],
+    ]
+    assert manifest.read_text().count('dataverse = "10.34894/NEWPIN"') == 2
+
+
+def test_no_pin_is_written_when_the_mirror_does_not_serve_one_dataset(monkeypatch, tmp_path):
+    """A mirror that does not serve the second dataset leaves the file as it was, also when
+    another package declares that dataset, and the pin of the first one waits."""
+    manifest, checked, (lines, code) = _pin_two(
+        monkeypatch, tmp_path, problem={'g.third': 'a.dat missing'}
     )
-    assert (
-        len(checked) == 2
-        and code == 1
-        and lines
-        == [
-            'FAIL g.third: a.dat missing',
-            'NOT PINNED g.first: nothing is written after a FAIL',
-        ]
-    )
+    assert len(checked) == 2 and code == 1
+    assert lines == ['FAIL g.third: a.dat missing', WAIT[0]]
     assert manifest.read_text() == TWO_OF_ONE_RECORD
+    manifest, _, (lines, code) = _pin(
+        monkeypatch,
+        tmp_path,
+        _version('RELEASED'),
+        others=[_ds('other.same', 55)],
+        problem={'other.same': 'a.dat missing'},
+    )
+    assert code == 1 and lines == ['FAIL other.same: a.dat missing', WAIT[0]]
+    assert manifest.read_text() == MANIFEST
+
+
+def test_a_dataset_that_cannot_be_checked_is_a_fail_line(monkeypatch, tmp_path):
+    """A server that does not answer for one dataset keeps the lines gathered so far, gives
+    a FAIL line and writes nothing."""
+    errors = {'p': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    manifest, _, (lines, code) = _pin_two(
+        monkeypatch, tmp_path, problem={'g.third': Unreachable('Zenodo: timed out')}, errors=errors
+    )
+    assert code == 1 and lines == [
+        'FAIL p: MANIFEST FAILED TO LOAD, cannot load',
+        'FAIL g.third: could not be checked: Zenodo: timed out',
+        WAIT[0],
+    ]
+    assert manifest.read_text() == TWO_OF_ONE_RECORD
+
+
+@pytest.mark.parametrize('error', [ValueError('x'), PermissionError('x')])
+def test_a_second_pin_that_cannot_be_written_takes_the_first_one_back(monkeypatch, tmp_path, error):
+    """The first pin is written, the second write fails: the file is as it was, both wait."""
     write = sync.write_pin
-    for error in (ValueError('x'), PermissionError('x')):
-        monkeypatch.setattr(
-            sync,
-            'write_pin',
-            lambda path, key, pin, e=error: (
-                write(path, key, pin) if key == 'g.first' else _raise(e)
-            ),
-        )
-        manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
-        assert code == 1 and lines == [
-            'FAIL x',
-            'NOT PINNED g.first: nothing is written after a FAIL',
-            'NOT PINNED g.third: nothing is written after a FAIL',
-        ]
-        assert manifest.read_text() == TWO_OF_ONE_RECORD
-    monkeypatch.setattr(sync, 'write_pin', write)
+    monkeypatch.setattr(
+        sync,
+        'write_pin',
+        lambda path, key, pin: write(path, key, pin) if key == 'g.first' else _raise(error),
+    )
+    manifest, _, (lines, code) = _pin_two(monkeypatch, tmp_path)
+    assert code == 1 and lines == ['FAIL x', *WAIT]
+    assert manifest.read_text() == TWO_OF_ONE_RECORD
+
+
+@NOT_ROOT
+def test_a_read_only_manifest_gives_a_fail_line(monkeypatch, tmp_path):
+    """A manifest that cannot be written is reported, not raised, and stays as it was."""
     monkeypatch.setattr(sync, 'load_manifest', _read_only(sync.load_manifest))
-    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    manifest, _, (lines, code) = _pin_two(monkeypatch, tmp_path)
     assert code == 1 and len(lines) == 3 and 'Permission denied' in lines[0], lines
-    assert lines[1].startswith('NOT PINNED g.first') and manifest.read_text() == TWO_OF_ONE_RECORD
-    manifest.chmod(0o644)
-    monkeypatch.undo()
-    monkeypatch.setattr(sync, 'write_pin', _locks_after(write))
-    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    assert lines[1:] == WAIT and manifest.read_text() == TWO_OF_ONE_RECORD
+
+
+@NOT_ROOT
+def test_a_manifest_that_cannot_be_restored_says_that_a_pin_can_be_in_it(monkeypatch, tmp_path):
+    """The first pin is written, the second write fails and the file cannot be put back:
+    the report says so, and each pin is a CHECK line."""
+    monkeypatch.setattr(sync, 'write_pin', _locks_after(sync.write_pin))
+    manifest, _, (lines, code) = _pin_two(monkeypatch, tmp_path)
     assert code == 1 and lines[0] == 'FAIL x' and len(lines) == 4
     assert lines[1].startswith('FAIL manifest.toml could not be restored, check it by hand: ')
     assert lines[2:] == [
@@ -645,14 +719,6 @@ def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp
         'CHECK g.third: its pin may be in manifest.toml',
     ]
     assert manifest.read_text().count('dataverse = "10.34894/NEWPIN"') == 1, 'g.first stayed'
-    manifest.chmod(0o644)
-    monkeypatch.undo()
-    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
-    assert code == 0 and [line.split()[:2] for line in lines] == [
-        ['PINNED', 'g.first'],
-        ['PINNED', 'g.third'],
-    ]
-    assert manifest.read_text().count('dataverse = "10.34894/NEWPIN"') == 2
 
 
 @pytest.mark.parametrize(
@@ -692,6 +758,11 @@ def test_the_commands_print_the_report_and_exit_by_it(monkeypatch, capsys):
         True,
         'c@x',
     )
-    monkeypatch.setattr(sync, 'mirror_pin', lambda pid, manifest: ([f'{pid} {manifest}'], 1))
-    assert main(['mirror-pin', 'doi:10.34894/X', '--manifest', 'm.toml']) == 1
+    for code in (1, 0):
+        monkeypatch.setattr(
+            sync, 'mirror_pin', lambda pid, manifest, c=code: ([f'{pid} {manifest}'], c)
+        )
+        assert main(['mirror-pin', 'doi:10.34894/X', '--manifest', 'm.toml']) == code
+        capsys.readouterr()
+    main(['mirror-pin', 'doi:10.34894/X', '--manifest', 'm.toml'])
     assert capsys.readouterr().out == 'doi:10.34894/X m.toml\n'
