@@ -11,9 +11,10 @@ proven unreferenced: it must carry the fetcher's own stamp naming the record it
 holds and the subdir it sits under, it must sit under a subdirectory that a
 currently declared dataset uses (an older pin of a known dataset), and the
 reference set it is checked against must be complete. If any installed
-manifest fails to load, any dataset's version directory cannot be computed,
-part of the tree cannot be read, or a fetch lock is held anywhere on the tree,
-the run refuses to delete rather than act on a partial or contested view. An
+manifest is left out (it fails to load or conflicts with another), any
+dataset's version directory cannot be computed, part of the tree cannot be
+read, or a fetch lock is held anywhere on the tree, the run refuses to
+delete rather than act on a partial or contested view. An
 orphan-including run also refuses when the reference set is empty.
 
 A directory that matches the version-directory name shape but carries no stamp
@@ -66,10 +67,13 @@ from fwl_io.fs_guard import (
     _same_dir,
     _same_entry,
 )
+from fwl_io.manifest import ProviderError, _discover_all
 from fwl_io.paths import existing_data_root
 from fwl_io.relocate import _version_dir
 
 log = logging.getLogger('fwl.' + __name__)
+
+_INCOMPLETE = 'a manifest was left out or a version dir was unresolvable'
 
 #: A version directory is ``r`` followed by the Zenodo record-id digits.
 _VERSION_DIR_PATTERN = re.compile(r'r[0-9]+\Z')
@@ -128,7 +132,7 @@ class PruneReport:
     """
 
     candidates: tuple[PruneCandidate, ...] = ()
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
     resolve_error: str | None = None
     scan_error: str | None = None
     known_subdirs: frozenset[str] = frozenset()
@@ -207,10 +211,7 @@ class PruneReport:
         so each blocks deletion on its own.
         """
         if self.blocked:
-            return (
-                'the reference set is incomplete '
-                '(a manifest did not load or a version dir was unresolvable)'
-            )
+            return f'the reference set is incomplete ({_INCOMPLETE})'
         if self.scan_error is not None:
             return f'the data root cannot be fully read ({self.scan_error})'
         if self.lock_problem is not None:
@@ -230,7 +231,7 @@ class PruneReport:
         for c in sorted(self.candidates, key=lambda c: c.rel):
             lines.append(c.summary())
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+            lines.append(f'{provider}: MANIFEST {error.verdict}, {error.message}')
         if self.resolve_error is not None:
             lines.append(f'VERSION DIR UNRESOLVABLE, {self.resolve_error}')
         kept = len(self.referenced)
@@ -247,10 +248,7 @@ class PruneReport:
         if self.blocked:
             # The reason deletion is refused: a version listed superseded above
             # could be the referenced one whose pin this run failed to read.
-            closing += (
-                '; reference set is INCOMPLETE (a manifest did not load or a '
-                'version dir was unresolvable), so nothing can be deleted'
-            )
+            closing += f'; reference set is INCOMPLETE ({_INCOMPLETE}), so nothing can be deleted'
         if self.lock_problem is not None:
             closing += f'; {self.lock_problem}, so nothing can be deleted'
         if self.apply_refusal is not None:
@@ -349,7 +347,7 @@ class _Build:
     candidates: tuple[PruneCandidate, ...]
     referenced: set[Path]
     known_subdirs: frozenset[str]
-    manifest_errors: dict[str, str]
+    manifest_errors: dict[str, ProviderError]
     resolve_error: str | None
     scan_error: str | None
     lock_problem: str | None
@@ -372,7 +370,9 @@ class _Build:
         )
 
 
-def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str | None]:
+def _reference_set(
+    root: Path,
+) -> tuple[set[Path], set[str], dict[str, ProviderError], str | None]:
     """Compute the version directories in use and the subdirs datasets declare.
 
     Returns
@@ -385,13 +385,11 @@ def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str
         a directory no manifest references. Either error field being set means
         the reference set is incomplete.
     """
-    from fwl_io.manifest import _discover
-
-    providers, manifest_errors = _discover()
+    discovery = _discover_all()
     referenced: set[Path] = set()
     known_subdirs: set[str] = set()
     resolve_error: str | None = None
-    for provider_datasets in providers.values():
+    for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             known_subdirs.add(ds.subdir)
             if ds.zenodo is None:
@@ -402,8 +400,8 @@ def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str
                 # One unresolvable pin makes the whole reference set a subset of
                 # the truth, so the run must refuse to delete; record it and stop.
                 resolve_error = f'{ds.key}: {exc}'
-                return referenced, known_subdirs, dict(manifest_errors), resolve_error
-    return referenced, known_subdirs, dict(manifest_errors), resolve_error
+                return referenced, known_subdirs, dict(discovery.errors), resolve_error
+    return referenced, known_subdirs, dict(discovery.errors), resolve_error
 
 
 def _scan(

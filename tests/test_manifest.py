@@ -40,6 +40,62 @@ def _write(tmp_path, text):
     return path
 
 
+@pytest.mark.parametrize(
+    ('kind', 'verdict'),
+    [
+        (manifest.ErrorKind.CONFLICT, 'NOT USED'),
+        (manifest.ErrorKind.LOAD_FAILURE, 'FAILED TO LOAD'),
+    ],
+)
+def test_a_provider_error_names_its_verdict_by_kind(kind, verdict):
+    """A conflict reads ``NOT USED`` and a load failure ``FAILED TO LOAD``, the labels every
+    report prints."""
+    assert manifest.ProviderError(kind, 'why').verdict == verdict
+
+
+def test_a_provider_error_prints_as_its_message_and_every_kind_has_a_label():
+    """``str()`` and an f-string give the message, as when the reports held strings, and no
+    kind lacks a label."""
+    error = manifest.ProviderError(manifest.ErrorKind.CONFLICT, 'two claim x')
+    assert str(error) == f'{error}' == 'two claim x'
+    assert set(manifest._VERDICTS) == set(manifest.ErrorKind)
+
+
+@pytest.mark.parametrize('report', ['CheckReport', 'RelocationReport', 'PruneReport'])
+def test_a_report_labels_a_conflict_and_a_load_failure_each_by_its_kind(report):
+    """One summary with both kinds prints each provider under its own label."""
+    import fwl_io
+
+    errors = {
+        'a': manifest.ProviderError(manifest.ErrorKind.CONFLICT, 'claims x'),
+        'b': manifest.ProviderError(manifest.ErrorKind.LOAD_FAILURE, 'no file'),
+    }
+    lines = getattr(fwl_io, report)(manifest_errors=errors).summary().splitlines()
+    assert 'a: MANIFEST NOT USED, claims x' in lines
+    assert 'b: MANIFEST FAILED TO LOAD, no file' in lines
+
+
+def test_the_report_classes_resolve_their_provider_error_type():
+    """The reports name ``ProviderError`` in their annotations, importable from the package
+    and resolvable at runtime."""
+    import typing
+
+    import fwl_io
+    from fwl_io.pins import MirrorReport
+
+    for report in (fwl_io.CheckReport, fwl_io.RelocationReport, fwl_io.PruneReport, MirrorReport):
+        hints = typing.get_type_hints(report)
+        assert hints['manifest_errors'] == dict[str, fwl_io.ProviderError]
+    assert fwl_io.ErrorKind.CONFLICT is manifest.ErrorKind.CONFLICT
+    assert {'ProviderError', 'ErrorKind'} <= set(fwl_io.__all__)
+
+
+def _discover():
+    """Return discovery as ``(datasets per provider, message per provider left out)``."""
+    result = manifest._discover_all()
+    return result.found, {name: error.message for name, error in result.errors.items()}
+
+
 def _load_failure(message):
     return manifest.ProviderError(manifest.ErrorKind.LOAD_FAILURE, message)
 
@@ -661,7 +717,7 @@ def test_two_providers_claiming_one_location_are_dropped_and_reported(tmp_path, 
     """Providers that declare one location leave discovery; the rest stay loaded."""
     _colliding_providers(tmp_path, monkeypatch)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert set(found) == {'package-c'}, 'only the provider with no contested location stays'
     assert set(errors) == {'package-a', 'package-b'}, 'one error per dropped provider'
     for provider, message in errors.items():
@@ -728,7 +784,7 @@ def test_case_only_difference_across_providers_conflicts(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     # Without the case fold the two locations would look distinct and both load.
     assert found == {}
     assert set(errors) == {'lower-pkg', 'upper-pkg'}
@@ -743,7 +799,7 @@ def test_three_providers_claiming_one_location_are_all_named(tmp_path, monkeypat
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     assert set(errors) == {'package-a', 'package-b', 'package-c'}
     for message in errors.values():
@@ -759,7 +815,7 @@ def test_provider_with_one_contested_location_is_dropped_whole(tmp_path, monkeyp
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     assert set(errors) == {'package-a', 'package-b'}
 
@@ -776,7 +832,7 @@ def test_providers_linked_only_through_a_middle_provider_are_all_dropped(tmp_pat
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     assert set(errors) == {'package-a', 'package-b', 'package-c'}
 
@@ -815,7 +871,7 @@ def test_check_for_a_model_that_needs_a_dropped_dataset_reports_the_conflict(tmp
 
     report = check_for('othermodel', data_root=tmp_path / 'data')
     assert set(report.manifest_errors) == {'package-a', 'package-b'}
-    assert 'interior_lookup_tables/demo_eos' in report.manifest_errors['package-a']
+    assert 'interior_lookup_tables/demo_eos' in report.manifest_errors['package-a'].message
     assert report.datasets == {}
     assert not report.ok
 
@@ -930,9 +986,11 @@ def test_duplicate_entry_point_name_drops_every_provider_with_it(tmp_path, monke
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert set(found) == {'other'}
     assert len(errors) == 2, 'one error per dropped provider'
+    kinds = {error.kind for error in manifest._discover_all().errors.values()}
+    assert kinds == {manifest.ErrorKind.CONFLICT}
     for message in errors.values():
         assert 'mors-data' in message and 'proteus-data' in message
         assert 'uninstall or pin' in message
@@ -961,7 +1019,7 @@ def test_a_duplicate_entry_point_name_logs_a_warning_per_dropped_provider(
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
     with caplog.at_level('WARNING', logger='fwl.fwl_io.manifest'):
-        manifest._discover()
+        _discover()
 
     warnings = [r.message for r in caplog.records if r.levelname == 'WARNING']
     assert any('mors-data' in m for m in warnings)
@@ -982,7 +1040,7 @@ def test_three_entries_with_one_name_are_all_dropped_and_named(tmp_path, monkeyp
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     assert len(errors) == 3, 'one error per dropped entry'
     for message in errors.values():
@@ -1010,7 +1068,7 @@ def test_duplicate_name_without_metadata_still_says_which_entries_collided(tmp_p
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     for message in errors.values():
         assert 'first_pkg.data:manifest_path' in message
@@ -1039,7 +1097,7 @@ def test_one_package_registering_a_name_twice_is_not_called_two_packages(tmp_pat
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     assert len(errors) == 2, 'both entries are reported even though they share a package'
     for message in errors.values():
@@ -1064,7 +1122,7 @@ def test_duplicate_name_message_does_not_depend_on_entry_point_order(tmp_path, m
     messages = []
     for ordered in (eps, eps[::-1]):
         monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group, e=ordered: e)
-        _, errors = manifest._discover()
+        _, errors = _discover()
         messages.append(sorted(set(errors.values())))
     assert messages[0] == messages[1]
     assert len(messages[0]) == 1
@@ -1153,7 +1211,7 @@ def test_two_broken_providers_with_one_name_are_both_reported(tmp_path, monkeypa
     ]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
-    found, errors = manifest._discover()
+    found, errors = _discover()
     assert found == {}
     # A shared key would keep only the later message and hide the first failure.
     assert sorted(errors.values()) == ['first is broken', 'second is broken']

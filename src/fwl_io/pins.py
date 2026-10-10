@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from fwl_io.manifest import Dataset, _discover
+from fwl_io.manifest import Dataset, ProviderError, _discover_all
 from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
@@ -46,13 +46,13 @@ class UnknownServer(Exception):
 @dataclass
 class MirrorReport:
     """Outcome of :func:`check_mirrors`: passed, failed, unreachable and unpinned datasets,
-    the manifests that failed to load, and warnings for reads that needed a retry."""
+    the manifests left out of discovery, and warnings for reads that needed a retry."""
 
     passed: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     unreachable: dict[str, str] = field(default_factory=dict)
     unpinned: list[str] = field(default_factory=list)
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
     warnings: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -73,7 +73,10 @@ class MirrorReport:
 
     def summary(self) -> str:
         """Return a line per problem, the counts, and the unpinned datasets."""
-        lines = [f'FAIL manifest {key}: {why}' for key, why in sorted(self.manifest_errors.items())]
+        lines = [
+            f'FAIL {provider}: MANIFEST {error.verdict}, {error.message}'
+            for provider, error in sorted(self.manifest_errors.items())
+        ]
         lines += [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
         lines += [f'UNREACHABLE {key}: {why}' for key, why in sorted(self.unreachable.items())]
         lines += [f'WARNING {key}: {note}' for key, note in sorted(self.warnings.items())]
@@ -81,7 +84,7 @@ class MirrorReport:
             f'pins served by their mirror: {len(self.passed)}, wrong: {len(self.failed)}, '
             f'not checked (could not be read): {len(self.unreachable)}, '
             f'datasets without a pin: {len(self.unpinned)}, '
-            f'manifests that failed to load: {len(self.manifest_errors)}'
+            f'manifests left out: {len(self.manifest_errors)}'
         )
         lines += [f'unpinned {key}' for key in sorted(self.unpinned)]
         return '\n'.join(lines)
@@ -301,7 +304,7 @@ def check_mirrors(
         server of its DOI (:func:`dataverse_server`), with one client per server.
     datasets : list of Dataset, optional
         Datasets to check; defaults to those of every installed manifest, and a manifest
-        that fails to load is reported in ``manifest_errors``.
+        left out of discovery is reported in ``manifest_errors``.
 
     Returns
     -------
@@ -311,9 +314,9 @@ def check_mirrors(
     """
     report = MirrorReport()
     if datasets is None:
-        found, errors = _discover()
-        datasets = [ds for group in found.values() for ds in group]
-        report.manifest_errors.update(errors)
+        discovery = _discover_all()
+        datasets = [ds for group in discovery.found.values() for ds in group]
+        report.manifest_errors.update(discovery.errors)
     clients: dict[str, DataverseClient] = {}
     outcomes: dict[str, dict[str, int] | Exception] = {}
     notes: list[str] = []

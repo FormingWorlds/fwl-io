@@ -13,7 +13,9 @@ from fwl_io.check import CheckReport, DatasetCheck, FileCheck, check_dataset, ch
 from fwl_io.fetch import DownloadError, Fetcher, OfflineDataError, create_fetcher
 from fwl_io.manifest import (
     Dataset,
+    ErrorKind,
     ManifestSchemaError,
+    ProviderError,
     discover_manifests,
     fetch_for,
     load_manifest,
@@ -38,11 +40,13 @@ __all__ = [
     'Dataset',
     'DatasetCheck',
     'DownloadError',
+    'ErrorKind',
     'FileCheck',
     'Fetcher',
     'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
+    'ProviderError',
     'PruneCandidate',
     'PruneReport',
     'Relocation',

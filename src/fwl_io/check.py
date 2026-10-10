@@ -32,6 +32,7 @@ from pathlib import Path
 
 from fwl_io.fetch import Fetcher, create_fetcher
 from fwl_io.fs_guard import _is_regular_file
+from fwl_io.manifest import ProviderError, _discover_all
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -135,15 +136,14 @@ class CheckReport:
     it could not be read or conflicts with another installed manifest, so nothing
     it declares was inspected. A dataset error means the
     manifest was fine but that one dataset could not be resolved, most often
-    because its registry has never been generated. ``conflict_providers`` names
-    which of ``manifest_errors`` was a conflict rather than a load failure, so
+    because its registry has never been generated. Each manifest error is a
+    ``ProviderError``, whose ``kind`` tells a conflict from a load failure, so
     the summary can tell a caller which repair applies.
     """
 
     datasets: dict[str, DatasetCheck] = field(default_factory=dict)
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
     dataset_errors: dict[str, str] = field(default_factory=dict)
-    conflict_providers: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def ok(self) -> bool:
@@ -193,10 +193,7 @@ class CheckReport:
         """A short human-readable report, one line per dataset plus a verdict."""
         lines = [d.summary() for d in sorted(self.datasets.values(), key=lambda d: d.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            if provider in self.conflict_providers:
-                lines.append(f'{provider}: MANIFEST NOT USED, {error}')
-            else:
-                lines.append(f'{provider}: MANIFEST FAILED TO LOAD, {error}')
+            lines.append(f'{provider}: MANIFEST {error.verdict}, {error.message}')
         for key, error in sorted(self.dataset_errors.items()):
             lines.append(f'{key}: NOT CHECKED, {error}')
         if not lines:
@@ -317,17 +314,10 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
         Keyed by dataset, alongside the manifests that were left out and
         the datasets that could not be resolved.
     """
-    from fwl_io.manifest import ErrorKind, _discover_all
-
     model = model.lower()
     datasets: dict[str, DatasetCheck] = {}
     dataset_errors: dict[str, str] = {}
     discovery = _discover_all()
-    provider_errors = discovery.errors_for(model)
-    manifest_errors = {name: error.message for name, error in provider_errors.items()}
-    conflict_providers = frozenset(
-        name for name, error in provider_errors.items() if error.kind is ErrorKind.CONFLICT
-    )
     for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             if model not in tuple(r.lower() for r in ds.required_by):
@@ -347,7 +337,6 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
                 log.warning('cannot check dataset %r: %s', ds.key, exc)
     return CheckReport(
         datasets=datasets,
-        manifest_errors=manifest_errors,
+        manifest_errors=discovery.errors_for(model),
         dataset_errors=dataset_errors,
-        conflict_providers=conflict_providers,
     )

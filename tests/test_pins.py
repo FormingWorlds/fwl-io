@@ -15,7 +15,14 @@ import requests
 
 from fwl_io import pins
 from fwl_io.cli import main
-from fwl_io.manifest import Dataset, load_manifest, shared_manifest_path
+from fwl_io.manifest import (
+    Dataset,
+    ErrorKind,
+    ProviderError,
+    _Discovery,
+    load_manifest,
+    shared_manifest_path,
+)
 from fwl_io.mirror import (
     DataverseClient,
     DataverseError,
@@ -28,6 +35,8 @@ from fwl_io.pins import MirrorReport, Unreachable, check_mirrors, pin_problem, z
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
 
+_UNREAD = ProviderError(ErrorKind.LOAD_FAILURE, 'x')
+_CONFLICT = ProviderError(ErrorKind.CONFLICT, 'x')
 MD5_A = 'md5:' + 'a' * 32
 MD5_B = 'md5:' + 'b' * 32
 SOURCE = '10.5281/zenodo.1'
@@ -415,7 +424,7 @@ def test_an_outage_after_a_found_problem_still_reports_it(tmp_path):
 
 def _patch(monkeypatch, found, errors=None, client=None, seen=None):
     """Serve ``found`` as the installed datasets; return the client made for each URL."""
-    monkeypatch.setattr(pins, '_discover', lambda: ({'m': found}, errors or {}))
+    monkeypatch.setattr(pins, '_discover_all', lambda: _Discovery({'m': found}, errors or {}))
     made = {}
 
     def make(url, token):
@@ -430,23 +439,31 @@ def _patch(monkeypatch, found, errors=None, client=None, seen=None):
 
 def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
     """Pins pass or fail, a dataset with a missing registry fails without stopping the run,
-    a manifest that fails to load is a failure, and unpinned datasets are only listed."""
+    a manifest left out is a failure labelled by its kind, and unpinned datasets are only
+    listed."""
     good = _dataset(tmp_path, 'group.good')
     bad = _dataset(tmp_path, 'group.bad', files={'b.dat': MD5_B})
     broken = _dataset(tmp_path, 'group.broken')
     broken.registry_path.unlink()
     loose = _dataset(tmp_path, 'group.loose', pin=None)
-    _patch(monkeypatch, [good, bad, broken, loose], errors={'other': 'cannot load'})
+    errors = {
+        'other': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load'),
+        'twin': ProviderError(ErrorKind.CONFLICT, 'claims a taken location'),
+    }
+    _patch(monkeypatch, [good, bad, broken, loose], errors=errors)
     report = check_mirrors('https://example.org')
     assert report.passed == ['group.good'] and report.unpinned == ['group.loose']
     assert sorted(report.failed) == ['group.bad', 'group.broken']
-    assert report.manifest_errors == {'other': 'cannot load'}
+    assert report.manifest_errors == errors
     assert report.failed['group.broken'].startswith('FileNotFoundError')
     assert not report.ok
-    assert report.summary().splitlines()[0] == 'FAIL manifest other: cannot load'
+    assert report.summary().splitlines()[:2] == [
+        'FAIL other: MANIFEST FAILED TO LOAD, cannot load',
+        'FAIL twin: MANIFEST NOT USED, claims a taken location',
+    ]
     assert report.summary().splitlines()[-2:] == [
         'pins served by their mirror: 1, wrong: 2, not checked (could not be read): 0, '
-        'datasets without a pin: 1, manifests that failed to load: 1',
+        'datasets without a pin: 1, manifests left out: 2',
         'unpinned group.loose',
     ]
 
@@ -509,7 +526,8 @@ def test_check_mirrors_command_exits_by_the_verdict(
     ('report', 'code'),
     [
         (MirrorReport(passed=['a'], failed={'b': 'x'}, unreachable={'c': 'y'}), 1),
-        (MirrorReport(passed=['a'], manifest_errors={'m': 'x'}, unreachable={'c': 'y'}), 1),
+        (MirrorReport(passed=['a'], manifest_errors={'m': _UNREAD}, unreachable={'c': 'y'}), 1),
+        (MirrorReport(passed=['a'], manifest_errors={'m': _CONFLICT}), 1),
         (MirrorReport(passed=['a'], unreachable={'c': 'y'}), 3),
         (MirrorReport(unreachable={'c': 'y'}), 4),
         (MirrorReport(unpinned=['d']), 1),
