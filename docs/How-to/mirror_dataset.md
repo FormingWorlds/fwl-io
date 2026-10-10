@@ -1,18 +1,22 @@
 # Mirror a deposit to Dataverse
 
-Zenodo is the primary source of every dataset. DataverseNL is a download mirror: the second link in the fetch fallback chain, so a dataset stays reachable when Zenodo is unavailable. This guide covers mirroring one pinned Zenodo deposit into the Proteus Framework collection.
+Zenodo is the primary source of every dataset. DataverseNL is a download mirror: the second link in the fetch fallback chain, so a dataset stays reachable when Zenodo is unavailable. This guide covers mirroring one pinned Zenodo deposit into the Proteus Framework collection. It is written for the maintainer who runs the workflows; a dataset owner who needs a mirror starts at [A mirror for my dataset](update_dataset.md#a-mirror-for-my-dataset).
 
 ## When to mirror
 
-Mirror a dataset once its Zenodo version DOI is pinned in a manifest and you want a second download source for it. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror.
+Mirror a version of a Zenodo record that a manifest pins, or will pin, when you want a second download source for it. The record must be an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)); the mirror needs only its version DOI. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror. A mirror is a copy of one Zenodo version: a new version of the record needs a new mirror dataset and a new pin (see [What happens to the mirror](update_dataset.md#what-happens-to-the-mirror)).
 
 ## Running the mirror
 
-Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a protected environment secret that lives only in CI, so no one needs personal upload rights to the collection; who may run the workflow is the access control.
+Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a secret of the `dataverse` environment that lives only in CI, so no one needs personal upload rights to the collection.
+
+**Approval.** Each workflow that holds the token runs in the `dataverse` environment, and a run waits until a maintainer (a member of the team `proteus-maintainer`) approves it: open the run in the **Actions** tab, select **Review deployments**, tick `dataverse`, and select **Approve and deploy**. A maintainer can approve a run that they started.
+
+A record that is not an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)) stops the run before a Dataverse write, also in a dry run, with a message that names the two communities.
 
 1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
-2. Leave **publish** checked to publish the dataset (its files become downloadable), or uncheck it to create a private draft you inspect first. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
-3. The run prints the Dataverse DOI. Add it to the dataset's manifest entry, then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
+2. Leave **publish** unchecked: the run then creates a private draft, which you inspect and publish with the [**Publish an existing Dataverse draft** workflow](#publishing-a-reviewed-draft). Check **publish** only for a deposit that needs no review: the run then publishes the dataset, and its files become downloadable. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
+3. The run prints the Dataverse DOI. Once the dataset is published, write the DOI into the dataset request; the dataset owner adds it to the dataset's manifest entry (or you do, for a dataset of your own), then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
 
     ```toml
     [star.tracks.baraffe_2015]
@@ -33,6 +37,14 @@ The run logs the DOI of the dataset it creates. The dataset creation is not repe
 ## Publishing a reviewed draft
 
 A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published. If the dataset is not RELEASED after its publish request, the run stops with an error saying the publish was not confirmed: check the dataset's state on DataverseNL before running it again.
+
+**The check before a publish.** The mirror writes one line into the description of the draft, the source note:
+
+```text
+Mirror of Zenodo deposit 10.5281/zenodo.<record-id>. Zenodo is the primary source.
+```
+
+Do not edit or remove that line in a draft. Before it publishes, the run reads the description, takes every DOI that follows the words "Mirror of Zenodo deposit", and reads that record from Zenodo. It publishes only when the description names exactly one DOI in this way, Zenodo serves it as a version record, and the record is an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)). Each other case stops the run with its own message, and nothing is published. Only a draft is published: a dataset that is published already gives "already published" before this check, and a dataset in another state (deaccessioned, or a reply without a state) is refused with the state that was found. The check reads the description of the draft, not its files.
 
 ## What the mirror does
 

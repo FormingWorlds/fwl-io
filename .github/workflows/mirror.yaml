@@ -1,9 +1,8 @@
 name: Mirror a Zenodo deposit to Dataverse
 
-# Manually triggered: a maintainer runs this to mirror one pinned Zenodo
-# deposit into the Proteus Framework collection on DataverseNL. The Dataverse
-# API token is a protected environment secret, so it lives only in CI and is
-# never distributed; access is controlled by who may run this workflow.
+# Manually triggered: mirrors one pinned Zenodo deposit into the Proteus Framework collection
+# on DataverseNL. The API token is a secret of the dataverse environment and lives only in
+# CI; a run needs an approval (docs: How-to/mirror_dataset, Approval).
 
 on:
   workflow_dispatch:
@@ -32,9 +31,9 @@ on:
         type: boolean
         default: false
       publish:
-        description: "Publish the created dataset (uncheck to leave it a draft)"
+        description: "Publish the created dataset (unchecked: leave it a draft to review)"
         type: boolean
-        default: true
+        default: false
 
 # Runs with the same into value (or the same Zenodo DOI) wait for each other; a second
 # pending run replaces the first, and other spellings of one DOI are not grouped.
@@ -79,4 +78,4 @@ jobs:
             --contact-email "${DATAVERSE_CONTACT_EMAIL}" \
             "${file_args[@]}" \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
-            ${{ inputs.publish && '' || '--no-publish' }}
+            ${{ !inputs.publish && '--no-publish' || '' }}

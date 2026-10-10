@@ -37,7 +37,13 @@ from pathlib import Path
 
 import requests
 
-from fwl_io.sync import ZENODO_API, fetch_zenodo_record, zenodo_record_id
+from fwl_io.sync import (
+    ZENODO_API,
+    ZENODO_COMMUNITIES,
+    fetch_zenodo_record,
+    in_community,
+    zenodo_record_id,
+)
 from fwl_io.transient import is_cert_failure
 
 log = logging.getLogger('fwl.' + __name__)
@@ -163,15 +169,30 @@ def _creators_to_authors(creators: list[dict]) -> list[dict]:
     return authors or [{'authorName': _primitive('authorName', 'Unknown')}]
 
 
+_NOTE = 'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
+# The words of the note before the DOI, as a pattern that takes any spacing.
+_NOTE_HEAD = r'\s+'.join(map(re.escape, _NOTE.split('{doi}')[0].split())) + r'\s+'
+
+
 def source_note(doi: str) -> str:
     """Return the description line that names a mirror's Zenodo source DOI."""
-    return f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
+    return _NOTE.format(doi=doi)
 
 
 def names_source(text: str, doi: str) -> bool:
     """Return whether ``text`` holds the :func:`source_note` of ``doi`` (any case or spacing)."""
-    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(doi) + r'(?!\d)'
-    return re.search(note, text, re.IGNORECASE) is not None
+    return re.search(_NOTE_HEAD + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
+
+
+def _outside(recid: str) -> str:
+    """Return the refusal text for a Zenodo record outside the communities of the framework."""
+    return (
+        f'Zenodo record {recid} is not an accepted record of a Zenodo community of the '
+        f'framework ({" or ".join(ZENODO_COMMUNITIES)}), and fwl-io mirrors only such records. '
+        'When the record is submitted to the community, wait until a maintainer accepts it; '
+        'when it is not, open a dataset request: '
+        'https://proteus-framework.org/fwl-io/How-to/add_dataset/'
+    )
 
 
 def zenodo_record_to_citation(
@@ -520,6 +541,16 @@ class DataverseClient:
         )
         return True
 
+    def _dataset(self, persistent_id: str) -> dict:
+        """Return the data block of a dataset, read with the retries."""
+        body = self._retry(
+            lambda: self._request(
+                'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
+            ),
+            f'state of {persistent_id}',
+        )
+        return body.get('data') or {}
+
     def _released(self, persistent_id: str) -> bool:
         """Return whether the dataset's latest version is published."""
         body = self._request(
@@ -568,13 +599,7 @@ class DataverseClient:
         """
 
         def dataset():
-            body = self._retry(
-                lambda: self._request(
-                    'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
-                ),
-                f'state of {persistent_id}',
-            )
-            return body.get('data') or {}
+            return self._dataset(persistent_id)
 
         reply = dataset()
         dataset_id = reply.get('id')
@@ -795,13 +820,7 @@ def _check_own_draft(client: DataverseClient, persistent_id: str, zenodo_doi: st
     DataverseError
         If the dataset was ever published, or its description lacks the source note.
     """
-    body = client._retry(
-        lambda: client._request(
-            'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
-        ),
-        f'state of {persistent_id}',
-    )
-    data = body.get('data') or {}
+    data = client._dataset(persistent_id)
     version = data.get('latestVersion') or {}
     released = data.get('publicationDate') or version.get('versionNumber') is not None
     if version.get('versionState') != 'DRAFT' or released:
@@ -1048,7 +1067,8 @@ def mirror_to_dataverse(
     ValueError
         If ``into`` comes with ``dry_run`` or ``publish``, or ``licence`` with ``into``,
         ``dry_run`` or ``publish``, or ``zenodo_doi`` is malformed or is a concept DOI (a
-        version DOI is required), if a real create is requested without a contact email, if the
+        version DOI is required), if the record is not an accepted record of the Zenodo
+        community of the framework, if a real create is requested without a contact email, if the
         Zenodo record lists no files, if ``files`` names a file the record does
         not contain or selects none of them, or if a file name nests below the
         dataset directory (Dataverse flattens on the basename, so it would
@@ -1115,6 +1135,8 @@ def mirror_to_dataverse(
 
     recid = zenodo_record_id(zenodo_doi)
     record = fetch_zenodo_record(zenodo_doi, api_base=api_base)
+    if not in_community(record):
+        raise ValueError(_outside(recid))
     from fwl_io.sync import _extract_files
 
     registry = _extract_files(record)
@@ -1261,14 +1283,47 @@ def mirror_to_dataverse(
     return persistent_id
 
 
+def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: str) -> None:
+    """Refuse the publish of a dataset that is not a draft, of a draft whose description
+    does not name exactly one Zenodo DOI in a source note, and of one whose record is not
+    read or is outside the communities of the framework."""
+    version = client._dataset(persistent_id).get('latestVersion') or {}
+    state = version.get('versionState')
+    if state == 'RELEASED':
+        raise DataverseAlreadyPublished(f'{persistent_id} is already published')
+    if state != 'DRAFT':
+        raise DataverseError(f'{persistent_id} is in the state {state!r}, not DRAFT; not published')
+    text = descriptions(version)
+    named = {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
+    if len(named) != 1:
+        raise DataverseError(
+            f'{persistent_id} names {len(named)} Zenodo records as its source, not 1; not published'
+        )
+    doi = named.pop()
+    try:
+        record = fetch_zenodo_record(doi, api_base=api_base)
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        raise DataverseError(
+            f'{doi}, the source of {persistent_id}, was not read as a Zenodo version record '
+            f'({exc}); not published'
+        ) from exc
+    if not in_community(record):
+        raise ValueError(_outside(zenodo_record_id(doi)))
+
+
 def publish_existing_dataverse_draft(
     persistent_id: str,
     *,
     dataverse_url: str,
     token: str,
     version_type: str = 'major',
+    api_base: str = ZENODO_API,
 ) -> None:
     """Publish an existing Dataverse draft dataset by its persistent id.
+
+    Before the publish, the Zenodo record that the description of the draft names is read:
+    a draft that names none or several, or whose record is not an accepted record of a
+    community of the framework, is not published.
 
     This never calls :meth:`DataverseClient.create_dataset`, so it cannot
     mint a duplicate dataset: it is the second step of a create-draft ->
@@ -1287,17 +1342,21 @@ def publish_existing_dataverse_draft(
         Dataverse API token.
     version_type : str
         Dataverse publish version bump: ``'major'`` or ``'minor'``.
+    api_base : str
+        Zenodo records API base, for the read of the source record.
 
     Raises
     ------
     ValueError
         If ``persistent_id`` is not of the form ``'doi:<prefix>/<suffix>'``,
-        or ``version_type`` is not ``'major'`` or ``'minor'``.
+        ``version_type`` is not ``'major'`` or ``'minor'``, or the source record of the
+        draft is not an accepted record of a community of the framework.
     DataverseAlreadyPublished
         If the dataset is already published before the publish request.
     DataverseError
-        If the dataset does not exist or Dataverse rejects the publish request
-        with a 4xx status.
+        If the dataset does not exist, its latest version is not a draft, its description
+        does not name exactly one Zenodo record, that record could not be read, or
+        Dataverse rejects the publish request with a 4xx status.
     DataversePublishUnconfirmed
         If the dataset is not RELEASED after the wait that follows the publish
         request, or every attempt got the bot-check page or a 429; check the
@@ -1320,5 +1379,6 @@ def publish_existing_dataverse_draft(
             "'doi:<prefix>/<suffix>'"
         )
     client = DataverseClient(dataverse_url, token)
+    _check_draft_source(client, persistent_id, api_base)
     client.publish(persistent_id, version_type=version_type)
     log.info('published %s', persistent_id)
