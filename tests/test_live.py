@@ -13,7 +13,7 @@ import requests
 
 from fwl_io.manifest import load_manifest, shared_manifest_path
 from fwl_io.sync import (
-    ZENODO_COMMUNITY,
+    ZENODO_COMMUNITIES,
     fetch_zenodo_record,
     fetch_zenodo_registry,
     in_community,
@@ -48,8 +48,17 @@ def _record(doi, tries=4):
     return fetch_zenodo_record(doi)
 
 
-def test_shared_manifest_records_are_in_the_zenodo_community():
-    """Every record that the shared manifest pins is an accepted record of the community."""
-    records = {ds.zenodo for ds in load_manifest(shared_manifest_path())}
-    outside = sorted(doi for doi in records if not in_community(_record(doi)))
-    assert not outside, f'not in the Zenodo community {ZENODO_COMMUNITY}: {outside}'
+def test_shared_manifest_records_are_in_a_zenodo_community():
+    """Every record that the shared manifest pins is an accepted record of a community of
+    the framework. Every record is read before the test fails."""
+    records = sorted({ds.zenodo for ds in load_manifest(shared_manifest_path())})
+    assert records, 'the shared manifest declares no datasets'
+    outside, unread = [], []
+    for doi in records:
+        try:
+            if not in_community(_record(doi)):
+                outside.append(doi)
+        except requests.RequestException as exc:
+            unread.append(f'{doi} ({exc})')
+    assert not outside, f'not in a Zenodo community of {ZENODO_COMMUNITIES}: {outside}'
+    assert not unread, f'not read after the retries: {unread}'

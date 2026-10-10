@@ -23,4 +23,4 @@ jobs:
       - name: Install package
         run: pip install -e ".[develop]"
       - name: Check the Zenodo community of each record
-        run: pytest tests/test_live.py::test_shared_manifest_records_are_in_the_zenodo_community
+        run: pytest tests/test_live.py::test_shared_manifest_records_are_in_a_zenodo_community

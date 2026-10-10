@@ -135,20 +135,37 @@ def test_sync_manifest_rejects_a_listed_file_the_record_lacks(http_server, tmp_p
     assert not (tmp_path / 'g.demo.registry.txt').exists()
 
 
+def _listed(*entries):
+    return {'metadata': {'communities': list(entries)}}
+
+
 @pytest.mark.parametrize(
     ('record', 'expected'),
     [
-        ({'metadata': {'communities': [{'id': 'proteus_framework'}]}}, True),
-        ({'metadata': {'communities': [{'id': 'other'}, {'id': 'proteus_framework'}]}}, True),
-        ({'metadata': {'communities': [{'id': 'other'}]}}, False),
-        ({'metadata': {'communities': []}}, False),
+        (_listed({'id': 'proteus_framework'}), True),
+        (_listed({'id': 'paleos'}), True),
+        (_listed({'id': 'other'}, {'id': 'proteus_framework'}), True),
+        (_listed('proteus_framework', None, 7, {'id': 'paleos'}), True),
+        (_listed({'id': 'other'}), False),
+        (_listed({'id': 'proteus_framework_sandbox'}), False),
+        (_listed({'id': 'PROTEUS_FRAMEWORK'}), False),
+        (_listed('proteus_framework'), False),
+        (_listed({'slug': 'paleos'}), False),
+        (_listed(), False),
+        ({'metadata': {'communities': {'id': 'paleos'}}}, False),
+        ({'metadata': {'communities': 'paleos'}}, False),
+        ({'metadata': ['paleos']}, False),
         ({'metadata': {}}, False),
         ({}, False),
+        (None, False),
     ],
 )
-def test_a_record_is_in_the_community_only_when_its_metadata_lists_it(record, expected):
-    """The community of the framework must be in ``metadata.communities`` of the record."""
-    from fwl_io.sync import ZENODO_COMMUNITY, in_community
+def test_a_record_is_in_a_community_only_when_its_metadata_lists_one_by_its_exact_id(
+    record, expected
+):
+    """One of the two communities must be an entry of ``metadata.communities`` with that
+    exact id; an entry or a record of another form is no match and no error."""
+    from fwl_io.sync import ZENODO_COMMUNITIES, in_community
 
-    assert ZENODO_COMMUNITY == 'proteus_framework'
+    assert ZENODO_COMMUNITIES == ('proteus_framework', 'paleos')
     assert in_community(record) is expected
