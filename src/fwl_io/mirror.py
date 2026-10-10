@@ -1094,7 +1094,9 @@ def mirror_to_dataverse(
         dataset directory (Dataverse flattens on the basename, so it would
         collide), or if the record lists no license or several, or its license
         matches no license the Dataverse server lists, or more than one; all
-        before the draft is created.
+        before the draft is created. A ``ValueError`` after the draft exists
+        leaves as a ``DataverseError`` that names the draft, so a ``ValueError``
+        means that nothing was created.
     DataverseError
         If a Dataverse native-API request fails: the server rejects it (for
         example an unknown subject in the citation metadata), the HTTP transport
@@ -1280,10 +1282,12 @@ def mirror_to_dataverse(
             message = f'{persistent_id} is kept as a draft ({found}); {advice} ({exc})'
             log.error('%s', message)
             raise MirrorIncomplete(message, persistent_id, state) from exc
+        outcome = 'was deleted again'
         try:
             client.delete_draft(persistent_id)
             log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)
         except Exception as cleanup_exc:  # noqa: BLE001 -- surface, do not mask the original
+            outcome = 'could not be deleted: delete it by hand'
             log.error(
                 'could not roll back draft %s (delete it manually): %s',
                 persistent_id,
@@ -1292,6 +1296,10 @@ def mirror_to_dataverse(
         except BaseException:
             log.error('rollback of %s interrupted; check it by hand', persistent_id)
             raise
+        if isinstance(exc, ValueError):  # a ValueError leaves only when no draft was created
+            raise DataverseError(
+                f'draft {persistent_id} was created and {outcome} ({type(exc).__name__}: {exc})'
+            ) from exc
         raise
     except BaseException:
         if made[0] is not None:

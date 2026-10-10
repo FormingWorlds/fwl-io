@@ -1483,6 +1483,30 @@ def test_rollback_failure_does_not_mask_the_original_error(http_server, datavers
     assert any(c['method'] == 'DELETE' for c in calls)
 
 
+@pytest.mark.parametrize(
+    ('fail_on_delete', 'outcome'),
+    [(False, 'was deleted again'), (True, 'could not be deleted: delete it by hand')],
+)
+def test_a_value_error_after_the_draft_exists_leaves_as_an_error_that_names_the_draft(
+    http_server, dataverse_server, monkeypatch, fail_on_delete, outcome
+):
+    """A ValueError between the creation of the draft and its first file is not a
+    ValueError of the mirror, which means that nothing was created: it names the draft and
+    says whether the roll-back worked."""
+    monkeypatch.setattr(DataverseClient, 'set_license', lambda *args: _raise_value_error())
+    _DataverseHandler.fail_on_delete = fail_on_delete
+    with pytest.raises(
+        DataverseError, match=f'draft doi:10.34894/DEMO01 was created and {outcome}'
+    ) as e:
+        _mirror(http_server, dataverse_server)
+    assert not isinstance(e.value, ValueError) and 'ValueError: bad checksum' in str(e.value)
+    assert any(c['method'] == 'DELETE' for c in dataverse_server[1])
+
+
+def _raise_value_error():
+    raise ValueError('bad checksum')
+
+
 def test_missing_persistent_id_is_an_error(http_server, dataverse_server):
     """A create response without a persistentId fails instead of uploading to nowhere."""
     from fwl_io.mirror import DataverseError

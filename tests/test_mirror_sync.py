@@ -460,6 +460,14 @@ def test_a_record_that_is_refused_before_a_draft_does_not_block_the_next_one(mon
         f'FAIL draft for 10.5281/zenodo.{n}' for n in (1, 2, 3)
     ]
     assert _run(dry_run=True)[0][-1] == 'WOULD CREATE a draft for 10.5281/zenodo.1 (g.a)'
+    tried = []
+    orphan = DataverseError(f'draft {PID} was created and could not be deleted: delete it by hand')
+    monkeypatch.setattr(
+        sync, 'mirror_to_dataverse', lambda doi, **kw: tried.append(doi) or _raise(orphan)
+    )
+    lines, code = _run()
+    assert code == 1 and tried == ['10.5281/zenodo.1'], 'a draft exists: no next record'
+    assert lines[-1] == f'FAIL draft for 10.5281/zenodo.1: DataverseError: {orphan}'
 
 
 def test_a_key_in_two_groups_gets_the_line_of_the_first_and_an_unfiled_dataset_is_named(
