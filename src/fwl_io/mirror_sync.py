@@ -290,7 +290,8 @@ def mirror_pin(
     that record is checked with :func:`fwl_io.pins.pin_problem`; one that the mirror
     serves gets the pin written into ``manifest`` (the shared manifest by default) when
     that file declares it, and otherwise a line with the pin to add in its own package.
-    Pins are written only when the exit code is 0; otherwise the file stays as it was.
+    Pins are written only when the exit code is 0; otherwise the file stays as it was,
+    unless a failed write could not be undone, which the report says.
 
     Returns
     -------
@@ -332,7 +333,7 @@ def mirror_pin(
             to_write[ds.key] = f' (was {old})' if old else ''
         else:
             lines.append(f'{ds.key} is declared by another package; add there: dataverse = "{pin}"')
-    before = manifest.read_bytes()
+    before, waits = manifest.read_bytes(), ('NOT PINNED', 'nothing is written after a FAIL')
     try:
         for key in to_write if code == 0 else ():
             write_pin(manifest, key, pin)
@@ -344,6 +345,7 @@ def mirror_pin(
                 manifest.write_bytes(before)
         except OSError as again:
             lines.append(f'FAIL {manifest.name} could not be restored, check it by hand: {again}')
+            waits = ('CHECK', f'its pin may be in {manifest.name}')
     if code:
-        return lines + [f'NOT PINNED {key}: nothing is written after a FAIL' for key in to_write], 1
+        return lines + [f'{waits[0]} {key}: {waits[1]}' for key in to_write], 1
     return lines + [f'PINNED {key} in {manifest.name}{was}' for key, was in to_write.items()], 0

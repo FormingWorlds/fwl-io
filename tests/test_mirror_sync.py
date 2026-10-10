@@ -638,11 +638,13 @@ def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp
     monkeypatch.undo()
     monkeypatch.setattr(sync, 'write_pin', _locks_after(write))
     manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
-    assert (
-        code == 1
-        and lines[0] == 'FAIL x'
-        and lines[1].startswith('FAIL manifest.toml could not be restored, check it by hand: ')
-    )
+    assert code == 1 and lines[0] == 'FAIL x' and len(lines) == 4
+    assert lines[1].startswith('FAIL manifest.toml could not be restored, check it by hand: ')
+    assert lines[2:] == [
+        'CHECK g.first: its pin may be in manifest.toml',
+        'CHECK g.third: its pin may be in manifest.toml',
+    ]
+    assert manifest.read_text().count('dataverse = "10.34894/NEWPIN"') == 1, 'g.first stayed'
     manifest.chmod(0o644)
     monkeypatch.undo()
     manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
