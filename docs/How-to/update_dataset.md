@@ -9,7 +9,7 @@ A dataset is pinned to one version of a Zenodo record and to a committed list of
 | Term | Meaning |
 | --- | --- |
 | Manifest | A TOML file in a Python package that declares datasets, one table per dataset. |
-| Dataset key | The name of that table, for example `demo.melting_curves`. It is also the place of the files below `FWL_DATA`. |
+| Dataset key | The name of that table, for example `demo.melting_curves`. It is also the place of the files below `FWL_DATA`, with a directory for each part: `demo/melting_curves`. |
 | Registry | The file `<dataset key>.registry.txt` beside the manifest, with the name and the checksum of each file. `fwl-io sync` writes it. |
 | Pin | A DOI written in the manifest. The `zenodo` line pins one version of a Zenodo record; the `dataverse` line pins one mirror. |
 | Entry point | The line in the `pyproject.toml` of a package, in the group `fwl_io.manifests`, through which fwl-io finds the manifest of that package once the package is installed. |
@@ -56,12 +56,19 @@ zenodo = "10.5281/zenodo.23278603"
     Print the manifest file of every installed package:
 
     ```bash
-    python -c "from importlib.metadata import entry_points; [print(e.name, e.load()()) for e in entry_points(group='fwl_io.manifests')]"
+    python -c "
+    from importlib.metadata import entry_points
+    for e in entry_points(group='fwl_io.manifests'):
+        try:
+            print(e.name, e.load()())
+        except Exception as exc:
+            print(e.name, 'FAILED:', exc)
+    "
     ```
 
-    Each line holds the name of an entry point and the path of its manifest; `fwl-io-shared` is the shared manifest. `fwl-io list` prints the datasets of each manifest under the same names, so it shows which manifest declares your dataset key.
+    Each line holds the name of an entry point and the path of its manifest, or `FAILED:` and the reason for a package that does not load; `fwl-io-shared` is the shared manifest. `fwl-io list` prints the datasets of each manifest under the same names, so it shows which manifest declares your dataset key.
 3. Open that manifest and replace the DOI in the `zenodo` line of your dataset with the new version DOI. When the table has a `files` line, it lists the files of the record that the dataset uses: add the name of a new file that the model needs, and remove the name of a file that the new version does not hold.
-4. Remove the `dataverse` line of that dataset ([What happens to the mirror](#what-happens-to-the-mirror) gives the reason).
+4. Remove the `dataverse` line of that dataset ([What happens to the mirror](#what-happens-to-the-mirror) gives the reason). When a mirror of the new version is published, put its DOI there in place of the old one.
 5. Regenerate the registry. Run the command in the root of the clone, with the path of the manifest from step 2:
 
     ```bash
@@ -75,7 +82,7 @@ zenodo = "10.5281/zenodo.23278603"
     - `N dataset(s) failed to sync`, with one line per dataset and its reason. The registries of the other datasets are written (`git status` shows them). When your dataset is in the list because Zenodo did not answer, run the command again. For a 404, check the record id. For a concept DOI, use the version DOI of step 1. For a name in `files` that is not in the record, correct the `files` line. A dataset of another owner in the list does not block you: its registry stays as it was.
     - One line that names your dataset and says that its `zenodo` value is not a Zenodo DOI of the form `10.5281/zenodo.<record-id>`: correct the line. No registry is written.
 6. Read the change with `git diff`. The registry of your dataset shows the files that changed and their new checksums. No other registry must change: when one does, its Zenodo record differs from what is committed, which is not part of your change. Restore that file with `git checkout -- <file>` and open an issue on the repository that holds the manifest.
-7. Fetch the dataset. `FWL_DATA` must name the directory that fwl-io downloads into ([Getting started](../getting_started.md)):
+7. Fetch the dataset. `FWL_DATA` must name the directory that fwl-io downloads into (`export FWL_DATA=/path/to/data`; [Getting started](../getting_started.md)):
 
     ```bash
     fwl-io fetch --key <dataset key>
@@ -84,7 +91,7 @@ zenodo = "10.5281/zenodo.23278603"
 
     The fetch prints `<dataset key>: N file(s)`. The path ends in `r<record-id>` with the id of the new version: each version has its own directory, and the directory of the previous version stays on disk until `fwl-io prune --delete` removes it ([CLI reference](../Reference/cli.md#fwl-io-prune)).
 
-    When Zenodo is slow, the fetch prints lines that start with `mirror failed for` and `retrying`; it tries each file up to 4 times. When it ends with `could not obtain '<file>' from any mirror`, run it again later.
+    When Zenodo is slow, the fetch prints lines that start with `mirror failed for` and `retrying`; it tries each file up to 4 times. When `retrying` lines came first and the fetch then prints `could not obtain '<file>' from any mirror`, with one line per source and its error, run it again later. Without `retrying` lines the error is permanent (a 404, or a checksum that is not the one in the registry): run `fwl-io sync` again and compare the registry.
 8. Check the files on disk against the registry, when the table of your dataset has a `required_by` line. Use one of the models that the line names:
 
     ```bash
@@ -93,7 +100,7 @@ zenodo = "10.5281/zenodo.23278603"
 
     Read the line of your dataset. It must say `<dataset key>: ok, N file(s)`, or `<dataset key>: ok, N file(s), presence only` for a dataset with an `extract` line, whose unpacked files are tested for presence and not hashed.
 
-    The command covers every dataset of the model. The other datasets are `FAILED` and the last line is `data check FAILED` unless you fetched them too, with `fwl-io fetch <model>`, which can download many gigabytes. A dataset without a `required_by` line has no check command; the fetch of step 7 has compared each file with the registry.
+    The command covers every dataset of the model. The other datasets are `FAILED` and the last line is `data check FAILED` unless you fetched them too, with `fwl-io fetch <model>`, which can download many gigabytes. The exit code 1 of such a run does not concern your dataset. A dataset without a `required_by` line has no check command; the fetch of step 7 has compared each file with the registry.
 9. Commit the manifest and the registry file together and open a pull request. It must contain:
     - the new `zenodo` DOI,
     - the regenerated registry file of that dataset, and of no other dataset,
@@ -159,7 +166,7 @@ These steps need write access to the fwl-io repository; the workflows are on its
     fwl-io check-mirrors
     ```
 
-    The command checks the pins of every installed manifest: it reads each pin from its Dataverse server and the file sizes from Zenodo. It prints one `FAIL` line per wrong pin and one `UNREACHABLE` line per pin that could not be read, then one line of counts, then the datasets without a pin; the [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists the other lines (a manifest left out, a warning). Your pin is served when no `FAIL` and no `UNREACHABLE` line names your dataset key. When your pin is `UNREACHABLE`, a server did not answer: run the command again later. It exits 0 when every pin is served, and 1 when a pin is wrong, a manifest was left out or no pin was checked. A line that names another dataset is not caused by your change.
+    The command checks the pins of every installed manifest: it reads each pin from its Dataverse server and the file sizes from Zenodo. It prints one `FAIL` line per wrong pin and one `UNREACHABLE` line per pin that could not be read, then one line of counts, then the datasets without a pin; the [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists the other lines (a manifest left out, a warning). Your pin is served when all of these hold: no `FAIL` and no `UNREACHABLE` line names your dataset key, no `FAIL` line names the entry point of your manifest (`FAIL <name>: MANIFEST ...`), and no line `unpinned <dataset key>` stands below the counts. When your pin is `UNREACHABLE`, a server did not answer: run the command again later. It exits 0 when every pin is served, 1 when a pin is wrong, a manifest was left out or no pin was checked, and 3 or 4 when no pin is wrong and a pin could not be read. A line that names another dataset is not caused by your change.
 3. Open a pull request with the manifest change on the repository that holds the manifest. The registry does not change.
 
 ## Data that a code also downloads with its own script

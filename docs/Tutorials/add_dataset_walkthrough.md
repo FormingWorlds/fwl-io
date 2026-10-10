@@ -13,7 +13,7 @@ The steps that you cannot run here are marked **Not run here**: the upload to Ze
 | Term | Meaning |
 | --- | --- |
 | Manifest | A TOML file in a Python package that declares datasets, one table per dataset. |
-| Dataset key | The name of that table, for example `demo.melting_curves`. It is also the place of the files below `FWL_DATA`. |
+| Dataset key | The name of that table, for example `demo.melting_curves`. It is also the place of the files below `FWL_DATA`, with a directory for each part: `demo/melting_curves`. |
 | Registry | The file `<dataset key>.registry.txt` beside the manifest, with the name and the checksum of each file. `fwl-io sync` writes it. |
 | Pin | A DOI written in the manifest. The `zenodo` line pins one version of a Zenodo record; the `dataverse` line pins one mirror. |
 | Entry point | The line in the `pyproject.toml` of a package, in the group `fwl_io.manifests`, through which fwl-io finds the manifest of that package once the package is installed. |
@@ -186,6 +186,8 @@ demo.melting_curves: 2 file(s)
 
 In your output, `<FWL_DATA>` is the full path of your `data` directory and `<random name>` is a temporary directory, another one for each file. Each file is downloaded there, compared with its checksum in the registry, and moved into place.
 
+When Zenodo is slow, lines that start with `mirror failed for` and `retrying` come between these lines: the fetch tries each file up to 4 times, and it passes when its last line is `demo.melting_curves: 2 file(s)`. When the fetch prints `no data root configured: set the FWL_DATA environment variable or pass an explicit data_root path`, your shell has no `FWL_DATA`: run the `export` line of step 1 in `fwl-tutorial`, then fetch again.
+
 The files are in a directory named for the Zenodo record:
 
 ```bash
@@ -196,8 +198,6 @@ ls "$FWL_DATA/demo/melting_curves/r15728072"
 liquidus.dat
 solidus.dat
 ```
-
-When Zenodo is slow, lines that start with `mirror failed for` and `retrying` come between them: the fetch tries each file up to 4 times, and it passes when its last line is the one above. When the fetch prints `no data root configured: set the FWL_DATA environment variable or pass an explicit data_root path`, your shell has no `FWL_DATA`: run the `export` line of step 1 in `fwl-tutorial`, then fetch again.
 
 Run the fetch again:
 
@@ -275,7 +275,7 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo. It takes 1 to 3 minutes. On a day with no failed read it prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo. It takes 1 to 3 minutes, and up to 10 minutes when Zenodo is slow. On a day with no failed read it prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
@@ -283,7 +283,7 @@ pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, d
 
 The first count covers the shared manifest and the demo dataset, so your number can differ.
 
-Look for the demo dataset, not at the counts. The pin of the demo dataset is served when no line that starts with `FAIL` or `UNREACHABLE` names `demo.melting_curves`. Lines for other datasets are not caused by this tutorial: an `UNREACHABLE` line means that a server did not answer for that dataset, and on a day when Zenodo is slow the shared manifest can have some. When `demo.melting_curves` itself is `UNREACHABLE`, run the command again later. The [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists every line and exit code of the command.
+Look for the demo dataset, not at the counts. The pin of the demo dataset is served when all of these hold: no line that starts with `FAIL` or `UNREACHABLE` names `demo.melting_curves`, no line starts with `FAIL demo: MANIFEST`, and no line `unpinned demo.melting_curves` stands below the counts (such a line means that the `dataverse` line is missing). Lines for other datasets are not caused by this tutorial: an `UNREACHABLE` line means that a server did not answer for that dataset, and on a day when Zenodo is slow the shared manifest can have some; the command then exits 3, which says nothing about the demo dataset. When `demo.melting_curves` itself is `UNREACHABLE`, run the command again later. The [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists every line and exit code of the command.
 
 ## 10. Open the pull request
 
@@ -295,7 +295,7 @@ Checklist for the pull request:
 - The registry file `<dataset key>.registry.txt` is committed beside the manifest, as `fwl-io sync` wrote it.
 - The package data of the package includes the manifest and the registry files (the `package-data` lines of step 3).
 - `fwl-io fetch <model>` and `fwl-io check <model>` pass on your machine.
-- The `dataverse` line is there when the mirror is published, and `fwl-io check-mirrors` prints no `FAIL` line for the dataset. A dataset without the line works, with Zenodo as its one source; the line can follow in a second pull request.
+- The `dataverse` line is there when the mirror is published, and `fwl-io check-mirrors` prints no `FAIL`, `UNREACHABLE` or `unpinned` line for the dataset. A dataset without the line works, with Zenodo as its one source; the line can follow in a second pull request.
 - The model code reads the files from the directory that fwl-io returns, not from a fixed path.
 
 After the merge, the dataset reaches users with the next release of the package.
