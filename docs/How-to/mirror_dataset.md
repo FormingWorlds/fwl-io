@@ -11,7 +11,7 @@ Mirror a dataset once its Zenodo version DOI is pinned in a manifest and you wan
 Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a protected environment secret that lives only in CI, so no one needs personal upload rights to the collection; who may run the workflow is the access control.
 
 1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
-2. Leave **publish** checked to publish the dataset (its files become downloadable), or uncheck it to create a private draft you inspect first. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
+2. Leave **publish** unchecked: the run then creates a private draft, which you inspect and publish with the [**Publish an existing Dataverse draft** workflow](#publishing-a-reviewed-draft). Check **publish** only for a deposit that needs no review: the run then publishes the dataset, and its files become downloadable. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
 3. The run prints the Dataverse DOI. Add it to the dataset's manifest entry, then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
 
     ```toml
