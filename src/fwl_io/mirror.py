@@ -362,8 +362,9 @@ class DataverseClient:
             the connection fails, times out or breaks mid-body, or a TLS error
             occurs that is not a certificate verification failure.
         DataverseError
-            If another transport error occurs, another status is 400 or
-            higher, or a non-empty successful body fails to parse as JSON or
+            If another transport error occurs, another status is 300 or
+            higher (a redirect is not followed, so the token stays on this
+            server), or a non-empty successful body fails to parse as JSON or
             parses to something other than a JSON object.
         """
         try:
@@ -372,6 +373,7 @@ class DataverseClient:
                 f'{self.base_url}{path}',
                 headers=self._headers,
                 timeout=self.timeout,
+                allow_redirects=False,
                 **kwargs,
             )
         except (
@@ -403,7 +405,7 @@ class DataverseClient:
                 float(wait) if wait.isdecimal() else None,
                 unprocessed=response.status_code == 429,
             )
-        if not response.ok:
+        if response.status_code >= 300:
             try:
                 body = response.json()
             except ValueError:

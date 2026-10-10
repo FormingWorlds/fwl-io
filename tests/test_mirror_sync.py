@@ -11,7 +11,7 @@ import pytest
 from fwl_io import mirror_sync as sync
 from fwl_io.cli import main
 from fwl_io.manifest import Dataset, ErrorKind, ProviderError, _Discovery
-from fwl_io.mirror import DataverseError, source_record
+from fwl_io.mirror import DataverseClient, DataverseError, source_record
 from fwl_io.mirror_status import StatusReport
 from fwl_io.mirror_sync import (
     collection_mirrors,
@@ -26,6 +26,7 @@ pytestmark = pytest.mark.unit
 PID = 'doi:10.34894/DRAFT1'
 NOTE = 'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
 DATA = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'}
+REGISTRY = {n: 'md5:' + hashlib.md5(d).hexdigest() for n, d in DATA.items()}
 
 
 def _ds(key, recid, pin=None, files=None):
@@ -95,27 +96,32 @@ def test_collection_mirrors_reads_every_page_and_groups_by_record():
     assert client.calls == [('/api/search', {**query, 'start': start}) for start in (0, 100)]
 
 
-def test_a_listing_that_misses_a_dataset_is_an_error():
-    """Fewer items than the count the server gives raise: a missed dataset would get a
-    second draft."""
-    client = FakeClient({'/api/search': _search(49)})
-    with pytest.raises(DataverseError, match='listing of Coll: read 149 of 150 datasets'):
+@pytest.mark.parametrize('second_page', [49, 51])
+def test_a_listing_of_another_size_than_the_server_counts_is_an_error(second_page):
+    """A listing that does not hold the count the server gives raises: a missed dataset
+    would get a second draft."""
+    client = FakeClient({'/api/search': _search(second_page)})
+    with pytest.raises(DataverseError, match=f'read {100 + second_page} of 150 datasets'):
         collection_mirrors(client, 'Coll')
 
 
-def _serve(monkeypatch, client_files, payloads=None, status=200):
-    """Serve a two-file Zenodo record and the Dataverse downloads of ``payloads`` by id."""
-    registry = {n: 'md5:' + hashlib.md5(d).hexdigest() for n, d in DATA.items()}
-    monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: registry)
+def _serve(monkeypatch, client_files, payloads=None, status=200, redirect=False):
+    """Serve a two-file Zenodo record and the Dataverse downloads of ``payloads`` by id;
+    with ``redirect``, a download path answers with a relative Location first."""
+    monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: REGISTRY)
     payloads = payloads or {
         entry['id']: DATA.get(name, b'') for name, entry in client_files.items()
     }
 
     class _Reply:
-        is_redirect = False
-
         def __init__(self, url):
-            self.status_code, self.data = status, payloads.get(int(url.rsplit('/', 1)[1]), b'')
+            file_id = url.rsplit('/', 1)[1]
+            self.status_code, self.data = status, payloads.get(int(file_id), b'')
+            self.is_redirect = redirect and '/api/access/' in url
+            self.headers = {'Location': f'/store/{file_id}'}
+
+        def close(self):
+            closed.append(self.is_redirect)
 
         def __enter__(self):
             return self
@@ -126,7 +132,8 @@ def _serve(monkeypatch, client_files, payloads=None, status=200):
         def iter_content(self, size):
             return [self.data[:2], self.data[2:]]
 
-    asked = []
+    asked, closed = [], []
+    _serve.closed = closed
     monkeypatch.setattr(
         sync.requests, 'get', lambda url, **kwargs: asked.append((url, kwargs)) or _Reply(url)
     )
@@ -140,7 +147,8 @@ def _draft(**version):
 
 def test_a_draft_with_the_bytes_of_its_record_is_verified(monkeypatch):
     """A draft with a license, the source note and both files byte for byte has no problem,
-    also for the selected file alone."""
+    also for the selected file alone and through a redirect, which is read without the
+    token."""
     client = _draft()
     asked = _serve(monkeypatch, client.files)
     assert verify_draft(client, PID, '10.5281/zenodo.55') == []
@@ -148,6 +156,13 @@ def test_a_draft_with_the_bytes_of_its_record_is_verified(monkeypatch):
     assert asked == [(f'https://dv.example/api/access/datafile/{i}', options) for i in (1, 2)]
     del client.files['b.dat']
     assert verify_draft(client, PID, '10.5281/zenodo.55', files=['a.dat']) == []
+    asked = _serve(monkeypatch, client.files, redirect=True)
+    assert verify_draft(client, PID, '10.5281/zenodo.55', files=['a.dat']) == []
+    assert asked == [
+        ('https://dv.example/api/access/datafile/1', options),
+        ('https://dv.example/store/1', {'stream': True, 'timeout': 5}),
+    ], 'the request that follows a redirect carries no token'
+    assert _serve.closed == [True], 'the redirect answer is closed'
 
 
 def _server(reply, seen):
@@ -168,7 +183,8 @@ def _server(reply, seen):
 
 def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monkeypatch):
     """Dataverse answers a download with a redirect to a storage server: the file is read
-    there and verified, and only the Dataverse server sees the token."""
+    there and verified, and only the Dataverse server sees the token. An API request is
+    not redirected at all."""
     at_dataverse, at_store = [], []
 
     def stored(handler):
@@ -191,14 +207,16 @@ def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monke
     try:
         client = _draft()
         client.base_url = f'http://127.0.0.1:{dataverse.server_port}'
-        registry = {n: 'md5:' + hashlib.md5(d).hexdigest() for n, d in DATA.items()}
-        monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: registry)
+        monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: REGISTRY)
         assert verify_draft(client, PID, '10.5281/zenodo.55') == []
+        real = DataverseClient(client.base_url, 't')
+        with pytest.raises(DataverseError, match=r'GET /api/search failed \(303\)'):
+            real._request('GET', '/api/search')
     finally:
         for server in (dataverse, store):
             server.shutdown()
             server.server_close()
-    assert at_dataverse == ['t', 't'], 'the draft download needs the token'
+    assert at_dataverse == ['t', 't', 't'], 'the draft download needs the token'
     assert at_store == [None, None], 'the token left the Dataverse server'
 
 
@@ -571,20 +589,21 @@ def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp
     )
     assert manifest.read_text() == TWO_OF_ONE_RECORD
     write = sync.write_pin
-    monkeypatch.setattr(
-        sync,
-        'write_pin',
-        lambda path, key, pin: (
-            write(path, key, pin) if key == 'g.first' else _raise(ValueError('x'))
-        ),
-    )
-    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
-    assert code == 1 and lines == [
-        'FAIL x',
-        'NOT PINNED g.first: nothing is written after a FAIL',
-        'NOT PINNED g.third: nothing is written after a FAIL',
-    ]
-    assert manifest.read_text() == TWO_OF_ONE_RECORD
+    for error in (ValueError('x'), PermissionError('x')):
+        monkeypatch.setattr(
+            sync,
+            'write_pin',
+            lambda path, key, pin, e=error: (
+                write(path, key, pin) if key == 'g.first' else _raise(e)
+            ),
+        )
+        manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+        assert code == 1 and lines == [
+            'FAIL x',
+            'NOT PINNED g.first: nothing is written after a FAIL',
+            'NOT PINNED g.third: nothing is written after a FAIL',
+        ]
+        assert manifest.read_text() == TWO_OF_ONE_RECORD
     monkeypatch.setattr(sync, 'write_pin', write)
     manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
     assert code == 0 and [line.split()[:2] for line in lines] == [

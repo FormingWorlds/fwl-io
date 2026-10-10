@@ -57,12 +57,11 @@ def collection_mirrors(
                 found.setdefault(recid, []).append((item.get('versionState'), item['global_id']))
         start += 100
         if start >= data['total_count']:
-            break
-    if read != data['total_count']:
-        raise DataverseError(
-            f'listing of {collection}: read {read} of {data["total_count"]} datasets'
-        )
-    return found
+            if read != data['total_count']:
+                raise DataverseError(
+                    f'listing of {collection}: read {read} of {data["total_count"]} datasets'
+                )
+            return found
 
 
 def _download(client: DataverseClient, file_id) -> requests.Response:
@@ -215,7 +214,7 @@ def mirror_sync(
             publish=False,
             files=files,
         )
-    except Exception as exc:  # noqa: BLE001 -- the message names a draft that is kept
+    except Exception as exc:  # noqa: BLE001 -- the lines so far must reach the report
         return [*lines, f'FAIL draft for {doi}: {type(exc).__name__}: {exc}'], 1
     try:
         problems = verify_draft(client, persistent_id, doi, files)
@@ -337,7 +336,7 @@ def mirror_pin(
     try:
         for key in to_write if code == 0 else ():
             write_pin(manifest, key, pin)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         manifest.write_bytes(before)
         lines.append(f'FAIL {exc}')
         code = 1

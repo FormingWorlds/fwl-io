@@ -1,7 +1,7 @@
 name: Create a draft mirror for a dataset without one
 
 # Finds the datasets of the installed manifests whose Zenodo record has no Dataverse
-# dataset and creates one draft per run. It never publishes, deletes or edits a manifest.
+# dataset and creates one draft per run. It never publishes and never edits a manifest.
 # The weekly run only reports; a draft is created by a manual run with dry run unchecked.
 
 on:
