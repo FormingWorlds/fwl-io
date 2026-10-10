@@ -51,6 +51,14 @@ jobs:
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
           args=()
           if [ "${DRY_RUN}" != "false" ]; then args+=(--dry-run); fi
+          set +e
           fwl-io mirror-sync --collection "${COLLECTION}" \
             --contact-email "${DATAVERSE_CONTACT_EMAIL}" "${args[@]}" \
             | tee -a "${GITHUB_STEP_SUMMARY}"
+          code=${PIPESTATUS[0]}
+          # Exit 3: nothing failed, but Zenodo did not answer for a record. Warn and pass.
+          if [ "${code}" -eq 3 ]; then
+            echo "::warning title=Zenodo not fully read::a Zenodo record could not be read; see the summary"
+            exit 0
+          fi
+          exit "${code}"

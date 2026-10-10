@@ -9,6 +9,7 @@ person to commit.
 from __future__ import annotations
 
 import hashlib
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 
@@ -202,6 +203,15 @@ def mirror_sync(
     return lines, 1 if problems else unread
 
 
+def _without_pin(text: str, key: str) -> dict:
+    """Return a parsed manifest with the ``dataverse`` value of its ``[key]`` table removed."""
+    tree = table = tomllib.loads(text)
+    for part in key.split('.'):
+        table = table[part]
+    table.pop('dataverse', None)
+    return tree
+
+
 def write_pin(manifest: Path, key: str, pin: str) -> None:
     """Set the ``dataverse`` pin of the ``[key]`` table of a manifest, after its ``zenodo``
     line, and check that the manifest then loads with that pin.
@@ -209,8 +219,9 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
     Raises
     ------
     ValueError
-        If the manifest has no ``[key]`` table with a ``zenodo`` line, or does not load
-        with the pin afterwards; the file is left as it was.
+        If the manifest has no ``[key]`` table with a ``zenodo`` line, if the edit would
+        change anything but that pin, or if the manifest does not load with the pin
+        afterwards; the file is left as it was.
     """
     before = manifest.read_bytes()
     lines = before.decode('utf-8').splitlines(keepends=True)
@@ -227,7 +238,14 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
     if not body[at - 1].endswith('\n'):
         body[at - 1] += eol
     body.insert(at, f'dataverse = "{pin}"{eol}')
-    manifest.write_bytes(''.join(lines[: start + 1] + body + lines[end:]).encode('utf-8'))
+    text = ''.join(lines[: start + 1] + body + lines[end:])
+    try:
+        same = _without_pin(text, key) == _without_pin(before.decode('utf-8'), key)
+    except (KeyError, TypeError, ValueError):
+        same = False
+    if not same:
+        raise ValueError(f'{manifest}: the edit of [{key}] would change more than its pin')
+    manifest.write_bytes(text.encode('utf-8'))
     try:
         written = {ds.key: ds.dataverse for ds in load_manifest(manifest)}
     except Exception:
