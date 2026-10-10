@@ -40,7 +40,6 @@ import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
 from fwl_io.fs_guard import (
@@ -52,10 +51,8 @@ from fwl_io.fs_guard import (
     _platform_gap,
     _probe_dir_below,
 )
+from fwl_io.manifest import Dataset, ProviderError, _discover_all
 from fwl_io.paths import resolve_data_root
-
-if TYPE_CHECKING:
-    from fwl_io.manifest import Dataset
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -116,15 +113,13 @@ class RelocationReport:
     to load, or was dropped for a conflict, declares datasets nobody here got to
     look at. Without it a report
     covering nothing would read exactly like a tree with nothing left to move.
-    ``conflict_providers`` names which of ``manifest_errors`` was a conflict
-    rather than a load failure, so the summary can tell a caller which repair
-    applies.
+    Each is a ``ProviderError``, whose ``kind`` tells a conflict from a load
+    failure, so the summary can tell a caller which repair applies.
     """
 
     entries: tuple[Relocation, ...] = ()
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
     layout_error: str | None = None
-    conflict_providers: frozenset[str] = field(default_factory=frozenset)
 
     def _in_state(self, *states: str) -> tuple[Relocation, ...]:
         return tuple(e for e in self.entries if e.state in states)
@@ -163,10 +158,7 @@ class RelocationReport:
         """A short report, one line per dataset plus a closing count."""
         lines = [e.summary() for e in sorted(self.entries, key=lambda e: e.key)]
         for provider, error in sorted(self.manifest_errors.items()):
-            if provider in self.conflict_providers:
-                lines.append(f'{provider}: MANIFEST NOT USED, {error}')
-            else:
-                lines.append(f'{provider}: MANIFEST FAILED TO LOAD, {error}')
+            lines.append(f'{provider}: MANIFEST {error.verdict}, {error.message}')
         if self.layout_error is not None:
             # Without this the run reports nothing to do, which is what a tidy
             # tree also reports, and the two are not the same answer.
@@ -186,7 +178,7 @@ class RelocationReport:
         if self.manifest_errors:
             # An unloaded or conflict-dropped manifest may declare a dataset this
             # tree still holds, so the counts above are a floor.
-            closing += f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
+            closing += f'; {len(self.manifest_errors)} manifest(s) left out, so this may be partial'
         lines.append(closing)
         return '\n'.join(lines)
 
@@ -567,16 +559,11 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
         One entry per dataset that declares a legacy location, whether or not
         that location exists on this machine.
     """
-    from fwl_io.manifest import ErrorKind, _discover_all
-
     root = resolve_data_root(data_root)
     locations, layout_error = _legacy_locations()
     entries: list[Relocation] = []
     seen: set[str] = set()
     discovery = _discover_all()
-    conflict_providers = frozenset(
-        name for name, error in discovery.errors.items() if error.kind is ErrorKind.CONFLICT
-    )
     for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             legacy = locations.get(ds.key)
@@ -617,12 +604,7 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                     legacy_present=legacy_present,
                 )
             )
-    return RelocationReport(
-        tuple(entries),
-        {name: error.message for name, error in discovery.errors.items()},
-        layout_error,
-        conflict_providers,
-    )
+    return RelocationReport(tuple(entries), discovery.errors, layout_error)
 
 
 def _version_dir(ds: Dataset) -> str:
@@ -825,6 +807,4 @@ def relocate_all(data_root: str | Path | None = None, dry_run: bool = False) -> 
             # Reported and left for a person to look at; a fault in one
             # dataset says nothing about the ones after it, so they still run.
             log.error('%s could not be relocated', moved.key)
-    return RelocationReport(
-        tuple(done), dict(plan.manifest_errors), plan.layout_error, plan.conflict_providers
-    )
+    return RelocationReport(tuple(done), dict(plan.manifest_errors), plan.layout_error)

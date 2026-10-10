@@ -451,8 +451,9 @@ def test_a_manifest_that_did_not_load_keeps_the_report_from_reading_complete(tmp
     assert report.entries == (), 'no dataset was declared, so none could be considered'
     assert list(report.manifest_errors) == ['demoprovider']
     assert not report.ok, 'a report that looked at nothing must not read as a tidy tree'
-    assert 'MANIFEST FAILED TO LOAD' in report.summary()
-    assert 'may be partial' in report.summary()
+    message = report.manifest_errors['demoprovider'].message
+    assert f'demoprovider: MANIFEST FAILED TO LOAD, {message}' in report.summary()
+    assert '1 manifest(s) left out, so this may be partial' in report.summary()
     assert (root / LEGACY / 'notes.txt').is_file(), 'the tree it could not judge is untouched'
 
 

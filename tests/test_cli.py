@@ -716,6 +716,29 @@ def test_relocate_reports_a_conflict_as_not_used_not_failed_to_load(tmp_path, ca
     assert 'FAILED TO LOAD' not in out
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize('command', [['prune'], ['prune', '--delete', '--yes'], ['check-mirrors']])
+def test_prune_and_check_mirrors_fail_on_a_conflict_and_name_it(
+    tmp_path, capsys, monkeypatch, command
+):
+    """A real cross-provider conflict, driven through main(), exits 1 and reads as NOT USED
+    for a prune dry run, a prune deletion and check-mirrors."""
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points', lambda group: _conflicting_providers(tmp_path, 'demo')
+    )
+    (tmp_path / 'data').mkdir()
+    root = ['--data-root', str(tmp_path / 'data')] if command[0] == 'prune' else []
+
+    code = main([*command, *root])
+    out = capsys.readouterr().out
+
+    lead = 'FAIL ' if command == ['check-mirrors'] else ''
+    assert code == 1
+    assert f'{lead}package-a: MANIFEST NOT USED' in out
+    assert f'{lead}package-b: MANIFEST NOT USED' in out
+    assert 'FAILED TO LOAD' not in out
+
+
 def _one_dataset(tmp_path, monkeypatch, extra=''):
     """Install one manifest declaring g.demo (one file, a.dat) with a DataverseNL pin."""
     import hashlib

@@ -26,7 +26,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
-    from fwl_io.manifest import ErrorKind, _discover_all
+    from fwl_io.manifest import _discover_all
 
     discovery = _discover_all()
     found, errors = discovery.found, discovery.errors
@@ -45,8 +45,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             if label and label != ds.key:
                 print(f'    {label}')
     for provider, error in sorted(errors.items()):
-        verdict = 'NOT USED' if error.kind is ErrorKind.CONFLICT else 'FAILED TO LOAD'
-        print(f'[{provider}] {verdict}: {error.message}', file=sys.stderr)
+        print(f'[{provider}] {error.verdict}: {error.message}', file=sys.stderr)
     return 1 if errors else 0
 
 
