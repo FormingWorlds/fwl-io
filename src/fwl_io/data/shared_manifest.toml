@@ -156,6 +156,7 @@ dataverse = "10.34894/URD02X"
 [star.spectra.phoenix]
 name = "PHOENIX stellar spectra"
 zenodo = "10.5281/zenodo.17674612"
+dataverse = "10.34894/YSN9JJ"
 
 [star.spectra.muscles]
 name = "MUSCLES stellar spectra"
