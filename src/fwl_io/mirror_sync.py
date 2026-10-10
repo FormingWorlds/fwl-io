@@ -337,9 +337,13 @@ def mirror_pin(
         for key in to_write if code == 0 else ():
             write_pin(manifest, key, pin)
     except (ValueError, OSError) as exc:
-        manifest.write_bytes(before)
         lines.append(f'FAIL {exc}')
         code = 1
+        try:
+            if manifest.read_bytes() != before:
+                manifest.write_bytes(before)
+        except OSError as again:
+            lines.append(f'FAIL {manifest.name} could not be restored, check it by hand: {again}')
     if code:
         return lines + [f'NOT PINNED {key}: nothing is written after a FAIL' for key in to_write], 1
     return lines + [f'PINNED {key} in {manifest.name}{was}' for key, was in to_write.items()], 0

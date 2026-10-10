@@ -210,7 +210,7 @@ def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monke
         monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: REGISTRY)
         assert verify_draft(client, PID, '10.5281/zenodo.55') == []
         real = DataverseClient(client.base_url, 't')
-        with pytest.raises(DataverseError, match=r'GET /api/search failed \(303\)'):
+        with pytest.raises(DataverseError, match=r'GET /api/search failed \(303\): redirect to'):
             real._request('GET', '/api/search')
     finally:
         for server in (dataverse, store):
@@ -571,9 +571,34 @@ def test_a_replaced_pin_names_the_old_one_and_a_manifest_left_out_stops_the_writ
     assert lines[-1] == 'no installed dataset pins Zenodo 77' and len(lines) == 3 and code == 1
 
 
+def _read_only(load):
+    """Wrap ``load_manifest`` so that the manifest is read-only once it is loaded."""
+
+    def loader(path):
+        datasets = load(path)
+        path.chmod(0o444)
+        return datasets
+
+    return loader
+
+
+def _locks_after(write):
+    """Wrap ``write_pin``: the first pin is written, the second makes the file read-only
+    and fails."""
+
+    def writer(path, key, pin):
+        if key == 'g.first':
+            return write(path, key, pin)
+        path.chmod(0o444)
+        raise PermissionError('x')
+
+    return writer
+
+
 def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp_path):
     """With two datasets of one record, a mirror that does not serve the second, or a second
-    pin that cannot be written, leaves the file as it was and says which pins wait."""
+    pin that cannot be written, leaves the file as it was and says which pins wait; a
+    read-only file gives a FAIL line, as does a file that cannot be restored."""
     version = _version('RELEASED')
     manifest, checked, (lines, code) = _pin(
         monkeypatch, tmp_path, version, problem={'g.third': 'a.dat missing'}, text=TWO_OF_ONE_RECORD
@@ -605,6 +630,21 @@ def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp
         ]
         assert manifest.read_text() == TWO_OF_ONE_RECORD
     monkeypatch.setattr(sync, 'write_pin', write)
+    monkeypatch.setattr(sync, 'load_manifest', _read_only(sync.load_manifest))
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    assert code == 1 and len(lines) == 3 and 'Permission denied' in lines[0], lines
+    assert lines[1].startswith('NOT PINNED g.first') and manifest.read_text() == TWO_OF_ONE_RECORD
+    manifest.chmod(0o644)
+    monkeypatch.undo()
+    monkeypatch.setattr(sync, 'write_pin', _locks_after(write))
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    assert (
+        code == 1
+        and lines[0] == 'FAIL x'
+        and lines[1].startswith('FAIL manifest.toml could not be restored, check it by hand: ')
+    )
+    manifest.chmod(0o644)
+    monkeypatch.undo()
     manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
     assert code == 0 and [line.split()[:2] for line in lines] == [
         ['PINNED', 'g.first'],

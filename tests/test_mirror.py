@@ -623,6 +623,29 @@ def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
+def test_a_request_with_a_token_does_not_follow_a_redirect(monkeypatch, status):
+    """With a token, a redirect is an error that names its target without the query, so
+    the token header reaches no other server; without a token, redirects are followed."""
+    import requests
+
+    seen = []
+
+    def request(method, url, **kwargs):
+        seen.append(kwargs['allow_redirects'])
+        response = _fake_response(200 if kwargs['allow_redirects'] else status, b'{}')
+        response.headers['Location'] = 'https://store.example/x?signature=s'
+        return response
+
+    monkeypatch.setattr(requests, 'request', request)
+    with pytest.raises(DataverseError, match=r'redirect to https://store.example/x, not') as err:
+        DataverseClient('http://unused', 'tok')._request('GET', '/api/search')
+    assert err.value.status_code == status and 'signature' not in str(err.value)
+    assert DataverseClient('http://unused', '')._request('GET', '/api/search') == {}
+    assert seen == [False, True]
+
+
+@pytest.mark.unit
 def test_create_with_a_non_json_success_body_raises_with_the_status_and_body():
     """A 2xx create response with a non-JSON body raises, naming the status and body.
 

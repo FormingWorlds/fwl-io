@@ -363,9 +363,10 @@ class DataverseClient:
             occurs that is not a certificate verification failure.
         DataverseError
             If another transport error occurs, another status is 300 or
-            higher (a redirect is not followed, so the token stays on this
-            server), or a non-empty successful body fails to parse as JSON or
-            parses to something other than a JSON object.
+            higher (a request with a token does not follow a redirect, so
+            the token stays on this server), or a non-empty successful body
+            fails to parse as JSON or parses to something other than a JSON
+            object.
         """
         try:
             response = requests.request(
@@ -373,7 +374,7 @@ class DataverseClient:
                 f'{self.base_url}{path}',
                 headers=self._headers,
                 timeout=self.timeout,
-                allow_redirects=False,
+                allow_redirects=not self.token,
                 **kwargs,
             )
         except (
@@ -410,8 +411,10 @@ class DataverseClient:
                 body = response.json()
             except ValueError:
                 body = None
+            target = response.headers.get('Location', '').split('?')[0]
+            why = f'redirect to {target}, not followed' if target else response.text[:500]
             raise DataverseError(
-                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
+                f'Dataverse {method} {path} failed ({response.status_code}): {why}',
                 response.status_code,
                 body,
             )
