@@ -25,7 +25,7 @@ A dataset is pinned to one version of a Zenodo record and to a committed list of
 | Dataset owner | Brings the record, or its new version, into the PROTEUS Framework community on Zenodo, alone or through a dataset request. Changes the pin and the registry in a pull request on the repository that holds the manifest. | A GitHub account; a Zenodo account for an own upload |
 | Maintainer of the repository that holds the manifest | Reviews and merges the pull request, and makes the release that carries it. | Write access to that repository |
 | fwl-io maintainer | Accepts or refuses a dataset request. Uploads data to Zenodo on request, and accepts records into the community as a curator. Runs the two mirror workflows, which hold the DataverseNL token, and approves their runs. For the shared manifest, also the row above. | Membership of the team `proteus-maintainer`; curator rights in the Zenodo community |
-| Weekly job | Compares the committed registries of the shared manifest with Zenodo, and checks every `dataverse` pin of the shared manifest. Reports a difference; changes nothing. | Nothing |
+| Weekly job | Compares the committed registries of the shared manifest with Zenodo, checks that each of its records is in the Zenodo community, and checks every `dataverse` pin of the shared manifest. Reports a difference; changes nothing. | Nothing |
 
 The shared manifest is `src/fwl_io/data/shared_manifest.toml` in the fwl-io repository; its package is fwl-io. A dataset that one model reads is declared in that model's own manifest, and its pull request goes to that model's repository, where the maintainers of the model review it.
 
@@ -46,7 +46,7 @@ After the steps it holds:
 zenodo = "10.5281/zenodo.23278603"
 ```
 
-1. Publish the new version of the record on Zenodo, and check on its page that the version is in the PROTEUS Framework community: fwl-io mirrors no record outside it ([Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes, also for a maintainer who uploads the version for you). Open the page of that version. Its address ends in the record id, `https://zenodo.org/records/<record-id>`, and the page shows the same number in its DOI, `10.5281/zenodo.<record-id>`: that is the **version DOI**. The concept DOI of the record has another number, and its address leads to the page of the newest version; a manifest cannot pin it.
+1. Publish the new version of the record on Zenodo, and check on its page that the version is in the PROTEUS Framework community: fwl-io creates a mirror for no record outside it ([Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes, also for a maintainer who uploads the version for you). Open the page of that version. Its address ends in the record id, `https://zenodo.org/records/<record-id>`, and the page shows the same number in its DOI, `10.5281/zenodo.<record-id>`: that is the **version DOI**. The concept DOI of the record has another number, and its address leads to the page of the newest version; a manifest cannot pin it.
 2. Clone the repository that holds the manifest, and install its package in editable mode, in a Python environment with fwl-io ([Installation](installation.md)). For the shared manifest the repository is fwl-io itself:
 
     ```bash
@@ -177,9 +177,9 @@ A code can hold Zenodo record ids outside any manifest. AGNI's `src/get_data.sh`
 
 ## What the weekly job checks
 
-The workflow named **Nightly** in the fwl-io repository runs once a week, every Monday. It runs two checks, and it changes nothing.
+The workflow named **Nightly** in the fwl-io repository runs once a week, every Monday. It runs two steps, and it changes nothing.
 
-- **Run slow tier (live Zenodo checks)** reads the Zenodo record of every dataset in the shared manifest and compares its file names and checksums with the committed registry. A difference means that the record changed after the registry was written, or that the registry was edited by hand. Run `fwl-io sync` on the manifest, read the diff, and open a pull request, or restore the registry.
+- **Run slow tier (live Zenodo checks)** reads the Zenodo record of every dataset in the shared manifest and compares its file names and checksums with the committed registry. A difference means that the record changed after the registry was written, or that the registry was edited by hand. Run `fwl-io sync` on the manifest, read the diff, and open a pull request, or restore the registry. The same step fails with `not in the Zenodo community proteus_framework` and a list of DOIs when a record of the shared manifest is not an accepted record of the community: bring the record into the community ([Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)), or replace its pin.
 - **Check the DataverseNL mirror pins** runs `fwl-io check-mirrors`. A `FAIL` line names a pin that does not serve its dataset: remove or replace the pin in a pull request. An `UNREACHABLE` line names a pin that could not be read: when the other pins are served, the job passes with a warning, and the next run reads the pin again.
 
 The job does not look for new versions of a record. A new version stays unused until its owner follows [A record has a new version](#a-record-has-a-new-version). The job reads the manifests installed in its run, which is the shared manifest alone. It does not read the manifest of a model; the repository of that model is the place for such a check.

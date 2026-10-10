@@ -6,7 +6,7 @@ This page states who may change the data the ecosystem depends on, and how such 
 
 A dataset is pinned by two committed files: the Zenodo version DOI in a manifest, and the registry file beside it that lists the dataset's files and their checksums. A data change is a change to those: nothing else changes which dataset version is pinned, because a fetch reads the committed registry, not the live Zenodo record.
 
-A dataset of the framework is a record of the PROTEUS Framework community on Zenodo, accepted by a curator of that community; fwl-io mirrors no other record, and a check fails for a record of the shared manifest that is outside it.
+A dataset of the framework is a record of the PROTEUS Framework community on Zenodo, accepted by a curator of that community; fwl-io creates a mirror for no other record, and a check fails for a record of the shared manifest that is outside it.
 
 fwl-io provides the manifest for shared datasets. A model's own datasets are declared in that model's manifest, installed with the model through the `fwl_io.manifests` entry point. Ownership follows the manifest: a shared dataset is changed in fwl-io, a model dataset in the model that owns it.
 
