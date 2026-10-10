@@ -2,7 +2,9 @@
 
 A dataset needs work when it has no ``dataverse`` pin (unpinned), or when its Zenodo record
 has a newer version than the one the manifest pins (stale): the manifest then needs a new
-pin, and that version a mirror. Only Zenodo is read, once per record.
+pin, and that version a mirror. A dataset without a pin whose record is not an accepted
+record of a Zenodo community of the framework is listed as outside: no mirror is created
+for it. Only Zenodo is read.
 """
 
 from __future__ import annotations
@@ -14,17 +16,18 @@ import requests
 from fwl_io.doi import zenodo_record_id
 from fwl_io.manifest import Dataset, ProviderError, _discover_all
 from fwl_io.pins import manifest_lines
-from fwl_io.sync import ZENODO_API
+from fwl_io.sync import ZENODO_API, fetch_zenodo_record, in_community
 
 
 @dataclass
 class StatusReport:
-    """Outcome of :func:`mirror_status`: datasets that are in order, unpinned, stale or could
-    not be read, and the manifests left out."""
+    """Outcome of :func:`mirror_status`: datasets that are in order, unpinned, stale,
+    outside the communities or could not be read, and the manifests left out."""
 
     ok: list[str] = field(default_factory=list)
     unpinned: dict[str, str] = field(default_factory=dict)
     stale: dict[str, str] = field(default_factory=dict)
+    outside: dict[str, str] = field(default_factory=dict)
     unreadable: dict[str, str] = field(default_factory=dict)
     manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
 
@@ -43,10 +46,12 @@ class StatusReport:
         lines = manifest_lines(self.manifest_errors)
         lines += [f'UNPINNED {key}: {doi}' for key, doi in sorted(self.unpinned.items())]
         lines += [f'STALE {key}: {why}' for key, why in sorted(self.stale.items())]
+        lines += [f'OUTSIDE {key}: {why}' for key, why in sorted(self.outside.items())]
         lines += [f'UNREADABLE {key}: {why}' for key, why in sorted(self.unreadable.items())]
         lines.append(
             f'in order: {len(self.ok)}, without a pin: {len(self.unpinned)}, '
             f'with a newer Zenodo version: {len(self.stale)}, '
+            f'outside the communities: {len(self.outside)}, '
             f'not checked (Zenodo could not be read): {len(self.unreadable)}'
         )
         return '\n'.join(lines)
@@ -59,7 +64,14 @@ def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
     return str(response.json()['id'])
 
 
-def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusReport:
+def accepted(doi: str) -> bool:
+    """Return whether the Zenodo record of ``doi`` is an accepted record of a community."""
+    return in_community(fetch_zenodo_record(doi))
+
+
+def mirror_status(
+    datasets: list[Dataset] | None = None, latest=None, community=None
+) -> StatusReport:
     """Sort every dataset into in order, unpinned, stale or unreadable.
 
     Parameters
@@ -70,13 +82,17 @@ def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusR
     latest : callable, optional
         Returns the newest record id of a Zenodo record id; :func:`latest_record_id` by
         default.
+    community : callable, optional
+        Returns whether a Zenodo DOI is an accepted record of a community of the
+        framework; :func:`accepted` by default. It is asked for a dataset without a pin.
 
     Returns
     -------
     StatusReport
         A dataset can be both unpinned and stale.
     """
-    report, latest = StatusReport(), latest or latest_record_id
+    report, latest, community = StatusReport(), latest or latest_record_id, community or accepted
+    member: dict[str, bool | Exception] = {}
     if datasets is None:
         discovery = _discover_all()
         datasets = [ds for group in discovery.found.values() for ds in group]
@@ -95,6 +111,15 @@ def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusR
             report.stale[ds.key] = f'pins Zenodo {recid}, newest version is {newest[recid]}'
         if not ds.dataverse:
             report.unpinned[ds.key] = ds.zenodo
+            if recid not in member:
+                try:
+                    member[recid] = community(ds.zenodo)
+                except Exception as exc:  # noqa: BLE001 -- reported per dataset, never raised
+                    member[recid] = exc
+            if isinstance(member[recid], Exception):
+                report.unreadable.setdefault(ds.key, f'Zenodo {recid}: {member[recid]}')
+            elif not member[recid]:
+                report.outside[ds.key] = f'Zenodo {recid} is in no community of the framework'
         if ds.key not in report.unreadable | report.stale | report.unpinned:
             report.ok.append(ds.key)
     return report

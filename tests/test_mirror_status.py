@@ -18,14 +18,21 @@ def _ds(key, recid, pin='10.34894/ABCDEF'):
 
 def test_datasets_are_sorted_by_what_their_mirror_needs():
     """A pinned current record is in order; a missing pin, a newer version (also together,
-    and with a pin) and a failed Zenodo read are named; each record is read once."""
-    asked = []
+    and with a pin), a record outside the communities and a failed Zenodo read are named;
+    each record is read once, and the community only for a dataset without a pin."""
+    asked, members = [], []
+
+    def community(doi):
+        members.append(doi)
+        if doi.endswith('.7'):
+            raise requests.ConnectionError('no answer')
+        return not doi.endswith('.6')
 
     def latest(recid):
         asked.append(recid)
         if recid == '4':
             raise requests.ConnectionError('down')
-        return {'1': '1', '2': '2', '3': '30', '5': '50'}[recid]
+        return {'1': '1', '2': '2', '3': '30', '5': '50', '6': '6', '7': '7'}[recid]
 
     datasets = [
         _ds('g.ok', 1),
@@ -34,16 +41,24 @@ def test_datasets_are_sorted_by_what_their_mirror_needs():
         _ds('g.both', 3, pin=None),
         _ds('g.stale', 5),
         _ds('g.down', 4),
+        _ds('g.out', 6, pin=None),
+        _ds('g.out2', 6, pin=None),
+        _ds('g.unknown', 7, pin=None),
     ]
-    report = mirror_status(datasets, latest=latest)
+    report = mirror_status(datasets, latest=latest, community=community)
     assert report.ok == ['g.ok', 'g.ok2']
-    assert report.unpinned == {'g.unpinned': '10.5281/zenodo.2', 'g.both': '10.5281/zenodo.3'}
+    assert sorted(report.unpinned) == ['g.both', 'g.out', 'g.out2', 'g.unknown', 'g.unpinned']
+    assert report.outside == dict.fromkeys(
+        ('g.out', 'g.out2'), 'Zenodo 6 is in no community of the framework'
+    )
+    assert members == [f'10.5281/zenodo.{n}' for n in (2, 3, 6, 7)]
     assert report.stale == {
         'g.both': 'pins Zenodo 3, newest version is 30',
         'g.stale': 'pins Zenodo 5, newest version is 50',
     }
-    assert report.unreadable == {'g.down': 'Zenodo 4: down'}
-    assert asked == ['1', '2', '3', '5', '4']
+    assert report.unreadable == {'g.down': 'Zenodo 4: down', 'g.unknown': 'Zenodo 7: no answer'}
+    assert asked == ['1', '2', '3', '5', '4', '6', '7']
+    assert 'OUTSIDE g.out: Zenodo 6 is in no community of the framework' in report.summary()
     assert report.exit_code == 5
 
 
@@ -73,11 +88,13 @@ def test_the_command_prints_the_rows_and_exits_by_the_verdict(monkeypatch, capsy
     found = {'m': [_ds('g.ok', 1), _ds('g.new', 2, pin=None)]}
     monkeypatch.setattr(status, '_discover_all', lambda: _Discovery(found, {}))
     monkeypatch.setattr(status, 'latest_record_id', lambda recid: recid)
+    monkeypatch.setattr(status, 'accepted', lambda doi: True)
     assert main(['mirror-status']) == 5
     out = capsys.readouterr().out.splitlines()
     assert out == [
         'UNPINNED g.new: 10.5281/zenodo.2',
         'in order: 1, without a pin: 1, with a newer Zenodo version: 0, '
+        'outside the communities: 0, '
         'not checked (Zenodo could not be read): 0',
     ]
 
@@ -96,6 +113,16 @@ def test_a_manifest_left_out_is_reported_with_its_reason(monkeypatch):
         'FAIL broken: MANIFEST FAILED TO LOAD, cannot load',
         'FAIL other: MANIFEST NOT USED, claims a taken location',
     ]
+
+
+def test_a_record_is_accepted_when_its_zenodo_record_lists_a_community(monkeypatch):
+    """The default community test reads the record of the DOI and looks at its communities."""
+    records = {
+        '10.5281/zenodo.1': {'metadata': {'communities': [{'id': 'paleos'}]}},
+        '10.5281/zenodo.2': {'metadata': {}},
+    }
+    monkeypatch.setattr(status, 'fetch_zenodo_record', records.__getitem__)
+    assert status.accepted('10.5281/zenodo.1') and not status.accepted('10.5281/zenodo.2')
 
 
 def test_the_newest_version_is_read_from_the_versions_endpoint(monkeypatch):

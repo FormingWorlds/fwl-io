@@ -154,8 +154,8 @@ def mirror_sync(
 
     A record that a dataset of ``collection`` names, in any state, or that another
     installed dataset pins, gets no draft, only a line saying what it waits for (a publish,
-    or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version
-    or could not be read.
+    or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version,
+    is in no community of the framework, or could not be read.
     One draft per run, never published; it holds the files every dataset of the record
     asks for, and is verified with :func:`verify_draft`. A listing or a creation that
     fails is a ``FAIL`` line after the lines gathered so far, not an exception.
@@ -191,6 +191,8 @@ def mirror_sync(
         released = [pid.removeprefix('doi:') for state, pid in held if state == 'RELEASED']
         if key in status.stale:
             lines.append(f'SKIPPED {key}: pin the newest Zenodo version first')
+        elif key in status.outside:
+            lines.append(f'SKIPPED {key}: its Zenodo record is in no community of the framework')
         elif key in status.unreadable:
             lines.append(f'SKIPPED {key}: its Zenodo record could not be read')
         elif published := pinned.get(recid) or next(iter(released), None):

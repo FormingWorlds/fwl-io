@@ -308,8 +308,9 @@ def _run(dry_run=False):
 
 
 def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
-    """A stale dataset, a record another dataset pins, a record with a released dataset
-    and one with a draft only get a line; the first record left gets the one draft, with
+    """A record outside the communities (the first key in the order), a stale dataset, a
+    record another dataset pins, a record with a released dataset and one with a draft
+    only get a line; the first record left gets the one draft, with
     the files every dataset of the record asks for, unpublished."""
     datasets = [
         _ds('g.a', 1),
@@ -320,9 +321,15 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
         _ds('g.e', 5, files=('x.dat',)),
         _ds('g.e2', 5, files=('y.dat', 'x.dat')),
         _ds('g.f', 6),
+        _ds('g.0', 9),
     ]
     unpinned = {ds.key: ds.zenodo for ds in datasets if not ds.dataverse}
-    status = StatusReport(unpinned=unpinned, stale={'g.a': 'newer'}, unreadable={'g.f': 'down'})
+    status = StatusReport(
+        unpinned=unpinned,
+        stale={'g.a': 'newer'},
+        unreadable={'g.f': 'down'},
+        outside={'g.0': 'Zenodo 9 is in no community of the framework'},
+    )
     mirrors = {
         '3': [('DRAFT', 'doi:10.34894/NEXT'), ('RELEASED', 'doi:10.34894/THREE')],
         '4': [('DRAFT', 'doi:10.34894/FOUR'), ('DEACCESSIONED', 'doi:10.34894/GONE')],
@@ -331,6 +338,7 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
     lines, code = _run()
     assert code == 3, 'a record could not be read, and nothing else failed'
     assert lines[1:] == [
+        'SKIPPED g.0: its Zenodo record is in no community of the framework',
         'SKIPPED g.a: pin the newest Zenodo version first',
         'PIN MISSING g.b: run fwl-io mirror-pin doi:10.34894/TWO',
         'PIN MISSING g.c: run fwl-io mirror-pin doi:10.34894/THREE',
