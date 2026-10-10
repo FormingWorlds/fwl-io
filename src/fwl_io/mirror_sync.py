@@ -206,7 +206,7 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
         If the manifest has no ``[key]`` table with a ``zenodo`` line, or does not load
         with the pin afterwards; the file is left as it was.
     """
-    before = manifest.read_text()
+    before = manifest.read_text(encoding='utf-8')
     lines = before.splitlines(keepends=True)
     try:
         start = lines.index(f'[{key}]\n')
@@ -218,13 +218,13 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
     except (ValueError, StopIteration):
         raise ValueError(f'{manifest} has no [{key}] table with a zenodo line') from None
     body.insert(at, f'dataverse = "{pin}"\n')
-    manifest.write_text(''.join(lines[: start + 1] + body + lines[end:]))
+    manifest.write_text(''.join(lines[: start + 1] + body + lines[end:]), encoding='utf-8')
     try:
         written = {ds.key: ds.dataverse for ds in load_manifest(manifest)}
     except Exception:
         written = {}
     if written.get(key) != pin:
-        manifest.write_text(before)
+        manifest.write_text(before, encoding='utf-8')
         raise ValueError(f'{manifest} does not load with the pin of {key}; left unchanged')
 
 

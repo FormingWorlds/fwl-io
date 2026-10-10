@@ -18,6 +18,9 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
 # One run at a time: a second run must see the draft the first one created.
 concurrency:
   group: mirror-sync
@@ -45,6 +48,7 @@ jobs:
           COLLECTION: ${{ inputs.collection || 'Proteus_Fr' }}
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
         run: |
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
           args=()
           if [ "${DRY_RUN}" != "false" ]; then args+=(--dry-run); fi
           fwl-io mirror-sync --collection "${COLLECTION}" \

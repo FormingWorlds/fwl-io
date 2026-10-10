@@ -34,6 +34,7 @@ jobs:
           # crafted persistent id cannot inject commands.
           PERSISTENT_ID: ${{ inputs.persistent_id }}
         run: |
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
           fwl-io mirror-pin "${PERSISTENT_ID}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Push the manifest edit as a branch
