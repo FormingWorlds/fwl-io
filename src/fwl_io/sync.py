@@ -26,9 +26,18 @@ from fwl_io.manifest import Dataset, load_manifest
 from fwl_io.registry import write_registry
 
 # Re-exported for backwards compatibility; the parser now lives in manifest.
-__all__ = ['fetch_zenodo_registry', 'sync_dataset', 'sync_manifest', 'zenodo_record_id']
+__all__ = [
+    'ZENODO_COMMUNITIES',
+    'fetch_zenodo_registry',
+    'in_community',
+    'sync_dataset',
+    'sync_manifest',
+    'zenodo_record_id',
+]
 
 ZENODO_API = 'https://zenodo.org/api/records'
+# The Zenodo communities whose accepted records are the datasets of the framework.
+ZENODO_COMMUNITIES = ('proteus_framework', 'paleos')
 
 
 def _extract_files(record: dict) -> dict[str, str]:
@@ -61,6 +70,17 @@ def fetch_zenodo_record(doi: str, api_base: str = ZENODO_API) -> dict:
             f'record {returned_id}); pin the version DOI of a specific deposit instead'
         )
     return record
+
+
+def in_community(record: dict) -> bool:
+    """Whether a Zenodo record, as :func:`fetch_zenodo_record` returns it, is an accepted
+    record of one of :data:`ZENODO_COMMUNITIES` (listed in ``metadata.communities``). An
+    entry of another form is no match."""
+    metadata = record.get('metadata') if isinstance(record, dict) else None
+    listed = metadata.get('communities') if isinstance(metadata, dict) else None
+    return isinstance(listed, list) and any(
+        isinstance(entry, dict) and entry.get('id') in ZENODO_COMMUNITIES for entry in listed
+    )
 
 
 def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str]:

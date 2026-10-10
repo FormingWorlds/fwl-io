@@ -44,4 +44,4 @@ The motivation and discussion history live in [PROTEUS issue #605](https://githu
 
 </div>
 
-Adding a new dataset instead? See [Add a dataset](How-to/add_dataset.md). Running on a cluster? See [Run on clusters](How-to/clusters.md).
+Adding a new dataset instead? See [Add a dataset](How-to/add_dataset.md), or follow the tutorial [Add a dataset, step by step](Tutorials/add_dataset_walkthrough.md). A dataset of yours has a new Zenodo version? See [Update a dataset or its mirror](How-to/update_dataset.md). Running on a cluster? See [Run on clusters](How-to/clusters.md).
