@@ -22,9 +22,9 @@ A dataset is pinned to one version of a Zenodo record and to a committed list of
 | Who | Does | Needs |
 | --- | --- | --- |
 | User | Runs `fwl-io fetch` and gets the versions that the installed packages pin. Gets a new version by upgrading the package whose manifest declares the dataset. | Nothing |
-| Dataset owner | Publishes the version on Zenodo. Changes the pin and the registry in a pull request on the repository that holds the manifest. Asks for a mirror. | The right to open a pull request |
+| Dataset owner | Brings the record, or its new version, into the PROTEUS Framework community on Zenodo, alone or through a dataset request. Changes the pin and the registry in a pull request on the repository that holds the manifest. | A GitHub account; a Zenodo account for an own upload |
 | Maintainer of the repository that holds the manifest | Reviews and merges the pull request, and makes the release that carries it. | Write access to that repository |
-| fwl-io maintainer | Runs the two mirror workflows, which hold the DataverseNL token. For the shared manifest, also the row above. | Write access to the fwl-io repository |
+| fwl-io maintainer | Accepts or refuses a dataset request. Uploads data to Zenodo on request, and accepts records into the community as a curator. Runs the two mirror workflows, which hold the DataverseNL token, and approves their runs. For the shared manifest, also the row above. | Membership of the team `proteus-maintainer`; curator rights in the Zenodo community |
 | Weekly job | Compares the committed registries of the shared manifest with Zenodo, and checks every `dataverse` pin of the shared manifest. Reports a difference; changes nothing. | Nothing |
 
 The shared manifest is `src/fwl_io/data/shared_manifest.toml` in the fwl-io repository; its package is fwl-io. A dataset that one model reads is declared in that model's own manifest, and its pull request goes to that model's repository, where the maintainers of the model review it.
@@ -46,7 +46,7 @@ After the steps it holds:
 zenodo = "10.5281/zenodo.23278603"
 ```
 
-1. Publish the new version of the record on Zenodo (the Zenodo help describes how; this page starts where the version is public). Open the page of that version. Its address ends in the record id, `https://zenodo.org/records/<record-id>`, and the page shows the same number in its DOI, `10.5281/zenodo.<record-id>`: that is the **version DOI**. The concept DOI of the record has another number, and its address leads to the page of the newest version; a manifest cannot pin it.
+1. Publish the new version of the record on Zenodo, and check on its page that the version is in the PROTEUS Framework community: fwl-io mirrors no record outside it ([Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes, also for a maintainer who uploads the version for you). Open the page of that version. Its address ends in the record id, `https://zenodo.org/records/<record-id>`, and the page shows the same number in its DOI, `10.5281/zenodo.<record-id>`: that is the **version DOI**. The concept DOI of the record has another number, and its address leads to the page of the newest version; a manifest cannot pin it.
 2. Clone the repository that holds the manifest, and install its package in editable mode, in a Python environment with fwl-io ([Installation](installation.md)). For the shared manifest the repository is fwl-io itself:
 
     ```bash
@@ -66,7 +66,7 @@ zenodo = "10.5281/zenodo.23278603"
     "
     ```
 
-    Each line holds the name of an entry point and the path of its manifest, or `FAILED:` and the reason for a package that does not load; `fwl-io-shared` is the shared manifest. `fwl-io list` prints the datasets of each manifest under the same names, so it shows which manifest declares your dataset key.
+    Each line holds the name of an entry point and the path of its manifest, or `FAILED:` and the reason for a package that does not load; `fwl-io-shared` is the shared manifest. The path of your manifest must lie inside your clone; a path in `site-packages` means that the package is not installed in editable mode. `fwl-io list` prints the datasets of each manifest under the same names, so it shows which manifest declares your dataset key.
 3. Open that manifest and replace the DOI in the `zenodo` line of your dataset with the new version DOI. When the table has a `files` line, it lists the files of the record that the dataset uses: add the name of a new file that the model needs, and remove the name of a file that the new version does not hold.
 4. Remove the `dataverse` line of that dataset ([What happens to the mirror](#what-happens-to-the-mirror) gives the reason). When a mirror of the new version is published, put its DOI there in place of the old one.
 5. Regenerate the registry. Run the command in the root of the clone, with the path of the manifest from step 2:
@@ -125,15 +125,15 @@ A fetch with such a pin still downloads from Zenodo first. When Zenodo does not 
 
 ## A mirror for my dataset
 
-A mirror is a second download source, used when Zenodo does not answer. The mirror workflow needs only the version DOI, so you can ask for a mirror as soon as the version is public on Zenodo. The usual order is two pull requests: the first with the `zenodo` pin and no `dataverse` line, the second with the `dataverse` pin when the mirror is published. One pull request with both pins is as good when the mirror is published before the review.
+A mirror is a second download source, used when Zenodo does not answer. The mirror workflow needs only the version DOI of a record in the PROTEUS Framework community, so you can ask for a mirror as soon as a curator has accepted the version. The usual order is two pull requests: the first with the `zenodo` pin and no `dataverse` line, the second with the `dataverse` pin when the mirror is published. One pull request with both pins is as good when the mirror is published before the review.
 
 ### The dataset owner asks
 
-1. Open an issue on the [fwl-io repository](https://github.com/FormingWorlds/fwl-io/issues) with the version DOI, the dataset key, the repository that holds the manifest and, when the dataset sets `files`, the file names.
+1. Open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) on the fwl-io repository, or write into the dataset request that brought the record into the community. Give the version DOI, the dataset key, the repository that holds the manifest and, when the dataset sets `files`, the file names. A maintainer accepts the request when the form is complete and the record is in the community, and says so in the issue.
 
 ### A maintainer creates the mirror
 
-These steps need write access to the fwl-io repository; the workflows are on its **Actions** tab. [Mirror a deposit to Dataverse](mirror_dataset.md) has the details of each input and says what to do when a run fails.
+Only a member of the team `proteus-maintainer` can run the two mirror workflows to their end: they are on the **Actions** tab of the fwl-io repository, and each run waits for an approval before the job that holds the token starts. To approve, open the run, select **Review deployments**, tick the `dataverse` environment and select **Approve and deploy**; a member of the team can approve a run that they started. [Mirror a deposit to Dataverse](mirror_dataset.md) has the details of each input and says what to do when a run fails.
 
 1. Run the workflow **Mirror a Zenodo deposit to Dataverse**. The table gives the name of each input, the description that the workflow file gives it, and the value:
 
@@ -147,7 +147,7 @@ These steps need write access to the fwl-io repository; the workflows are on its
     | **dry_run** | Download and map metadata only; make no Dataverse changes | unchecked |
     | **publish** | Publish the created dataset (unchecked: leave it a draft to review) | unchecked |
 
-    The workflow runs in the `dataverse` environment of the repository and takes the DataverseNL token and the contact email that every mirror dataset carries from its secrets; the form has no input for them. The run downloads each file from Zenodo, checks it, uploads it to a new draft dataset and checks it there. Its log ends with `draft doi:10.34894/<id> created, not published; verify its files, then run fwl-io mirror-publish doi:10.34894/<id>`; the workflow of step 3 runs that command. The draft is private.
+    A record outside the community stops the run before any write, with a message that names the community. The workflow runs in the `dataverse` environment of the repository and takes the DataverseNL token and the contact email that every mirror dataset carries from its secrets; the form has no input for them. The run downloads each file from Zenodo, checks it, uploads it to a new draft dataset and checks it there. Its log ends with `draft doi:10.34894/<id> created, not published; verify its files, then run fwl-io mirror-publish doi:10.34894/<id>`; the workflow of step 3 runs that command. The draft is private.
 2. Open the draft on DataverseNL (`https://dataverse.nl/dataset.xhtml?persistentId=doi:10.34894/<id>`, signed in with access to the collection). Compare the title, the authors, the description, the license and the names of the files with the Zenodo record. The maintainer decides: when all of them agree, publish; when one differs, do not publish, and say in the issue what differs. A published dataset is public and has a permanent DOI.
 3. Run the workflow **Publish an existing Dataverse draft** with **persistent_id** `doi:10.34894/<id>` and **version_type** `major` (the default of the form).
 4. Write the DOI of the mirror, `10.34894/<id>`, into the issue.
@@ -167,7 +167,7 @@ These steps need write access to the fwl-io repository; the workflows are on its
     ```
 
     The command checks the pins of every installed manifest: it reads each pin from its Dataverse server and the file sizes from Zenodo. It prints one `FAIL` line per wrong pin and one `UNREACHABLE` line per pin that could not be read, then one line of counts, then the datasets without a pin; the [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists the other lines (a manifest left out, a warning). Your pin is served when all of these hold: no `FAIL` and no `UNREACHABLE` line names your dataset key, no `FAIL` line names the entry point of your manifest (`FAIL <name>: MANIFEST ...`), and no line `unpinned <dataset key>` stands below the counts. When your pin is `UNREACHABLE`, a server did not answer: run the command again later. It exits 0 when every pin is served, 1 when a pin is wrong, a manifest was left out or no pin was checked, and 3 or 4 when no pin is wrong and a pin could not be read. A line that names another dataset is not caused by your change.
-3. Open a pull request with the manifest change on the repository that holds the manifest. The registry does not change.
+3. Open a pull request with the manifest change on the repository that holds the manifest. The registry does not change. On fwl-io, a pull request gets a review request to the team `proteus-maintainer` and needs the approval of a code owner.
 
 ## Data that a code also downloads with its own script
 

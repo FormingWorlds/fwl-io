@@ -8,7 +8,9 @@ Mirror a version of a Zenodo record that a manifest pins, or will pin, when you 
 
 ## Running the mirror
 
-Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a protected environment secret that lives only in CI, so no one needs personal upload rights to the collection; who may run the workflow is the access control.
+Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a secret of the `dataverse` environment that lives only in CI, so no one needs personal upload rights to the collection. The access control is the approval rule of that environment: each run of a workflow that holds the token waits until a member of the team `proteus-maintainer` approves it (**Review deployments**, then **Approve and deploy**, on the page of the run).
+
+The mirror accepts only an accepted record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework). For any other record the run stops before a Dataverse write, also in a dry run, with a message that names the community; [Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes into the community.
 
 1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
 2. Leave **publish** unchecked: the run then creates a private draft, which you inspect and publish with the [**Publish an existing Dataverse draft** workflow](#publishing-a-reviewed-draft). Check **publish** only for a deposit that needs no review: the run then publishes the dataset, and its files become downloadable. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.

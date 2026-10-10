@@ -2,9 +2,29 @@
 
 Follow these steps to make a new dataset fetchable through fwl-io. The tutorial [Add a dataset, step by step](../Tutorials/add_dataset_walkthrough.md) runs the same steps on a small real record, with the output of each command.
 
-## 1. Deposit the files on Zenodo
+## 1. Bring the files into the PROTEUS Framework community on Zenodo
 
-Upload the files to Zenodo and note the **version DOI** of the deposit, the DOI of the specific version you just created, of the form `10.5281/zenodo.<record-id>`.
+A dataset of the framework is a record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework), accepted by a curator of that community. fwl-io mirrors no other record: `fwl-io mirror` refuses a record outside the community, and a check of the shared manifest fails for one.
+
+There are four routes into the community. Each one ends with a record in the community and its **version DOI**, of the form `10.5281/zenodo.<record-id>`; steps 2 to 5 below are the same for all of them.
+
+| Route | Who uploads | What you do |
+| --- | --- | --- |
+| A. A maintainer uploads on request | A maintainer | Open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) with the route "A maintainer uploads my data" and a download link to a folder that the maintainers can read. |
+| B. You upload a new record | You | Start a new upload on Zenodo from the community page, so that the upload is submitted to the community for review. A curator accepts it, and Zenodo publishes the record. |
+| C. You upload a new version | You | Create the new version of your record on Zenodo and publish it. Check on its page that the version is in the community; when it is not, submit it as in route D. |
+| D. Your record exists | Nobody | On the page of the record, open the communities menu, choose the PROTEUS Framework community and submit the record. A curator accepts it. |
+
+The Zenodo help describes the two ways to submit: [Submit for review](https://help.zenodo.org/docs/share/submit-for-review/) for a new upload (route B) and [Submit to community](https://help.zenodo.org/docs/share/submit-to-community/) for a published record (routes C and D). When Zenodo does not let you submit to the community, open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml).
+
+For routes B, C and D, also open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) with the matching route: it tells the maintainers which record waits for a curator, and it is the request for the mirror of step 4. A maintainer accepts a request when the form is complete and the record can be a record of the community, and says so in the issue; a request that is refused gets the reason there.
+
+**Route A in steps.**
+
+1. You open the dataset request. The form asks for: the title and a short description, the models that read the data, a proposed dataset key, the files with their sizes, the licence, the authors with affiliation and ORCID, a contact, the reference to cite, whether this is a new dataset or a new version, the download link, and your confirmation that the data holds a README that describes each file (format, columns, units, source).
+2. A maintainer downloads the files, uploads them to Zenodo as a record of the community with the metadata of the form, and publishes it.
+3. The maintainer writes the version DOI into the issue.
+4. You continue with step 2 below, or the maintainer does when the request says so.
 
 !!! warning "Version DOI, not concept DOI"
 
@@ -46,7 +66,7 @@ This queries the Zenodo record and writes a registry file next to the manifest (
 
 ## 4. Mirror to Dataverse (optional but encouraged)
 
-Ask a maintainer of fwl-io for a mirror of the deposit on DataverseNL: [A mirror for my dataset](update_dataset.md#a-mirror-for-my-dataset) says how, and what the maintainer runs. Add the DOI of the published mirror:
+The dataset request of step 1 is also the request for a mirror of the record on DataverseNL: [A mirror for my dataset](update_dataset.md#a-mirror-for-my-dataset) says what the maintainer runs. Add the DOI of the published mirror:
 
 ```toml
 dataverse = "10.34894/ABCDEF"
@@ -56,4 +76,4 @@ The mirror must host **byte-identical** copies of the originals: the mirror work
 
 ## 5. Ship it
 
-For the shared manifest, open a PR on fwl-io. For a model manifest, open a PR on the model; make sure the manifest and its registry files are included in the model's package data, or fetching fails at runtime on user machines.
+For the shared manifest, open a PR on fwl-io: it gets a review request to the team `proteus-maintainer` and needs the approval of a code owner. For a model manifest, open a PR on the model; make sure the manifest and its registry files are included in the model's package data, or fetching fails at runtime on user machines.

@@ -46,9 +46,9 @@ Every command below must run in this shell, in `fwl-tutorial`.
 
 ## 2. Deposit the files on Zenodo
 
-**Not run here.** For your own dataset, create a new upload on Zenodo, add the files, and fill in the title, the authors, the description and the license. The mirror of step 8 copies these four from the record, so write them for a reader who finds the dataset without context. Publish the record, and note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
+**Not run here.** A dataset of the framework must be a record of the PROTEUS Framework community on Zenodo. For your own dataset, either open a dataset request, and a maintainer uploads the files for you, or upload them yourself and submit the upload to the community; [Add a dataset](../How-to/add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes. For an own upload, add the files and fill in the title, the authors, the description and the license. The mirror of step 8 copies these four from the record, so write them for a reader who finds the dataset without context. When the record is published and in the community, note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
 
-For this tutorial the record exists: `10.5281/zenodo.15728072`.
+For this tutorial the record exists, and it is in the community: `10.5281/zenodo.15728072`.
 
 ## 3. Create the package that declares the dataset
 
@@ -246,8 +246,8 @@ A dry run that ends with this line shows that the record can be mirrored.
 
 **Not run here.** The real mirror is created by a maintainer of fwl-io, because the DataverseNL token is in the fwl-io repository and nowhere else. For your own dataset:
 
-1. Open an issue on the [fwl-io repository](https://github.com/FormingWorlds/fwl-io/issues) with the version DOI and the dataset key.
-2. A maintainer runs the workflow **Mirror a Zenodo deposit to Dataverse** with the version DOI. It creates a private draft and prints its DOI.
+1. Open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) on the fwl-io repository with the version DOI and the dataset key, or use the request that brought the record into the community.
+2. A maintainer runs the workflow **Mirror a Zenodo deposit to Dataverse** with the version DOI, and a member of the team `proteus-maintainer` approves the run. It creates a private draft and prints its DOI.
 3. The maintainer checks the draft and runs the workflow **Publish an existing Dataverse draft**.
 4. The maintainer gives you the DOI of the mirror, of the form `10.34894/<id>`.
 
@@ -275,13 +275,13 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo. It takes 1 to 3 minutes, and up to 10 minutes when Zenodo is slow. On a day with no failed read it prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo. It takes 1 to 3 minutes, and about 10 minutes when Zenodo is slow. On a day with no failed read it prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
 ```
 
-The first count covers the shared manifest and the demo dataset, so your number can differ.
+The first count, after `pins served by their mirror:`, covers the shared manifest and the demo dataset, so your number can differ.
 
 Look for the demo dataset, not at the counts. The pin of the demo dataset is served when all of these hold: no line that starts with `FAIL` or `UNREACHABLE` names `demo.melting_curves`, no line starts with `FAIL demo: MANIFEST`, and no line `unpinned demo.melting_curves` stands below the counts (such a line means that the `dataverse` line is missing). Lines for other datasets are not caused by this tutorial: an `UNREACHABLE` line means that a server did not answer for that dataset, and on a day when Zenodo is slow the shared manifest can have some; the command then exits 3, which says nothing about the demo dataset. When `demo.melting_curves` itself is `UNREACHABLE`, run the command again later. The [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists every line and exit code of the command.
 
