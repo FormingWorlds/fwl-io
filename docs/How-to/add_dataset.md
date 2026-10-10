@@ -52,7 +52,7 @@ Ask a maintainer of fwl-io for a mirror of the deposit on DataverseNL: [A mirror
 dataverse = "10.34894/ABCDEF"
 ```
 
-The mirror must host **byte-identical** copies of the originals: the mirror workflow checks each file in the Dataverse dataset against the Zenodo record after its upload. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors` to confirm that the pin serves the dataset.
+The mirror must host **byte-identical** copies of the originals: the mirror workflow downloads each file, checks it against the Zenodo checksum, uploads it, and compares the uploaded file with that copy. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors` to confirm that the pin serves the dataset.
 
 ## 5. Ship it
 

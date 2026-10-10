@@ -11,12 +11,13 @@ The steps that you cannot run here are marked **Not run here**: the upload to Ze
 ## 1. Make a scratch directory
 
 ```bash
+echo "$FWL_DATA"
 mkdir fwl-tutorial
 cd fwl-tutorial
 export FWL_DATA="$PWD/data"
 ```
 
-`FWL_DATA` is the directory that fwl-io downloads into. When your shell had a value for it, note that value: step 11 removes the variable. Every command below must run in this shell, in `fwl-tutorial`.
+`FWL_DATA` is the directory that fwl-io downloads into. The first command prints the value that your shell had for it, or an empty line: note that value, since step 11 removes the variable. Every command below must run in this shell, in `fwl-tutorial`.
 
 ## 2. Deposit the files on Zenodo
 
@@ -129,7 +130,7 @@ fwl-io: 1 dataset(s) failed to sync (0 registries written):
 fwl-io list
 ```
 
-The output lists the datasets of every installed manifest, one block per package in alphabetical order. The block of the demo package is:
+The output lists the datasets of every installed manifest, one block per manifest, sorted by the name of its entry point. The block of the demo package is:
 
 ```text
 [demo]
@@ -234,13 +235,13 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes about a minute (48 to 98 s in three runs). It prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes 1 to 3 minutes. It prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
 ```
 
-The first count covers the shared manifest and the demo dataset, so your number can be larger. No new fetch is needed after this change. `wrong: 0` is what matters: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1.
+The first count covers the shared manifest and the demo dataset, so your number can be larger. `wrong: 0` and `not checked (could not be read): 0` are what matters: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1; a pin that could not be read gives an `UNREACHABLE` line, and you run the command again.
 
 ## 10. Open the pull request
 
