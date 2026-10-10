@@ -9,6 +9,7 @@ import pytest
 from fwl_io import mirror_sync as sync
 from fwl_io.cli import main
 from fwl_io.manifest import Dataset, ErrorKind, ProviderError, _Discovery
+from fwl_io.mirror import source_record
 from fwl_io.mirror_status import StatusReport
 from fwl_io.mirror_sync import (
     collection_mirrors,
@@ -191,7 +192,7 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
     datasets = [
         _ds('g.a', 1),
         _ds('g.b', 2),
-        _ds('g.b2', 2, pin='10.34894/TWO'),
+        _ds('g.b2', 2, pin='doi:10.34894/TWO'),
         _ds('g.c', 3),
         _ds('g.d', 4),
         _ds('g.e', 5, files=('x.dat',)),
@@ -269,7 +270,7 @@ def test_a_check_that_fails_to_run_still_names_the_draft(monkeypatch):
     lines, code = _run()
     assert code == 1 and lines[-1] == (
         f'CREATED draft {PID} for 10.5281/zenodo.8 (g.new): '
-        'NOT verified: the check failed: division by zero'
+        'NOT verified: the check failed: ZeroDivisionError: division by zero'
     )
 
 
@@ -278,6 +279,17 @@ def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_o
     made = _plan(monkeypatch, [_ds('g.ok', 1, pin='10.34894/ONE')], StatusReport(ok=['g.ok']), {})
     lines, code = _run()
     assert (lines[-1], code, made) == ('no draft to create', 0, [])
+    _plan(
+        monkeypatch,
+        [_ds('g.ok', 1, pin='10.34894/ONE')],
+        StatusReport(unreadable={'g.ok': 'x'}),
+        {},
+    )
+    assert _run()[1] == 3, 'a record that could not be read is the only problem'
+    datasets = [_ds('g.down', 1), _ds('g.new', 2)]
+    unpinned = {ds.key: ds.zenodo for ds in datasets}
+    _plan(monkeypatch, datasets, StatusReport(unpinned=unpinned, unreadable={'g.down': 'x'}), {})
+    assert _run(dry_run=True)[1] == 3
     broken = {'p': ProviderError(ErrorKind.CONFLICT, 'claims a taken location')}
     made = _plan(monkeypatch, [], StatusReport(), {}, errors=broken)
     monkeypatch.setattr(sync, 'DataverseClient', lambda *a: pytest.fail('a client was made'))
@@ -294,6 +306,35 @@ required_by = ["demo"]
 zenodo = "10.5281/zenodo.56"
 dataverse = "10.34894/OLDPIN"
 """
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('x MIRROR  of zenodo\tdeposit 10.5281/ZENODO.55. y', '55'),
+        ('Mirror of Zenodo deposit 10.34894/ABCDEF.', None),
+        ('other data', None),
+    ],
+)
+def test_the_record_of_a_source_note_is_read_in_any_case_or_spacing(text, expected):
+    """The note names a Zenodo record in any case or spacing; another DOI or no note gives
+    None."""
+    assert source_record(text) == expected
+
+
+def test_a_pin_keeps_the_bytes_of_the_rest_of_the_manifest(tmp_path):
+    """CRLF line endings, a character outside ASCII and a last line without a newline stay
+    as they are around the new pin, and after a pin that cannot be written."""
+    manifest = tmp_path / 'manifest.toml'
+    start = '[g.a]\r\nname = "Ångström"\r\nzenodo = "10.5281/zenodo.6"\r\n\r\n[g.b]\r\n'
+    start = (start + 'zenodo = "10.5281/zenodo.7"').encode()
+    manifest.write_bytes(start)
+    write_pin(manifest, 'g.b', '10.34894/BPIN')
+    pinned = start + b'\r\ndataverse = "10.34894/BPIN"\r\n'
+    assert manifest.read_bytes() == pinned
+    with pytest.raises(ValueError, match='left unchanged'):
+        write_pin(manifest, 'g.a', 'no doi')
+    assert manifest.read_bytes() == pinned
 
 
 def test_the_pin_is_written_after_the_zenodo_line_of_its_table(tmp_path):

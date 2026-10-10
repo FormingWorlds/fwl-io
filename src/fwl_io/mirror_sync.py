@@ -30,11 +30,13 @@ from fwl_io.pins import dataverse_server, pin_problem
 from fwl_io.sync import ZENODO_API, _extract_files, fetch_zenodo_record, select_files
 
 
-def collection_mirrors(client: DataverseClient, collection: str) -> dict[str, list[tuple]]:
+def collection_mirrors(
+    client: DataverseClient, collection: str
+) -> dict[str, list[tuple[str | None, str]]]:
     """Return the datasets of a collection by the Zenodo record id their description names,
     each as ``(version state, persistent id)``; drafts are listed when the client holds a
     token. The search index can lag a dataset created seconds ago."""
-    found: dict[str, list[tuple]] = {}
+    found: dict[str, list[tuple[str | None, str]]] = {}
     start = 0
 
     def page(start: int) -> dict:
@@ -150,7 +152,11 @@ def mirror_sync(
     lines = [status.summary()]
     client = DataverseClient(dataverse_url, token)
     mirrors = collection_mirrors(client, collection)
-    pinned = {zenodo_record_id(ds.zenodo): ds.dataverse for ds in datasets if ds.dataverse}
+    pinned = {
+        zenodo_record_id(ds.zenodo): ds.dataverse.removeprefix('doi:')
+        for ds in datasets
+        if ds.dataverse
+    }
     todo: dict[str, list[str]] = {}
     for key, doi in sorted(status.unpinned.items()):
         recid = zenodo_record_id(doi)
@@ -190,7 +196,7 @@ def mirror_sync(
     try:
         problems = verify_draft(client, persistent_id, doi, files)
     except Exception as exc:  # noqa: BLE001 -- the draft exists: its id must reach the report
-        problems = [f'the check failed: {exc}']
+        problems = [f'the check failed: {type(exc).__name__}: {exc}']
     verdict = 'verified' if not problems else 'NOT verified: ' + '; '.join(problems)
     lines.append(f'CREATED draft {persistent_id} for {doi} ({", ".join(keys)}): {verdict}')
     return lines, 1 if problems else unread
@@ -206,25 +212,28 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
         If the manifest has no ``[key]`` table with a ``zenodo`` line, or does not load
         with the pin afterwards; the file is left as it was.
     """
-    before = manifest.read_text(encoding='utf-8')
-    lines = before.splitlines(keepends=True)
+    before = manifest.read_bytes()
+    lines = before.decode('utf-8').splitlines(keepends=True)
     try:
-        start = lines.index(f'[{key}]\n')
+        start = next(i for i, line in enumerate(lines) if line.rstrip('\r\n') == f'[{key}]')
         end = next(
             (i for i in range(start + 1, len(lines)) if lines[i].startswith('[')), len(lines)
         )
         body = [line for line in lines[start + 1 : end] if not line.startswith('dataverse')]
         at = next(i for i, line in enumerate(body) if line.startswith('zenodo')) + 1
-    except (ValueError, StopIteration):
+    except StopIteration:
         raise ValueError(f'{manifest} has no [{key}] table with a zenodo line') from None
-    body.insert(at, f'dataverse = "{pin}"\n')
-    manifest.write_text(''.join(lines[: start + 1] + body + lines[end:]), encoding='utf-8')
+    eol = '\r\n' if lines[start].endswith('\r\n') else '\n'
+    if not body[at - 1].endswith('\n'):
+        body[at - 1] += eol
+    body.insert(at, f'dataverse = "{pin}"{eol}')
+    manifest.write_bytes(''.join(lines[: start + 1] + body + lines[end:]).encode('utf-8'))
     try:
         written = {ds.key: ds.dataverse for ds in load_manifest(manifest)}
     except Exception:
         written = {}
     if written.get(key) != pin:
-        manifest.write_text(before, encoding='utf-8')
+        manifest.write_bytes(before)
         raise ValueError(f'{manifest} does not load with the pin of {key}; left unchanged')
 
 
@@ -266,11 +275,11 @@ def mirror_pin(
     discovery = _discover_all()
     datasets = {ds.key: ds for group in [*discovery.found.values(), own] for ds in group}
     lines = [f'{p}: manifest left out, {e.message}' for p, e in discovery.errors.items()]
-    code = 1 if lines else 0
+    code, matched = (1 if lines else 0), False
     for ds in sorted(datasets.values(), key=lambda ds: ds.key):
-        old = (ds.dataverse or '').removeprefix('doi:')
         if zenodo_record_id(ds.zenodo) != recid:
             continue
+        matched, old = True, (ds.dataverse or '').removeprefix('doi:')
         if problem := pin_problem(replace(ds, dataverse=pin), client):
             lines.append(f'FAIL {ds.key}: {problem}')
             code = 1
@@ -281,6 +290,6 @@ def mirror_pin(
             lines.append(f'PINNED {ds.key} in {manifest.name}' + (f' (was {old})' if old else ''))
         else:
             lines.append(f'{ds.key} is declared by another package; add there: dataverse = "{pin}"')
-    if len(lines) == len(discovery.errors):
+    if not matched:
         return [*lines, f'no installed dataset pins Zenodo {recid}'], 1
     return lines, code
