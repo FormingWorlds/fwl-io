@@ -40,7 +40,6 @@ import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 from fwl_io.fetch import _hash_matches
 from fwl_io.fs_guard import (
@@ -52,11 +51,8 @@ from fwl_io.fs_guard import (
     _platform_gap,
     _probe_dir_below,
 )
-from fwl_io.manifest import ProviderError
+from fwl_io.manifest import Dataset, ProviderError, _discover_all
 from fwl_io.paths import resolve_data_root
-
-if TYPE_CHECKING:
-    from fwl_io.manifest import Dataset
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -563,8 +559,6 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
         One entry per dataset that declares a legacy location, whether or not
         that location exists on this machine.
     """
-    from fwl_io.manifest import _discover_all
-
     root = resolve_data_root(data_root)
     locations, layout_error = _legacy_locations()
     entries: list[Relocation] = []

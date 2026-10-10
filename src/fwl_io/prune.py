@@ -67,7 +67,7 @@ from fwl_io.fs_guard import (
     _same_dir,
     _same_entry,
 )
-from fwl_io.manifest import ProviderError
+from fwl_io.manifest import ProviderError, _discover_all
 from fwl_io.paths import existing_data_root
 from fwl_io.relocate import _version_dir
 
@@ -389,8 +389,6 @@ def _reference_set(
         a directory no manifest references. Either error field being set means
         the reference set is incomplete.
     """
-    from fwl_io.manifest import _discover_all
-
     discovery = _discover_all()
     referenced: set[Path] = set()
     known_subdirs: set[str] = set()

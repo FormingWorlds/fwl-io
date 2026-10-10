@@ -14,6 +14,7 @@ from fwl_io import (
     resolve_data_root, resolve_cache_root,
     DownloadError, OfflineDataError, MissingDataRootError,
     ManifestSchemaError,
+    ProviderError, ErrorKind,           # why a manifest was left out of a report
 )
 ```
 
@@ -23,7 +24,7 @@ Per-module reference pages:
 - [Checking](check.md): `check_for`, `check_dataset`, `CheckReport`, `DatasetCheck`, `FileCheck`
 - [Relocating](relocate.md): `relocate_all`, `plan_relocations`, `RelocationReport`, `Relocation`
 - [Pruning](prune.md): `plan_prune`, `apply_prune`, `prune_versions`, `PruneReport`, `PruneCandidate`
-- [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`, `ManifestSchemaError`
+- [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`, `ManifestSchemaError`, `ProviderError`, `ErrorKind`
 - [Registries](registry.md): registry file reading and writing
 - [Sync](sync.md): registry generation from the Zenodo API
 - [Paths](paths.md): data root, shared cache, offline mode

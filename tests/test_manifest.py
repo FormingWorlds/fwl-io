@@ -65,6 +65,7 @@ def test_the_report_classes_resolve_their_provider_error_type():
         hints = typing.get_type_hints(report)
         assert hints['manifest_errors'] == dict[str, fwl_io.ProviderError]
     assert fwl_io.ErrorKind.CONFLICT is manifest.ErrorKind.CONFLICT
+    assert {'ProviderError', 'ErrorKind'} <= set(fwl_io.__all__)
 
 
 def _discover():

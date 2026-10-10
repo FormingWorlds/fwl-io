@@ -32,7 +32,7 @@ from pathlib import Path
 
 from fwl_io.fetch import Fetcher, create_fetcher
 from fwl_io.fs_guard import _is_regular_file
-from fwl_io.manifest import ProviderError
+from fwl_io.manifest import ProviderError, _discover_all
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -314,8 +314,6 @@ def check_for(model: str, data_root: str | Path | None = None) -> CheckReport:
         Keyed by dataset, alongside the manifests that were left out and
         the datasets that could not be resolved.
     """
-    from fwl_io.manifest import _discover_all
-
     model = model.lower()
     datasets: dict[str, DatasetCheck] = {}
     dataset_errors: dict[str, str] = {}
