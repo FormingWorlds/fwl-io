@@ -182,12 +182,6 @@ def names_source(text: str, doi: str) -> bool:
     return re.search(_NOTE + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
 
 
-def source_record(text: str) -> str | None:
-    """Return the Zenodo record id a :func:`source_note` in ``text`` names, or None."""
-    match = re.search(_NOTE + r'10\.5281/zenodo\.(\d+)', text, re.IGNORECASE)
-    return match and match.group(1)
-
-
 def _outside(recid: str) -> str:
     """Return the refusal text for a Zenodo record outside the communities of the framework."""
     return (
@@ -1290,8 +1284,8 @@ def mirror_to_dataverse(
 
 
 def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: str) -> None:
-    """Refuse the publish of a draft whose source record is unknown, not read, or outside
-    the communities of the framework."""
+    """Refuse the publish of a draft whose description does not name exactly one Zenodo
+    record, or whose record is not read or is outside the communities of the framework."""
     body = client._retry(
         lambda: client._request(
             'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
@@ -1299,15 +1293,18 @@ def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: s
         f'state of {persistent_id}',
     )
     version = (body.get('data') or {}).get('latestVersion') or {}
-    recid = source_record(descriptions(version))
-    if recid is None:
-        raise DataverseError(f'{persistent_id} names no Zenodo record as its source; not published')
+    named = set(re.findall(_NOTE + r'10\.5281/zenodo\.(\d+)', descriptions(version), re.IGNORECASE))
+    if len(named) != 1:
+        raise DataverseError(
+            f'{persistent_id} names {len(named)} Zenodo records as its source, not 1; not published'
+        )
+    recid = named.pop()
     try:
         record = fetch_zenodo_record(f'10.5281/zenodo.{recid}', api_base=api_base)
-    except (requests.RequestException, ValueError) as exc:
+    except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
         raise DataverseError(
-            f'Zenodo record {recid}, the source of {persistent_id}, was not read ({exc}); '
-            'not published'
+            f'Zenodo record {recid}, the source of {persistent_id}, was not read as a version '
+            f'record ({exc}); not published'
         ) from exc
     if not in_community(record):
         raise ValueError(_outside(recid))
@@ -1324,8 +1321,8 @@ def publish_existing_dataverse_draft(
     """Publish an existing Dataverse draft dataset by its persistent id.
 
     Before the publish, the Zenodo record that the description of the draft names is read:
-    a draft that names none, or whose record is not an accepted record of a community of
-    the framework, is not published.
+    a draft that names none or several, or whose record is not an accepted record of a
+    community of the framework, is not published.
 
     This never calls :meth:`DataverseClient.create_dataset`, so it cannot
     mint a duplicate dataset: it is the second step of a create-draft ->
@@ -1356,8 +1353,8 @@ def publish_existing_dataverse_draft(
     DataverseAlreadyPublished
         If the dataset is already published before the publish request.
     DataverseError
-        If the dataset does not exist, its description names no Zenodo record, that
-        record could not be read, or Dataverse rejects the publish request with a 4xx
+        If the dataset does not exist, its description does not name exactly one Zenodo
+        record, that record could not be read, or Dataverse rejects the publish request with a 4xx
         status.
     DataversePublishUnconfirmed
         If the dataset is not RELEASED after the wait that follows the publish

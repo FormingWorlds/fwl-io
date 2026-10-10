@@ -24,6 +24,7 @@ import urllib3
 from requests import exceptions as requests_exceptions
 
 from fwl_io.mirror import (
+    DataverseAlreadyPublished,
     DataverseClient,
     DataverseError,
     DataversePublishUnconfirmed,
@@ -68,11 +69,16 @@ DV_LICENSES = [
 IN_COMMUNITY = [{'id': 'proteus_framework'}]
 
 
+@pytest.fixture
+def source_check():
+    """Request this fixture to run the read of the source record before a publish."""
+
+
 @pytest.fixture(autouse=True)
 def _publish_without_the_source_check(request, monkeypatch):
-    """The publish tests exercise the publish request; only the tests named for the source
-    check run the read of the source record before it."""
-    if 'source_record' not in request.node.name:
+    """The publish tests exercise the publish request; a test that asks for ``source_check``
+    runs the read of the source record before it."""
+    if 'source_check' not in request.fixturenames:
         monkeypatch.setattr('fwl_io.mirror._check_draft_source', lambda *args: None)
 
 
@@ -515,44 +521,74 @@ def _publish(http_server, dataverse_server):
         token='t',
         api_base=f'{http_server[0]}api/records',
     )
-    return [c['path'] for c in dataverse_server[1] if c['path'].endswith('/actions/:publish')]
+    return _published(dataverse_server)
 
 
-def test_a_publish_reads_the_source_record_and_goes_on_for_a_record_of_a_community(
-    http_server, dataverse_server
+def _published(dataverse_server):
+    return [c for c in dataverse_server[1] if c['path'].endswith('/actions/:publish')]
+
+
+@pytest.mark.parametrize('communities', [IN_COMMUNITY, [{'id': 'paleos'}]])
+def test_a_publish_goes_on_for_a_draft_whose_record_is_in_a_community(
+    http_server, dataverse_server, source_check, communities
 ):
-    """The draft names record 55, which is in the community: the publish request is sent."""
-    _serve_zenodo_record(http_server[1], 55, {'a.dat': b'AAA\n'})
+    """The draft names record 55, which is in a community: the publish request is sent, and
+    a dataset that is published already still gives its own error."""
+    _serve_zenodo_record(http_server[1], 55, {'a.dat': b'AAA\n'}, communities=communities)
     assert len(_publish(http_server, dataverse_server)) == 1
+    with pytest.raises(DataverseAlreadyPublished):
+        _publish(http_server, dataverse_server)
 
 
 @pytest.mark.parametrize('communities', OUTSIDE)
 def test_no_publish_when_the_source_record_is_outside_the_community(
-    http_server, dataverse_server, communities
+    http_server, dataverse_server, source_check, communities
 ):
     """A draft whose source record is outside the communities is refused with the record
     id, and no publish request is sent."""
     _serve_zenodo_record(http_server[1], 55, {'a.dat': b'AAA\n'}, communities=communities)
     with pytest.raises(ValueError, match='Zenodo record 55 is not an accepted record'):
         _publish(http_server, dataverse_server)
-    assert not any(c['path'].endswith('/actions/:publish') for c in dataverse_server[1])
+    assert _published(dataverse_server) == []
 
 
-def test_no_publish_when_the_draft_names_no_source_record(http_server, dataverse_server):
-    """A draft without the source note is not published."""
-    _DataverseHandler.source_note = 'Some other data.'
-    with pytest.raises(DataverseError, match='names no Zenodo record as its source'):
+NOTE_55 = 'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
+NOTE_77 = 'mirror of zenodo deposit 10.5281/zenodo.77.'
+
+
+@pytest.mark.parametrize(
+    ('note', 'count'),
+    [('Some other data.', 0), (f'{NOTE_77} {NOTE_55}', 2), (f'{NOTE_55}\n{NOTE_77}', 2)],
+)
+def test_no_publish_unless_the_draft_names_exactly_one_source_record(
+    http_server, dataverse_server, source_check, note, count
+):
+    """A draft without the source note, or with notes for two records in either order (one
+    inside a community, one outside), is not published."""
+    _serve_zenodo_record(http_server[1], 77, {'a.dat': b'AAA\n'})
+    _serve_zenodo_record(http_server[1], 55, {'b.dat': b'B\n'}, communities=[])
+    _DataverseHandler.source_note = note
+    with pytest.raises(DataverseError, match=f'names {count} Zenodo records as its source'):
         _publish(http_server, dataverse_server)
-    assert not any(c['path'].endswith('/actions/:publish') for c in dataverse_server[1])
+    assert _published(dataverse_server) == []
 
 
-def test_no_publish_when_the_source_record_is_not_read(http_server, dataverse_server):
-    """Zenodo does not serve the record: the error says not read, not outside, and no
-    publish request is sent."""
+@pytest.mark.parametrize(
+    'served', [None, '["not", "an", "object"]', '{"id": 55, "conceptrecid": "55"}']
+)
+def test_no_publish_when_the_source_record_is_not_read(
+    http_server, dataverse_server, source_check, served
+):
+    """Zenodo does not serve the record, serves another kind of body, or resolves the id as
+    a concept: the error says not read, not outside, and no publish request is sent."""
+    if served is not None:
+        api_dir = http_server[1] / 'api' / 'records'
+        api_dir.mkdir(parents=True, exist_ok=True)
+        (api_dir / '55').write_text(served)
     with pytest.raises(DataverseError, match='Zenodo record 55, .* was not read') as err:
         _publish(http_server, dataverse_server)
     assert 'accepted record' not in str(err.value)
-    assert not any(c['path'].endswith('/actions/:publish') for c in dataverse_server[1])
+    assert _published(dataverse_server) == []
 
 
 def test_a_record_that_zenodo_does_not_serve_is_not_mirrored(http_server, dataverse_server):

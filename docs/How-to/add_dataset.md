@@ -4,7 +4,7 @@ Follow these steps to make a new dataset fetchable through fwl-io. Steps 3 to 5 
 
 ## 1. Bring the files into the PROTEUS Framework community on Zenodo
 
-A dataset of the framework is an accepted record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework) or of the PALEOS community (`paleos`). fwl-io creates and publishes a mirror for no other record: `fwl-io mirror` and `fwl-io mirror-publish` refuse a record outside the two communities, and a check of the shared manifest fails for one. A record of the PALEOS community needs no step of this section: go to step 2.
+A dataset of the framework is an accepted record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework) or of the PALEOS community (`paleos`). fwl-io creates a mirror for no other record: `fwl-io mirror` refuses a record outside the two communities, `fwl-io mirror-publish` publishes a draft only when its description names exactly one record and that record is in one of them, and a check of the shared manifest fails for a record outside. A record of the PALEOS community needs no step of this section: go to step 2.
 
 The maintainers of the framework are the curators of the PROTEUS Framework community: a maintainer accepts a record that is submitted to it.
 
