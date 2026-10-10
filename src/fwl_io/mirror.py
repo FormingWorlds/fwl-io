@@ -37,7 +37,13 @@ from pathlib import Path
 
 import requests
 
-from fwl_io.sync import ZENODO_API, fetch_zenodo_record, zenodo_record_id
+from fwl_io.sync import (
+    ZENODO_API,
+    ZENODO_COMMUNITY,
+    fetch_zenodo_record,
+    in_community,
+    zenodo_record_id,
+)
 from fwl_io.transient import is_cert_failure
 
 log = logging.getLogger('fwl.' + __name__)
@@ -969,6 +975,9 @@ def _missing(client: DataverseClient, persistent_id: str, names) -> list[str] | 
     return sorted(n for n in names if n not in listed)
 
 
+_COMMUNITY_DOCS = 'https://proteus-framework.org/fwl-io/How-to/add_dataset/'
+
+
 def mirror_to_dataverse(
     zenodo_doi: str,
     *,
@@ -1048,7 +1057,8 @@ def mirror_to_dataverse(
     ValueError
         If ``into`` comes with ``dry_run`` or ``publish``, or ``licence`` with ``into``,
         ``dry_run`` or ``publish``, or ``zenodo_doi`` is malformed or is a concept DOI (a
-        version DOI is required), if a real create is requested without a contact email, if the
+        version DOI is required), if the record is not an accepted record of the Zenodo
+        community of the framework, if a real create is requested without a contact email, if the
         Zenodo record lists no files, if ``files`` names a file the record does
         not contain or selects none of them, or if a file name nests below the
         dataset directory (Dataverse flattens on the basename, so it would
@@ -1115,6 +1125,13 @@ def mirror_to_dataverse(
 
     recid = zenodo_record_id(zenodo_doi)
     record = fetch_zenodo_record(zenodo_doi, api_base=api_base)
+    if not in_community(record):
+        raise ValueError(
+            f'Zenodo record {recid} is not an accepted record of the Zenodo community '
+            f'{ZENODO_COMMUNITY}, and fwl-io mirrors only records of that community. When the '
+            'record is submitted to the community, wait until a curator accepts it; when it is '
+            f'not, open a dataset request: {_COMMUNITY_DOCS}'
+        )
     from fwl_io.sync import _extract_files
 
     registry = _extract_files(record)

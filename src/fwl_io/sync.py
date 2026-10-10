@@ -29,6 +29,8 @@ from fwl_io.registry import write_registry
 __all__ = ['fetch_zenodo_registry', 'sync_dataset', 'sync_manifest', 'zenodo_record_id']
 
 ZENODO_API = 'https://zenodo.org/api/records'
+# The Zenodo community whose records are the datasets of the framework.
+ZENODO_COMMUNITY = 'proteus_framework'
 
 
 def _extract_files(record: dict) -> dict[str, str]:
@@ -61,6 +63,13 @@ def fetch_zenodo_record(doi: str, api_base: str = ZENODO_API) -> dict:
             f'record {returned_id}); pin the version DOI of a specific deposit instead'
         )
     return record
+
+
+def in_community(record: dict, slug: str = ZENODO_COMMUNITY) -> bool:
+    """Whether a Zenodo record, as :func:`fetch_zenodo_record` returns it, is an accepted
+    record of the community ``slug`` (it is listed in ``metadata.communities``)."""
+    listed = (record.get('metadata') or {}).get('communities') or []
+    return any(entry.get('id') == slug for entry in listed)
 
 
 def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str]:

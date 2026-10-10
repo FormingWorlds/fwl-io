@@ -133,3 +133,23 @@ def test_sync_manifest_rejects_a_listed_file_the_record_lacks(http_server, tmp_p
     with pytest.raises(RuntimeError, match='gamma.dat'):
         sync_manifest(manifest, api_base=f'{base_url}api/records')
     assert not (tmp_path / 'g.demo.registry.txt').exists()
+
+
+@pytest.mark.parametrize(
+    ('record', 'expected'),
+    [
+        ({'metadata': {'communities': [{'id': 'proteus_framework'}]}}, True),
+        ({'metadata': {'communities': [{'id': 'other'}, {'id': 'proteus_framework'}]}}, True),
+        ({'metadata': {'communities': [{'id': 'other'}]}}, False),
+        ({'metadata': {'communities': []}}, False),
+        ({'metadata': {}}, False),
+        ({}, False),
+    ],
+)
+def test_a_record_is_in_the_community_only_when_its_metadata_lists_it(record, expected):
+    """The community of the framework must be in ``metadata.communities`` of the record."""
+    from fwl_io.sync import ZENODO_COMMUNITY, in_community
+
+    assert ZENODO_COMMUNITY == 'proteus_framework'
+    assert in_community(record) is expected
+    assert in_community({'metadata': {'communities': [{'id': 'x'}]}}, slug='x')

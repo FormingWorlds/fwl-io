@@ -65,7 +65,10 @@ DV_LICENSES = [
 ]
 
 
-def _serve_zenodo_record(root, recid, files, rights=(CC_BY,)):
+IN_COMMUNITY = [{'id': 'proteus_framework'}]
+
+
+def _serve_zenodo_record(root, recid, files, rights=(CC_BY,), communities=IN_COMMUNITY):
     """Publish a Zenodo record JSON plus its files; return (record, registry)."""
     registry = {}
     for name, payload in files.items():
@@ -83,6 +86,7 @@ def _serve_zenodo_record(root, recid, files, rights=(CC_BY,)):
             ],
             'description': 'A demo dataset.',
             'rights': list(rights),
+            'communities': communities,
         },
         'files': [{'key': n, 'checksum': h, 'size': len(files[n])} for n, h in registry.items()],
     }
@@ -339,7 +343,8 @@ def _mirror(http_server, dataverse_server, **overrides):
     dv_url, calls = dataverse_server
     rights = overrides.pop('rights', (CC_BY,))
     deposit = overrides.pop('deposit', {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n'})
-    _serve_zenodo_record(root, 55, deposit, rights)
+    communities = overrides.pop('communities', IN_COMMUNITY)
+    _serve_zenodo_record(root, 55, deposit, rights, communities)
     kwargs = dict(
         dataverse_url=dv_url,
         collection='Proteus_Fr',
@@ -463,13 +468,49 @@ def test_dry_run_downloads_but_makes_no_dataverse_calls(http_server, dataverse_s
     assert calls == []
 
 
+@pytest.mark.parametrize('communities', [None, [], [{'id': 'another_community'}]])
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_a_record_outside_the_community_is_refused_before_any_write(
+    http_server, dataverse_server, communities, dry_run
+):
+    """A record that is not an accepted record of the community is refused with the name of
+    the community and the docs page, in a dry run too, and Dataverse gets no request."""
+    with pytest.raises(ValueError, match='not an accepted record of the Zenodo community') as err:
+        _mirror(http_server, dataverse_server, communities=communities, dry_run=dry_run)
+    assert 'proteus_framework' in str(err.value) and 'How-to/add_dataset/' in str(err.value)
+    assert dataverse_server[1] == []
+
+
+def test_a_record_that_zenodo_does_not_serve_is_not_mirrored(http_server, dataverse_server):
+    """When the Zenodo record cannot be read, the error of that read ends the run and
+    Dataverse gets no request."""
+    base_url, _ = http_server
+    with pytest.raises(requests_exceptions.HTTPError):
+        mirror_to_dataverse(
+            '10.5281/zenodo.404404',
+            dataverse_url=dataverse_server[0],
+            collection='Proteus_Fr',
+            token='t',
+            contact_name='x',
+            contact_email='y@z',
+            api_base=f'{base_url}api/records',
+        )
+    assert dataverse_server[1] == []
+
+
 def test_empty_record_rejected(http_server, dataverse_server):
     """A Zenodo record with no files is refused before any Dataverse call."""
     base_url, root = http_server
     dv_url, calls = dataverse_server
     api_dir = root / 'api' / 'records'
     api_dir.mkdir(parents=True, exist_ok=True)
-    (api_dir / '77').write_text(json.dumps({'id': 77, 'conceptrecid': '76', 'files': []}))
+    record = {
+        'id': 77,
+        'conceptrecid': '76',
+        'files': [],
+        'metadata': {'communities': IN_COMMUNITY},
+    }
+    (api_dir / '77').write_text(json.dumps(record))
     with pytest.raises(ValueError, match='lists no files'):
         mirror_to_dataverse(
             '10.5281/zenodo.77',
