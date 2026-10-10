@@ -350,14 +350,19 @@ def test_the_pin_is_written_after_the_zenodo_line_of_its_table(tmp_path):
 
 
 def test_a_pin_that_would_change_other_content_is_refused(tmp_path):
-    """A line inside a multi-line string that looks like an old pin is not removed: the
-    edit is refused and the manifest stays as it was."""
+    """A line inside a multi-line string that looks like an old pin is not removed, and a
+    manifest that does not parse is not edited: the edit is refused, the file unchanged."""
     manifest = tmp_path / 'manifest.toml'
     text = '[g.a]\nname = """Spectra\ndataverse mirror notes\n"""\nzenodo = "10.5281/zenodo.6"\n'
     manifest.write_text(text)
     with pytest.raises(ValueError, match='would change more than its pin'):
         write_pin(manifest, 'g.a', '10.34894/APIN')
     assert manifest.read_text() == text
+    broken = '[g.a]\nzenodo = "10.5281/zenodo.6"\nname = \n'
+    manifest.write_text(broken)
+    with pytest.raises(ValueError, match='would change more than its pin'):
+        write_pin(manifest, 'g.a', '10.34894/APIN')
+    assert manifest.read_text() == broken, 'a manifest that does not parse is not edited'
 
 
 @pytest.mark.parametrize(
