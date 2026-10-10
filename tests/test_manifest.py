@@ -53,6 +53,20 @@ def test_a_provider_error_names_its_verdict_by_kind(kind, verdict):
     assert manifest.ProviderError(kind, 'why').verdict == verdict
 
 
+def test_the_report_classes_resolve_their_provider_error_type():
+    """The reports name ``ProviderError`` in their annotations, importable from the package
+    and resolvable at runtime."""
+    import typing
+
+    import fwl_io
+    from fwl_io.pins import MirrorReport
+
+    for report in (fwl_io.CheckReport, fwl_io.RelocationReport, fwl_io.PruneReport, MirrorReport):
+        hints = typing.get_type_hints(report)
+        assert hints['manifest_errors'] == dict[str, fwl_io.ProviderError]
+    assert fwl_io.ErrorKind.CONFLICT is manifest.ErrorKind.CONFLICT
+
+
 def _discover():
     """Return discovery as ``(datasets per provider, message per provider left out)``."""
     result = manifest._discover_all()

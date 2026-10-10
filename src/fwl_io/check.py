@@ -29,13 +29,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from fwl_io.fetch import Fetcher, create_fetcher
 from fwl_io.fs_guard import _is_regular_file
-
-if TYPE_CHECKING:
-    from fwl_io.manifest import ProviderError
+from fwl_io.manifest import ProviderError
 
 log = logging.getLogger('fwl.' + __name__)
 

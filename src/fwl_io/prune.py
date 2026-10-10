@@ -44,7 +44,6 @@ import stat
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 from fwl_io.fetch import (
     _LOCK_DIRNAME,
@@ -68,11 +67,9 @@ from fwl_io.fs_guard import (
     _same_dir,
     _same_entry,
 )
+from fwl_io.manifest import ProviderError
 from fwl_io.paths import existing_data_root
 from fwl_io.relocate import _version_dir
-
-if TYPE_CHECKING:
-    from fwl_io.manifest import ProviderError
 
 log = logging.getLogger('fwl.' + __name__)
 

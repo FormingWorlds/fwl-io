@@ -52,10 +52,11 @@ from fwl_io.fs_guard import (
     _platform_gap,
     _probe_dir_below,
 )
+from fwl_io.manifest import ProviderError
 from fwl_io.paths import resolve_data_root
 
 if TYPE_CHECKING:
-    from fwl_io.manifest import Dataset, ProviderError
+    from fwl_io.manifest import Dataset
 
 log = logging.getLogger('fwl.' + __name__)
 
