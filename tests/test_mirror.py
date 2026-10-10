@@ -3088,6 +3088,7 @@ def test_a_run_into_a_draft_does_not_read_the_zenodo_license(
     _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('b.dat', b'BBBB\n', 2)]
     result, calls = _mirror(http_server, dataverse_server, into=PID, rights=rights)
     assert result == PID and _writes(calls) == []
+    assert not any(c['path'] == '/api/licenses' for c in calls)
 
 
 def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, dataverse_server):
@@ -3102,9 +3103,9 @@ def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, da
         ((APACHE,), {'licence': 'NO-SUCH'}, "0 active licenses named 'NO-SUCH'", True),
         ((CC_BY,), {}, r'the server lists \(CC-BY-4.0\)', True),
         ((TWO_HITS,), {}, r'the server lists \(CC-BY-4.0, CC0-1.0\)', True),
-        ((APACHE,), {'into': 'doi:x'}, 'neither into, dry_run nor publish', False),
-        ((APACHE,), {'dry_run': True}, 'neither into, dry_run nor publish', False),
-        ((APACHE,), {'publish': True}, 'neither into, dry_run nor publish', False),
+        ((APACHE,), {'into': 'doi:x'}, 'not with into or dry_run', False),
+        ((APACHE,), {'dry_run': True}, 'not with into or dry_run', False),
+        ((APACHE,), {'publish': True}, 'never a published dataset: pass --no-publish', False),
         ((), {}, 'lists 0 licenses', False),
         ((CC_BY, CC0), {}, 'lists 2 licenses', False),
     ],

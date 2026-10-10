@@ -1034,9 +1034,9 @@ def mirror_to_dataverse(
     licence : str | None
         Name of a Dataverse license to give a new draft in place of the one matched from
         the Zenodo record, for a record whose author licenses it otherwise; a description
-        line then names it and the Zenodo licence field. Only when the Zenodo license
-        matches no license on the server, and not with ``into``, ``dry_run`` or ``publish``:
-        the draft is reviewed first.
+        line then names it and the Zenodo licence field. Only for a record with exactly
+        one Zenodo license entry that matches no license on the server, and not with
+        ``into``, ``dry_run`` or ``publish``: the draft is reviewed first.
 
     Returns
     -------
@@ -1094,10 +1094,12 @@ def mirror_to_dataverse(
     # the server stays authoritative across installations and vocabulary changes.
     if publish is None:
         publish = into is None and licence is None
-    if licence is not None and (into is not None or dry_run or publish):
+    if licence is not None and (into is not None or dry_run):
+        raise ValueError('licence applies to a run that creates a draft, not with into or dry_run')
+    if licence is not None and publish:
         raise ValueError(
-            'licence creates a draft for review: it takes neither into, dry_run nor publish '
-            '(pass --no-publish)'
+            'licence creates a draft for review, never a published dataset: pass --no-publish '
+            '(publish=False)'
         )
     if into is not None and (dry_run or publish):
         raise ValueError(
@@ -1140,10 +1142,10 @@ def mirror_to_dataverse(
     metadata = zenodo_record_to_citation(
         record, contact_name=contact_name, contact_email=contact_email, subject=subject
     )
-    # A second read of the same record: only the InvenioRDM form names CC0 as cc0-1.0.
-    # fetch_zenodo_record above has already rejected a concept DOI for this recid.
     client = None if dry_run else DataverseClient(dataverse_url, token)
     if into is None:  # a run into a draft leaves its license as it is
+        # A second read of the same record: only the InvenioRDM form names CC0 as cc0-1.0.
+        # fetch_zenodo_record above has already rejected a concept DOI for this recid.
         rights = _zenodo_record_rights(recid, api_base)
         log.info('Zenodo record %s license: %s', recid, rights.get('id'))
     if client is not None and into is None and licence is None:
