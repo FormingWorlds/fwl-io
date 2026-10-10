@@ -4,7 +4,7 @@ This tutorial takes one small dataset from a Zenodo record to a pinned, fetched,
 
 The dataset is hypothetical: a model named `demo` needs two melting-curve files. The files are real. They are in the public Zenodo record `10.5281/zenodo.15728072` (2 files of 50 kB), which stands in for the record that you would upload yourself.
 
-You need Python 3.11 or newer, an internet connection, and fwl-io ([Installation](../How-to/installation.md)).
+You need Python 3.11 or newer, an internet connection, and a Python environment with fwl-io installed ([Installation](../How-to/installation.md) says how). Activate that environment in the shell that you use, and check it: `fwl-io --help` must print a text that starts with `usage: fwl-io`. Create and edit the files below with a text editor.
 
 The steps that you cannot run here are marked **Not run here**: the upload to Zenodo, the two mirror workflows and the pull request.
 
@@ -26,9 +26,15 @@ For this tutorial the record exists: `10.5281/zenodo.15728072`.
 
 ## 3. Create the package that declares the dataset
 
-A dataset is declared in a manifest, a TOML file that a Python package ships. A dataset that several models read goes into the shared manifest of fwl-io itself; a dataset that one model reads goes into the manifest of that model. Here the model is a package of three files.
+A dataset is declared in a manifest, a TOML file that a Python package ships. A dataset that several models read goes into the shared manifest of fwl-io itself; a dataset that one model reads goes into the manifest of that model. Here the model is a package of three files, in this layout:
 
-Create the package directory:
+```text
+fwl-tutorial/
+  demo_model/              the project: pyproject.toml
+    demo_model/            the Python package: __init__.py, manifest.toml
+```
+
+Create the two directories:
 
 ```bash
 mkdir -p demo_model/demo_model
@@ -110,7 +116,7 @@ solidus.dat md5:66b297a120c79e7e58de5761ac40f4c4
 
 When Zenodo does not answer, the command prints `1 dataset(s) failed to sync` with the reason and exits 1. Run it again.
 
-A manifest must pin a version DOI. Zenodo also gives every record a concept DOI, which always points to the newest version; for this record it is `10.5281/zenodo.15728071`. With that DOI in the `zenodo` line, the same command refuses:
+A manifest must pin a version DOI. Zenodo also gives every record a concept DOI, which always points to the newest version; for this record it is `10.5281/zenodo.15728071`. You do not need to try it: with that DOI in the `zenodo` line, the same command refuses and exits 1:
 
 ```text
 fwl-io: 1 dataset(s) failed to sync (0 registries written):
@@ -132,7 +138,7 @@ The output lists the datasets of every installed manifest. It starts with the de
 [fwl-io-shared]
 ```
 
-The datasets of the shared manifest follow.
+The datasets of the shared manifest follow, two lines each. `required_by: -` marks a dataset that no model fetches by its name.
 
 ## 6. Fetch and check the files
 
@@ -146,7 +152,7 @@ Downloading data from 'doi:10.5281/zenodo.15728072/solidus.dat' to file '<FWL_DA
 demo.melting_curves: 2 file(s)
 ```
 
-In your output, `<FWL_DATA>` is the full path of your `data` directory and `<random name>` is a temporary directory. Each file is downloaded there, compared with its checksum in the registry, and moved into place.
+In your output, `<FWL_DATA>` is the full path of your `data` directory and `<random name>` is a temporary directory, another one for each file. Each file is downloaded there, compared with its checksum in the registry, and moved into place.
 
 The files are in a directory named for the Zenodo record:
 
@@ -186,6 +192,8 @@ A mirror is a copy of the record on DataverseNL, which a fetch uses when Zenodo 
 fwl-io mirror 10.5281/zenodo.15728072 --collection Proteus_Fr --dry-run
 ```
 
+In your output, `<temporary directory>` is a long path below the temporary directory of your system, another one for each file:
+
 ```text
 Downloading data from 'doi:10.5281/zenodo.15728072/liquidus.dat' to file '<temporary directory>/liquidus.dat'.
 Downloading data from 'doi:10.5281/zenodo.15728072/solidus.dat' to file '<temporary directory>/solidus.dat'.
@@ -209,7 +217,7 @@ For this tutorial the mirror exists: `10.34894/6VJ51M` is the mirror of record 1
 
 ## 9. Pin the mirror
 
-Add the `dataverse` line to `demo_model/demo_model/manifest.toml`, below the `zenodo` line:
+Edit `demo_model/demo_model/manifest.toml`: add the `dataverse` line below the `zenodo` line, so that the file reads:
 
 ```toml
 manifest_schema = 1
@@ -256,6 +264,7 @@ After the merge, the dataset reaches users with the next release of the package.
 pip uninstall -y demo-model
 cd ..
 rm -r fwl-tutorial
+unset FWL_DATA
 ```
 
 ## Where to go next
