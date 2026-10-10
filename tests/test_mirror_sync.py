@@ -263,9 +263,11 @@ def test_a_dry_run_creates_nothing_and_a_failed_check_fails_the_run(
 
 
 def test_a_check_that_fails_to_run_still_names_the_draft(monkeypatch):
-    """An error during the check of a new draft is reported with the draft's id, exit 1."""
+    """An error during the check of a new draft is reported with the draft's id, exit 1,
+    also when a Zenodo record could not be read (exit 3 is for a run with no failure)."""
     datasets = [_ds('g.new', 8)]
-    _plan(monkeypatch, datasets, StatusReport(unpinned={'g.new': datasets[0].zenodo}), {})
+    status = StatusReport(unpinned={'g.new': datasets[0].zenodo}, unreadable={'g.other': 'x'})
+    _plan(monkeypatch, datasets, status, {})
     monkeypatch.setattr(sync, 'verify_draft', lambda *args: 1 / 0)
     lines, code = _run()
     assert code == 1 and lines[-1] == (
@@ -276,15 +278,11 @@ def test_a_check_that_fails_to_run_still_names_the_draft(monkeypatch):
 
 def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_out(monkeypatch):
     """All pinned: no draft and exit 0. A manifest left out: exit 1 before any request."""
-    made = _plan(monkeypatch, [_ds('g.ok', 1, pin='10.34894/ONE')], StatusReport(ok=['g.ok']), {})
+    ok = [_ds('g.ok', 1, pin='10.34894/ONE')]
+    made = _plan(monkeypatch, ok, StatusReport(ok=['g.ok']), {})
     lines, code = _run()
     assert (lines[-1], code, made) == ('no draft to create', 0, [])
-    _plan(
-        monkeypatch,
-        [_ds('g.ok', 1, pin='10.34894/ONE')],
-        StatusReport(unreadable={'g.ok': 'x'}),
-        {},
-    )
+    _plan(monkeypatch, ok, StatusReport(unreadable={'g.ok': 'x'}), {})
     assert _run()[1] == 3, 'a record that could not be read is the only problem'
     datasets = [_ds('g.down', 1), _ds('g.new', 2)]
     unpinned = {ds.key: ds.zenodo for ds in datasets}
@@ -314,6 +312,7 @@ dataverse = "10.34894/OLDPIN"
         ('x MIRROR  of zenodo\tdeposit 10.5281/ZENODO.55. y', '55'),
         ('Mirror of Zenodo deposit 10.34894/ABCDEF.', None),
         ('other data', None),
+        ('see 10.5281/zenodo.55 for details', None),
     ],
 )
 def test_the_record_of_a_source_note_is_read_in_any_case_or_spacing(text, expected):
@@ -413,6 +412,9 @@ def test_a_replaced_pin_and_a_manifest_left_out_are_reported(monkeypatch, tmp_pa
         'PINNED g.second in manifest.toml (was 10.34894/OLDPIN)',
     ]
     assert manifest.read_text() == MANIFEST.replace('OLDPIN', 'NEWPIN')
+    version = _version('RELEASED', note=NOTE.replace('.55', '.77'))
+    _, _, (lines, code) = _pin(monkeypatch, tmp_path, version, errors=errors)
+    assert lines[-1] == 'no installed dataset pins Zenodo 77' and len(lines) == 2 and code == 1
 
 
 @pytest.mark.parametrize(
