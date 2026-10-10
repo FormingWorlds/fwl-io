@@ -917,11 +917,27 @@ def test_mirror_into_passes_the_draft_and_never_publishes(monkeypatch, capsys):
     assert seen['licence'] is None
 
 
-def test_mirror_licence_reaches_the_mirror(monkeypatch):
-    """--licence is passed through for a run that creates a draft."""
+def test_mirror_licence_reaches_the_mirror_and_needs_no_publish(monkeypatch, capsys):
+    """--licence is passed through with --no-publish; without it the run is refused before
+    any request, and the message names the option."""
     seen = {}
-    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', lambda doi, **kw: seen.update(kw))
     monkeypatch.setenv('DATAVERSE_TOKEN', 't')
     argv = ['mirror', '10.5281/zenodo.21390786', '--collection', 'C', '--licence', 'CC-BY-4.0']
-    main([*argv, '--contact-email', 'c@x'])
-    assert seen['licence'] == 'CC-BY-4.0' and seen['into'] is None
+    argv += ['--contact-email', 'c@x']
+    monkeypatch.setattr('requests.Session.request', lambda *a, **k: pytest.fail('a request'))
+    monkeypatch.setattr('requests.get', lambda *a, **k: pytest.fail('a request'))
+    assert main(argv) == 1
+    assert 'pass --no-publish' in capsys.readouterr().err
+    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', lambda doi, **kw: seen.update(kw))
+    main([*argv, '--no-publish'])
+    assert seen['licence'] == 'CC-BY-4.0' and seen['into'] is None and seen['publish'] is False
+
+
+def test_mirror_no_publish_reports_a_created_draft(monkeypatch, capsys):
+    """--no-publish without --into reports the draft as created and gives no manifest line."""
+    monkeypatch.setattr('fwl_io.mirror.mirror_to_dataverse', lambda doi, **kw: 'doi:10.34894/D1')
+    monkeypatch.setenv('DATAVERSE_TOKEN', 't')
+    assert main(['mirror', '10.5281/zenodo.55', '--collection', 'C', '--no-publish']) == 0
+    out = capsys.readouterr().out
+    assert 'draft doi:10.34894/D1 created, not published' in out
+    assert 'add this to the manifest' not in out

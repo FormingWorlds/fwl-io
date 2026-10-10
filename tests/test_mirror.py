@@ -47,6 +47,7 @@ CC0 = {
         'scheme': 'spdx',
     },
 }
+PID, OTHER_PID = 'doi:10.34894/DEMO01', 'doi:10.34894/OTHER1'
 # The license list DataverseNL returns (GET /api/licenses), trimmed to three entries.
 DV_LICENSES = [
     {
@@ -103,6 +104,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
     # (method, path suffix) -> replies served after the normal handling ran
     script_after: dict = {}
     draft_files: list = []  # files the fake draft holds, as the listing reports them
+    other_files: list = []  # files of a second dataset, OTHER_PID
     released: bool = False
     deleted: bool = False
     license: dict | None = None
@@ -131,6 +133,14 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         )
         return parsed
 
+    def _files(self, parsed):
+        """Return the file list of the dataset a request names, or answer 404 and return None."""
+        pid = parse_qs(parsed.query).get('persistentId', [PID])[0]
+        files = {PID: self.draft_files, OTHER_PID: self.other_files}.get(pid)
+        if files is None:
+            self._reply(404, {'status': 'ERROR', 'message': f'Dataset {pid} not found'})
+        return files
+
     def _scripted(self, method, path, table):
         for (m, suffix), replies in table.items():
             if m == method and path.endswith(suffix) and replies:
@@ -157,10 +167,12 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         parsed = self._record('GET')
         if self._scripted('GET', parsed.path, self.script):
             return
-        if parsed.path.endswith('/versions/:draft/files'):
-            self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in self.draft_files]})
-        elif parsed.path.endswith('/api/licenses'):
+        if parsed.path.endswith('/api/licenses'):
             self._reply(200, {'status': 'OK', 'data': DV_LICENSES})
+        elif (files := self._files(parsed)) is None:
+            return
+        elif parsed.path.endswith('/versions/:draft/files'):
+            self._reply(200, {'status': 'OK', 'data': [{'dataFile': f} for f in files]})
         elif self.deleted:
             self._reply(404, {'status': 'ERROR', 'message': 'not found'})
         else:
@@ -201,9 +213,11 @@ class _DataverseHandler(BaseHTTPRequestHandler):
         parsed = self._record('POST')
         if self._scripted('POST', parsed.path, self.script):
             return
+        if parsed.path.endswith('/add') and (files := self._files(parsed)) is None:
+            return
         if parsed.path.endswith('/add') and self._scripted('POST', '/add', self.script_after):
             # The upload reached the draft, but the response was lost.
-            self.draft_files.extend(self._uploaded_files())
+            files.extend(self._uploaded_files())
             return
         if parsed.path.endswith('/actions/:publish') and self.script_after.get(
             ('POST', '/actions/:publish')
@@ -226,7 +240,7 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             if self.fail_on_add:
                 self._reply(400, {'status': 'ERROR', 'message': 'bad field'})
             else:
-                self.draft_files.extend(self._uploaded_files())
+                files.extend(self._uploaded_files())
                 self._reply(200, {'status': 'OK', 'data': {'files': [{'label': 'ok'}]}})
         elif parsed.path.endswith('/actions/:publish'):
             if self.fail_on_publish:
@@ -267,7 +281,8 @@ class _DataverseHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith('/api/files/'):
             file_id = int(parsed.path.rsplit('/', 1)[1])
-            self.draft_files[:] = [f for f in self.draft_files if f.get('id') != file_id]
+            for files in (self.draft_files, self.other_files):
+                files[:] = [f for f in files if f.get('id') != file_id]
             if not self._scripted('DELETE', parsed.path, self.script_after):
                 self._reply(200, {'status': 'OK', 'data': {'message': 'file deleted'}})
             return
@@ -300,6 +315,7 @@ def dataverse_server():
     _DataverseHandler.script = {}
     _DataverseHandler.script_after = {}
     _DataverseHandler.draft_files = []
+    _DataverseHandler.other_files = []
     _DataverseHandler.released = False
     _DataverseHandler.deleted = False
     _DataverseHandler.license = None
@@ -2356,6 +2372,8 @@ def test_a_folder_label_on_the_file_entry_is_part_of_the_path(tmp_path, monkeypa
 # The mirror copies the Zenodo source license
 # ---------------------------------------------------------------------------
 
+# The CC-BY URL with the CC0 id: matches two licenses of the server list.
+TWO_HITS = {'id': 'cc0-1.0', 'props': CC_BY['props']}
 APACHE = {
     'id': 'apache-2.0',
     'props': {'url': 'http://www.apache.org/licenses/LICENSE-2.0', 'scheme': 'spdx'},
@@ -2720,25 +2738,48 @@ def test_a_run_into_a_draft_sends_only_missing_or_differing_files(
 
 
 @pytest.mark.parametrize(
-    ('released', 'note', 'why'),
+    ('state', 'why'),
     [
-        (True, None, 'is not a draft that was never published'),
-        ('version', None, 'is not a draft that was never published'),
-        (False, 'Mirror of Zenodo deposit 10.5281/zenodo.56.', 'does not name Zenodo'),
+        ({'released': True}, 'is not a draft that was never published'),
+        ({'version_number': 1}, 'is not a draft that was never published'),
+        ({'publication_date': '2025-01-01'}, 'is not a draft that was never published'),
+        ({'omit_latest': True}, 'is not a draft that was never published'),
+        ({'source_note': 'Mirror of Zenodo deposit 10.5281/zenodo.56.'}, 'does not name Zenodo'),
     ],
 )
 def test_a_run_into_refuses_a_published_or_foreign_dataset(
-    http_server, dataverse_server, sleeps, released, note, why
+    http_server, dataverse_server, sleeps, monkeypatch, state, why
 ):
-    """Files are added only to a never-published draft that names this record; nothing is
-    written to another dataset."""
-    _DataverseHandler.released = released is True
-    _DataverseHandler.version_number = 1 if released == 'version' else None
-    if note:
-        _DataverseHandler.source_note = note
+    """Files are added only to a never-published draft that names this record: a released
+    dataset, a draft of one published before, a reply without latestVersion and a draft of
+    another record are read and refused with no write."""
+    for name, value in state.items():
+        monkeypatch.setattr(_DataverseHandler, name, value)
     with pytest.raises(DataverseError, match=why):
-        _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01', publish=False)
-    assert all(c['method'] == 'GET' for c in _DataverseHandler.calls)
+        _mirror(http_server, dataverse_server, into=PID)
+    calls = _DataverseHandler.calls
+    assert _writes(calls) == [] and any(c['method'] == 'GET' for c in calls)
+
+
+def test_a_run_into_a_draft_reads_and_writes_that_dataset_only(
+    http_server, dataverse_server, sleeps
+):
+    """With a second dataset on the server, every request that names a dataset names the
+    target, only the target's files change, and an id the server does not know is refused
+    with no write."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('z.dat', b'Z', 9)]
+    other = [_entry('b.dat', b'old\n', 20), _entry('q.dat', b'Q', 21)]
+    _DataverseHandler.other_files = list(other)
+    _, calls = _mirror(http_server, dataverse_server, into=PID)
+    named = [c['query']['persistentId'] for c in calls if 'persistentId' in c['query']]
+    assert named and all(pid == [PID] for pid in named)
+    assert [c['path'] for c in calls if c['method'] == 'DELETE'] == ['/api/files/9']
+    assert sorted(f['filename'] for f in _DataverseHandler.draft_files) == ['a.dat', 'b.dat']
+    assert _DataverseHandler.other_files == other
+    calls.clear()
+    with pytest.raises(DataverseError, match='404'):
+        _mirror(http_server, dataverse_server, into='doi:10.34894/NOPE01')
+    assert _writes(calls) == []
 
 
 def test_a_failure_after_a_file_landed_keeps_the_draft_and_names_what_is_missing(
@@ -2756,22 +2797,25 @@ def test_a_failure_after_a_file_landed_keeps_the_draft_and_names_what_is_missing
 
 
 def test_uploads_are_spaced_and_slow_down_after_a_bot_check_page(
-    http_server, dataverse_server, sleeps, monkeypatch
+    http_server, dataverse_server, sleeps, monkeypatch, caplog
 ):
     """Uploads wait UPLOAD_SPACING_S apart, BOT_CHECK_SPACING_S after one that met the
     bot-check page; two such uploads in a row stop the run with the draft kept while files
     remain, and not after the last file."""
     monkeypatch.setattr('fwl_io.mirror.UPLOAD_SPACING_S', 60.0)
     monkeypatch.setattr('fwl_io.mirror.BOT_CHECK_SPACING_S', 600.0)
+    caplog.set_level('INFO', logger='fwl.fwl_io.mirror')
     three = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n', 'c.dat': b'C\n'}
     _mirror(http_server, dataverse_server, publish=False, deposit=three)
     assert sleeps == [60.0, 60.0]
+    assert 'waiting 60 s before the upload of b.dat (upload spacing)' in caplog.text
     sleeps.clear()
     _DataverseHandler.draft_files, _DataverseHandler.calls[:] = [], []
     _DataverseHandler.script = {('POST', '/add'): ['challenge', 'pass', 'challenge']}
     with pytest.raises(MirrorIncomplete, match=r'two uploads in a row') as raised:
         _mirror(http_server, dataverse_server, publish=False, deposit=three)
     assert raised.value.missing == ['c.dat'] and sleeps == [30.0, 600.0, 30.0]
+    assert 'waiting 600 s before the upload of b.dat (after a bot-check page)' in caplog.text
     assert not _DataverseHandler.deleted
     sleeps.clear()
     _DataverseHandler.draft_files, _DataverseHandler.calls[:] = [], []
@@ -3014,10 +3058,9 @@ def test_a_licence_override_sets_the_named_licence_and_says_why(
     """With licence, a record whose Zenodo licence the server does not list gets the named
     Dataverse license, and the description keeps its entries and gains one naming the
     license and the Zenodo licence field."""
-    result, calls = _mirror(
-        http_server, dataverse_server, rights=(APACHE,), licence='CC-BY-4.0', publish=False
-    )
+    result, calls = _mirror(http_server, dataverse_server, rights=(APACHE,), licence='CC-BY-4.0')
     assert result == 'doi:10.34894/DEMO01'
+    assert not any(c['path'].endswith('/actions/:publish') for c in calls), 'a draft for review'
     assert _DataverseHandler.license == {
         'name': 'CC-BY-4.0',
         'uri': 'http://creativecommons.org/licenses/by/4.0',
@@ -3036,6 +3079,17 @@ def test_a_licence_override_sets_the_named_licence_and_says_why(
     )
 
 
+@pytest.mark.parametrize('rights', [(), (CC_BY, CC0)], ids=['no license', 'two licenses'])
+def test_a_run_into_a_draft_does_not_read_the_zenodo_license(
+    http_server, dataverse_server, sleeps, rights
+):
+    """A run into a draft leaves its license alone, so a record with no license entry or
+    several still completes."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1), _entry('b.dat', b'BBBB\n', 2)]
+    result, calls = _mirror(http_server, dataverse_server, into=PID, rights=rights)
+    assert result == PID and _writes(calls) == []
+
+
 def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, dataverse_server):
     """No override: a Zenodo licence the server does not list stops the mirror as before."""
     with pytest.raises(ValueError, match='matches'):
@@ -3046,18 +3100,23 @@ def test_without_an_override_the_licence_still_comes_from_zenodo(http_server, da
     ('rights', 'kwargs', 'match', 'reads'),
     [
         ((APACHE,), {'licence': 'NO-SUCH'}, "0 active licenses named 'NO-SUCH'", True),
-        ((CC_BY,), {'licence': 'CC-BY-4.0'}, 'has a license the server lists', True),
-        ((APACHE,), {'licence': 'CC-BY-4.0', 'into': 'doi:x'}, 'not with into or dry_run', False),
-        ((APACHE,), {'licence': 'CC-BY-4.0', 'dry_run': True}, 'not with into or dry_run', False),
+        ((CC_BY,), {}, r'the server lists \(CC-BY-4.0\)', True),
+        ((TWO_HITS,), {}, r'the server lists \(CC-BY-4.0, CC0-1.0\)', True),
+        ((APACHE,), {'into': 'doi:x'}, 'neither into, dry_run nor publish', False),
+        ((APACHE,), {'dry_run': True}, 'neither into, dry_run nor publish', False),
+        ((APACHE,), {'publish': True}, 'neither into, dry_run nor publish', False),
+        ((), {}, 'lists 0 licenses', False),
+        ((CC_BY, CC0), {}, 'lists 2 licenses', False),
     ],
 )
 def test_a_licence_override_is_refused_when_it_cannot_apply(
     http_server, dataverse_server, rights, kwargs, match, reads
 ):
-    """An unknown name, a record whose Zenodo license the server lists, into and dry run are
-    refused before any write; the first two after reading the license list only."""
+    """An unknown name, a Zenodo license that matches one or several server licenses, into,
+    dry run, publish, and a record with no license entry or several are refused before any
+    write; the first three after reading the license list only."""
     with pytest.raises(ValueError, match=match):
-        _mirror(http_server, dataverse_server, rights=rights, publish=False, **kwargs)
+        _mirror(http_server, dataverse_server, rights=rights, **{'licence': 'CC-BY-4.0', **kwargs})
     seen = [(c['method'], c['path']) for c in _DataverseHandler.calls]
     assert seen == ([('GET', '/api/licenses')] if reads else [])
 
@@ -3083,24 +3142,6 @@ def test_named_license_needs_exactly_one_active_license_of_that_name(licenses, n
     else:
         with pytest.raises(ValueError, match=r'it has \['):
             _named_license(licenses, name)
-
-
-def _writes(calls):
-    """Return the POST, PUT and DELETE requests of a run."""
-    return [(c['method'], c['path']) for c in calls if c['method'] in ('POST', 'PUT', 'DELETE')]
-
-
-@pytest.mark.parametrize('case', ['published before', 'no latest version'])
-def test_a_run_into_refuses_a_dataset_published_before_or_without_a_version(
-    http_server, dataverse_server, sleeps, case
-):
-    """A draft of a dataset published before (publicationDate set) or a reply without
-    latestVersion is refused with no write."""
-    _DataverseHandler.publication_date = '2025-01-01' if case == 'published before' else None
-    _DataverseHandler.omit_latest = case == 'no latest version'
-    with pytest.raises(DataverseError, match='is not a draft that was never published'):
-        _mirror(http_server, dataverse_server, into='doi:10.34894/DEMO01')
-    assert _writes(_DataverseHandler.calls) == []
 
 
 def test_a_file_that_fails_its_check_is_removed_and_reported_missing(
@@ -3180,6 +3221,49 @@ def test_a_file_deletion_is_retried_and_sent_once_when_it_went_through(
     ]
 
 
+def test_a_bot_check_page_on_the_deletion_of_a_differing_copy_counts_for_the_stop(
+    http_server, dataverse_server, sleeps
+):
+    """A challenged deletion of a differing copy and a challenged upload of the next file are
+    two bot-check uploads in a row: the run stops before the third file."""
+    three = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n', 'c.dat': b'C\n'}
+    _DataverseHandler.draft_files = [_entry('a.dat', b'old\n', 1)]
+    _DataverseHandler.script = {
+        ('DELETE', '/api/files/1'): ['challenge'],
+        ('POST', '/add'): ['pass', 'challenge'],
+    }
+    with pytest.raises(MirrorIncomplete, match='two uploads in a row') as raised:
+        _mirror(http_server, dataverse_server, into=PID, deposit=three)
+    assert raised.value.missing == ['c.dat'] and not _adds(_DataverseHandler.calls, 'c.dat')
+
+
+def test_a_bad_upload_that_cannot_be_deleted_reports_both_failures(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """An upload stored with other bytes whose deletion is rejected is reported as not
+    intact, with the failed deletion as its cause, and as a wrong file of the kept draft."""
+    monkeypatch.setattr(
+        _DataverseHandler, '_uploaded_files', lambda self: [_entry('a.dat', b'BAD\n', 50)]
+    )
+    _DataverseHandler.script = {('DELETE', '/api/files/50'): [400]}
+    with pytest.raises(MirrorIncomplete, match='a.dat is not intact') as raised:
+        _mirror(http_server, dataverse_server)
+    assert 'DELETE /api/files/50 failed' in str(raised.value.__cause__.__cause__)
+    assert raised.value.state['wrong'] == ['a.dat']
+
+
+def test_a_differing_file_stops_a_fresh_run_before_the_spacing_wait(
+    http_server, dataverse_server, sleeps, monkeypatch
+):
+    """A draft file of the next name with other bytes stops a run without into at once, not
+    after the wait between uploads."""
+    monkeypatch.setattr('fwl_io.mirror.UPLOAD_SPACING_S', 60.0)
+    _DataverseHandler.draft_files = [_entry('b.dat', b'old\n', 2)]
+    with pytest.raises(MirrorIncomplete, match='holds a file named b.dat'):
+        _mirror(http_server, dataverse_server)
+    assert sleeps == []
+
+
 def test_a_clean_upload_between_two_bot_check_uploads_resets_the_stop(
     http_server, dataverse_server, sleeps, monkeypatch
 ):
@@ -3216,6 +3300,8 @@ def test_a_fresh_run_stops_when_a_selected_file_is_absent_at_the_end(
 def test_a_403_on_publish_keeps_the_complete_draft(http_server, dataverse_server, sleeps):
     """A 403 on the publish request keeps the complete draft."""
     _DataverseHandler.script = {('POST', '/actions/:publish'): [403]}
-    with pytest.raises(MirrorIncomplete, match='publish it with fwl-io mirror-publish'):
+    with pytest.raises(
+        MirrorIncomplete, match='check their contents, then publish it with fwl-io mirror-publish'
+    ):
         _mirror(http_server, dataverse_server)
     assert not any(c['method'] == 'DELETE' for c in _DataverseHandler.calls)

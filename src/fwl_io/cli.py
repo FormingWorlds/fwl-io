@@ -364,7 +364,8 @@ def main(argv: list[str] | None = None) -> int:
     p_mirror.add_argument(
         '--licence',
         metavar='NAME',
-        help='Dataverse license for a new draft in place of the Zenodo one (author-approved)',
+        help='Dataverse license for a new draft in place of the Zenodo one (author-approved; '
+        'needs --no-publish)',
     )
     p_mirror.add_argument(
         '--into',

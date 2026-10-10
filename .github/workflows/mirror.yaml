@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       licence:
-        description: "Dataverse license name for a new draft in place of the Zenodo one, only where the author licenses it so (empty: from Zenodo)"
+        description: "Dataverse license name for a new draft in place of the Zenodo one, only where the author licenses it so; never published (empty: from Zenodo)"
         required: false
         default: ""
       into:
@@ -72,7 +72,7 @@ jobs:
           set -f
           file_args=()
           for name in ${FILES}; do file_args+=(--file "${name}"); done
-          if [ -n "${LICENCE}" ]; then file_args+=(--licence "${LICENCE}"); fi
+          if [ -n "${LICENCE}" ]; then file_args+=(--licence "${LICENCE}" --no-publish); fi
           if [ -n "${INTO}" ]; then file_args+=(--into "${INTO}" --no-publish); fi
           fwl-io mirror "${ZENODO_DOI}" \
             --collection "${COLLECTION}" \
