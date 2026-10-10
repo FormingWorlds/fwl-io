@@ -76,7 +76,7 @@ def test_collection_mirrors_reads_every_page_and_groups_by_record():
 
     client = FakeClient({'/api/search': search})
     assert collection_mirrors(client, 'Coll') == {
-        '55': ['RELEASED doi:10.34894/P0', 'RELEASED doi:10.34894/P100']
+        '55': [('RELEASED', 'doi:10.34894/P0'), ('RELEASED', 'doi:10.34894/P100')]
     }
     assert [params['start'] for _, params in client.calls] == [0, 100]
     assert client.calls[0][1]['subtree'] == 'Coll'
@@ -161,7 +161,8 @@ def test_a_draft_that_differs_from_its_record_is_named(monkeypatch, version, cha
 
 def _plan(monkeypatch, datasets, status, mirrors, problems=(), errors=None):
     """Patch discovery, the status, the collection listing and the mirror; return the calls."""
-    made = []
+    made, _plan.clients = [], []
+    monkeypatch.setattr(sync, 'DataverseClient', lambda *args: _plan.clients.append(args))
     monkeypatch.setattr(sync, '_discover_all', lambda: _Discovery({'m': datasets}, errors or {}))
     monkeypatch.setattr(sync, 'mirror_status', lambda found: status)
     monkeypatch.setattr(sync, 'collection_mirrors', lambda client, collection: mirrors)
@@ -198,21 +199,39 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
         _ds('g.f', 6),
     ]
     unpinned = {ds.key: ds.zenodo for ds in datasets if not ds.dataverse}
-    status = StatusReport(unpinned=unpinned, stale={'g.a': 'newer'})
-    mirrors = {'3': ['RELEASED doi:10.34894/THREE'], '4': ['DRAFT doi:10.34894/FOUR']}
+    status = StatusReport(unpinned=unpinned, stale={'g.a': 'newer'}, unreadable={'g.f': 'down'})
+    mirrors = {
+        '3': [('DRAFT', 'doi:10.34894/NEXT'), ('RELEASED', 'doi:10.34894/THREE')],
+        '4': [('DRAFT', 'doi:10.34894/FOUR'), ('DEACCESSIONED', 'doi:10.34894/GONE')],
+    }
     made = _plan(monkeypatch, datasets, status, mirrors)
     lines, code = _run()
-    assert code == 0 and lines[1:] == [
+    assert code == 3, 'a record could not be read, and nothing else failed'
+    assert lines[1:] == [
         'SKIPPED g.a: pin the newest Zenodo version first',
-        'PIN MISSING g.b: run fwl-io mirror-pin 10.34894/TWO',
+        'PIN MISSING g.b: run fwl-io mirror-pin doi:10.34894/TWO',
         'PIN MISSING g.c: run fwl-io mirror-pin doi:10.34894/THREE',
-        'WAITING g.d: review and publish DRAFT doi:10.34894/FOUR',
-        'records without a mirror: 2; this run takes Zenodo 5',
+        'WAITING g.d: the collection holds doi:10.34894/FOUR (DRAFT), '
+        'doi:10.34894/GONE (DEACCESSIONED)',
+        'SKIPPED g.f: its Zenodo record could not be read',
+        'records without a mirror: 1; this run takes Zenodo 5',
         f'CREATED draft {PID} for 10.5281/zenodo.5 (g.e, g.e2): verified',
     ]
-    ((doi, kwargs),) = made
-    assert doi == '10.5281/zenodo.5' and kwargs['files'] == ['x.dat', 'y.dat']
-    assert kwargs['publish'] is False and kwargs['collection'] == 'Coll'
+    assert _plan.clients == [('https://dv.example', 't')], 'the listing needs the token'
+    assert made == [
+        (
+            '10.5281/zenodo.5',
+            {
+                'dataverse_url': 'https://dv.example',
+                'collection': 'Coll',
+                'token': 't',
+                'contact_name': 'P',
+                'contact_email': 'c@x',
+                'publish': False,
+                'files': ['x.dat', 'y.dat'],
+            },
+        )
+    ]
 
 
 def test_a_record_one_dataset_reads_whole_is_mirrored_whole(monkeypatch):
@@ -240,6 +259,18 @@ def test_a_dry_run_creates_nothing_and_a_failed_check_fails_the_run(
     made = _plan(monkeypatch, datasets, status, {}, problems)
     lines, got = _run(dry_run)
     assert lines[-1].endswith(last) and got == code and len(made) == created
+
+
+def test_a_check_that_fails_to_run_still_names_the_draft(monkeypatch):
+    """An error during the check of a new draft is reported with the draft's id, exit 1."""
+    datasets = [_ds('g.new', 8)]
+    _plan(monkeypatch, datasets, StatusReport(unpinned={'g.new': datasets[0].zenodo}), {})
+    monkeypatch.setattr(sync, 'verify_draft', lambda *args: 1 / 0)
+    lines, code = _run()
+    assert code == 1 and lines[-1] == (
+        f'CREATED draft {PID} for 10.5281/zenodo.8 (g.new): '
+        'NOT verified: the check failed: division by zero'
+    )
 
 
 def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_out(monkeypatch):
@@ -294,10 +325,11 @@ def test_a_pin_that_cannot_be_written_leaves_the_manifest_as_it_was(tmp_path, ke
     assert manifest.read_text() == MANIFEST
 
 
-def _pin(monkeypatch, tmp_path, version, others=(), problem=None):
+def _pin(monkeypatch, tmp_path, version, others=(), problem=None, errors=None):
     manifest = tmp_path / 'manifest.toml'
     manifest.write_text(MANIFEST)
-    monkeypatch.setattr(sync, '_discover_all', lambda: _Discovery({'other': list(others)}, {}))
+    found = {'other': list(others)}
+    monkeypatch.setattr(sync, '_discover_all', lambda: _Discovery(found, errors or {}))
     checked = []
     monkeypatch.setattr(
         sync, 'pin_problem', lambda ds, client: checked.append((ds.key, ds.dataverse)) or problem
@@ -309,7 +341,12 @@ def _pin(monkeypatch, tmp_path, version, others=(), problem=None):
 def test_a_published_mirror_is_pinned_in_every_dataset_of_its_record(monkeypatch, tmp_path):
     """The dataset of the manifest gets the pin written; one another package declares gets
     the line to add; each is checked with the new pin first."""
-    others = [_ds('other.same', 55), _ds('other.done', 55, pin='10.34894/NEWPIN'), _ds('o.x', 9)]
+    others = [
+        _ds('other.same', 55),
+        _ds('other.done', 55, pin='doi:10.34894/NEWPIN'),
+        _ds('o.x', 9),
+    ]
+    others.append(_ds('g.first', 9))  # an installed copy of a key the manifest file declares
     manifest, checked, (lines, code) = _pin(monkeypatch, tmp_path, _version('RELEASED'), others)
     assert code == 0 and lines == [
         'PINNED g.first in manifest.toml',
@@ -322,6 +359,19 @@ def test_a_published_mirror_is_pinned_in_every_dataset_of_its_record(monkeypatch
         ('other.done', '10.34894/NEWPIN'),
         ('other.same', '10.34894/NEWPIN'),
     ]
+
+
+def test_a_replaced_pin_and_a_manifest_left_out_are_reported(monkeypatch, tmp_path):
+    """A dataset pinned to another mirror gets the new pin with the old one named; a manifest
+    left out of discovery is listed and fails the run, since its datasets were not seen."""
+    version = _version('RELEASED', note=NOTE.replace('.55', '.56'))
+    errors = {'p': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, errors=errors)
+    assert code == 1 and lines == [
+        'p: manifest left out, cannot load',
+        'PINNED g.second in manifest.toml (was 10.34894/OLDPIN)',
+    ]
+    assert manifest.read_text() == MANIFEST.replace('OLDPIN', 'NEWPIN')
 
 
 @pytest.mark.parametrize(

@@ -9,14 +9,13 @@ person to commit.
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import replace
 from pathlib import Path
 
 import requests
 
 from fwl_io.doi import zenodo_record_id
-from fwl_io.manifest import Dataset, _discover_all, load_manifest, shared_manifest_path
+from fwl_io.manifest import _discover_all, load_manifest, shared_manifest_path
 from fwl_io.mirror import (
     DataverseClient,
     _listing,
@@ -24,19 +23,18 @@ from fwl_io.mirror import (
     descriptions,
     mirror_to_dataverse,
     names_source,
+    source_record,
 )
 from fwl_io.mirror_status import mirror_status
 from fwl_io.pins import dataverse_server, pin_problem
 from fwl_io.sync import ZENODO_API, _extract_files, fetch_zenodo_record, select_files
 
-_SOURCE = re.compile(r'Mirror\s+of\s+Zenodo\s+deposit\s+10\.5281/zenodo\.(\d+)', re.IGNORECASE)
 
-
-def collection_mirrors(client: DataverseClient, collection: str) -> dict[str, list[str]]:
+def collection_mirrors(client: DataverseClient, collection: str) -> dict[str, list[tuple]]:
     """Return the datasets of a collection by the Zenodo record id their description names,
-    each as ``'<version state> <persistent id>'``; drafts are listed when the client holds
-    a token. The search index can lag a dataset created seconds ago."""
-    found: dict[str, list[str]] = {}
+    each as ``(version state, persistent id)``; drafts are listed when the client holds a
+    token. The search index can lag a dataset created seconds ago."""
+    found: dict[str, list[tuple]] = {}
     start = 0
 
     def page(start: int) -> dict:
@@ -49,9 +47,8 @@ def collection_mirrors(client: DataverseClient, collection: str) -> dict[str, li
     while True:
         data = page(start)
         for item in data['items']:
-            if match := _SOURCE.search(item.get('description') or ''):
-                entry = f'{item.get("versionState")} {item["global_id"]}'
-                found.setdefault(match.group(1), []).append(entry)
+            if recid := source_record(item.get('description') or ''):
+                found.setdefault(recid, []).append((item.get('versionState'), item['global_id']))
         start += 100
         if start >= data['total_count']:
             return found
@@ -131,9 +128,10 @@ def mirror_sync(
 ) -> tuple[list[str], int]:
     """Create a draft mirror for the first unpinned record that has no dataset yet.
 
-    A record that a dataset of ``collection`` names, draft or released, or that another
+    A record that a dataset of ``collection`` names, in any state, or that another
     installed dataset pins, gets no draft, only a line saying what it waits for (a publish,
-    or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version.
+    or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version
+    or could not be read.
     One draft per run, never published; it holds the files every dataset of the record
     asks for, and is verified with :func:`verify_draft`.
 
@@ -141,7 +139,8 @@ def mirror_sync(
     -------
     tuple
         The report lines, and the exit code: 0 when there was nothing to create or the new
-        draft is verified, 1 when a manifest was left out or the draft is not verified.
+        draft is verified, 1 when a manifest was left out or the draft is not verified, 3
+        when nothing failed but a Zenodo record could not be read.
     """
     discovery = _discover_all()
     if discovery.errors:
@@ -155,25 +154,29 @@ def mirror_sync(
     todo: dict[str, list[str]] = {}
     for key, doi in sorted(status.unpinned.items()):
         recid = zenodo_record_id(doi)
-        drafts = mirrors.get(recid, [])
-        released = [entry.split()[1] for entry in drafts if entry.startswith('RELEASED ')]
+        held = mirrors.get(recid, [])
+        released = [pid.removeprefix('doi:') for state, pid in held if state == 'RELEASED']
         if key in status.stale:
             lines.append(f'SKIPPED {key}: pin the newest Zenodo version first')
+        elif key in status.unreadable:
+            lines.append(f'SKIPPED {key}: its Zenodo record could not be read')
         elif published := pinned.get(recid) or next(iter(released), None):
-            lines.append(f'PIN MISSING {key}: run fwl-io mirror-pin {published}')
-        elif drafts:
-            lines.append(f'WAITING {key}: review and publish {", ".join(drafts)}')
+            lines.append(f'PIN MISSING {key}: run fwl-io mirror-pin doi:{published}')
+        elif held:
+            states = ', '.join(f'{pid} ({state})' for state, pid in held)
+            lines.append(f'WAITING {key}: the collection holds {states}')
         else:
             todo.setdefault(recid, []).append(key)
+    unread = 3 if status.unreadable else 0
     if not todo:
-        return [*lines, 'no draft to create'], 0
+        return [*lines, 'no draft to create'], unread
     recid, keys = next(iter(todo.items()))
     doi = f'10.5281/zenodo.{recid}'
     wanted = [ds.files for ds in datasets if zenodo_record_id(ds.zenodo) == recid]
     files = None if None in wanted else sorted({name for names in wanted for name in names})
     lines.append(f'records without a mirror: {len(todo)}; this run takes Zenodo {recid}')
     if dry_run:
-        return [*lines, f'WOULD CREATE a draft for {doi} ({", ".join(keys)})'], 0
+        return [*lines, f'WOULD CREATE a draft for {doi} ({", ".join(keys)})'], unread
     persistent_id = mirror_to_dataverse(
         doi,
         dataverse_url=dataverse_url,
@@ -184,10 +187,13 @@ def mirror_sync(
         publish=False,
         files=files,
     )
-    problems = verify_draft(client, persistent_id, doi, files)
+    try:
+        problems = verify_draft(client, persistent_id, doi, files)
+    except Exception as exc:  # noqa: BLE001 -- the draft exists: its id must reach the report
+        problems = [f'the check failed: {exc}']
     verdict = 'verified' if not problems else 'NOT verified: ' + '; '.join(problems)
     lines.append(f'CREATED draft {persistent_id} for {doi} ({", ".join(keys)}): {verdict}')
-    return lines, 1 if problems else 0
+    return lines, 1 if problems else unread
 
 
 def write_pin(manifest: Path, key: str, pin: str) -> None:
@@ -252,27 +258,29 @@ def mirror_pin(
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
         return [f'doi:{pin} is not published'], 1
-    source = _SOURCE.search(descriptions(version))
-    if source is None:
+    recid = source_record(descriptions(version))
+    if recid is None:
         return [f'doi:{pin} does not name a Zenodo record as its source'], 1
     manifest = Path(manifest or shared_manifest_path())
     own = load_manifest(manifest)
-    others = [ds for group in _discover_all().found.values() for ds in group]
-    datasets: dict[str, Dataset] = {ds.key: ds for ds in [*others, *own]}
-    lines, code = [], 0
+    discovery = _discover_all()
+    datasets = {ds.key: ds for group in [*discovery.found.values(), own] for ds in group}
+    lines = [f'{p}: manifest left out, {e.message}' for p, e in discovery.errors.items()]
+    code = 1 if lines else 0
     for ds in sorted(datasets.values(), key=lambda ds: ds.key):
-        if zenodo_record_id(ds.zenodo) != source.group(1):
+        old = (ds.dataverse or '').removeprefix('doi:')
+        if zenodo_record_id(ds.zenodo) != recid:
             continue
         if problem := pin_problem(replace(ds, dataverse=pin), client):
             lines.append(f'FAIL {ds.key}: {problem}')
             code = 1
-        elif ds.dataverse == pin:
+        elif old == pin:
             lines.append(f'{ds.key}: already pinned')
         elif any(ds.key == mine.key for mine in own):
             write_pin(manifest, ds.key, pin)
-            lines.append(f'PINNED {ds.key} in {manifest.name}')
+            lines.append(f'PINNED {ds.key} in {manifest.name}' + (f' (was {old})' if old else ''))
         else:
             lines.append(f'{ds.key} is declared by another package; add there: dataverse = "{pin}"')
-    if not lines:
-        return [f'no installed dataset pins Zenodo {source.group(1)}'], 1
+    if len(lines) == len(discovery.errors):
+        return [*lines, f'no installed dataset pins Zenodo {recid}'], 1
     return lines, code

@@ -168,10 +168,18 @@ def source_note(doi: str) -> str:
     return f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
 
 
+_NOTE = r'Mirror\s+of\s+Zenodo\s+deposit\s+'
+
+
 def names_source(text: str, doi: str) -> bool:
     """Return whether ``text`` holds the :func:`source_note` of ``doi`` (any case or spacing)."""
-    note = r'Mirror\s+of\s+Zenodo\s+deposit\s+' + re.escape(doi) + r'(?!\d)'
-    return re.search(note, text, re.IGNORECASE) is not None
+    return re.search(_NOTE + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
+
+
+def source_record(text: str) -> str | None:
+    """Return the Zenodo record id a :func:`source_note` in ``text`` names, or None."""
+    match = re.search(_NOTE + r'10\.5281/zenodo\.(\d+)', text, re.IGNORECASE)
+    return match and match.group(1)
 
 
 def zenodo_record_to_citation(
