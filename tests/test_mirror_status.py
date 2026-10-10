@@ -17,29 +17,33 @@ def _ds(key, recid, pin='10.34894/ABCDEF'):
 
 
 def test_datasets_are_sorted_by_what_their_mirror_needs():
-    """A pinned current record is in order; a missing pin, a newer version (also together)
-    and a failed Zenodo read are named; each record is read once."""
+    """A pinned current record is in order; a missing pin, a newer version (also together,
+    and with a pin) and a failed Zenodo read are named; each record is read once."""
     asked = []
 
     def latest(recid):
         asked.append(recid)
         if recid == '4':
             raise requests.ConnectionError('down')
-        return {'1': '1', '2': '2', '3': '30'}[recid]
+        return {'1': '1', '2': '2', '3': '30', '5': '50'}[recid]
 
     datasets = [
         _ds('g.ok', 1),
         _ds('g.ok2', 1),
         _ds('g.unpinned', 2, pin=None),
         _ds('g.both', 3, pin=None),
+        _ds('g.stale', 5),
         _ds('g.down', 4),
     ]
     report = mirror_status(datasets, latest=latest)
     assert report.ok == ['g.ok', 'g.ok2']
     assert report.unpinned == {'g.unpinned': '10.5281/zenodo.2', 'g.both': '10.5281/zenodo.3'}
-    assert report.stale == {'g.both': 'pins Zenodo 3, newest version is 30'}
+    assert report.stale == {
+        'g.both': 'pins Zenodo 3, newest version is 30',
+        'g.stale': 'pins Zenodo 5, newest version is 50',
+    }
     assert report.unreadable == {'g.down': 'Zenodo 4: down'}
-    assert asked == ['1', '2', '3', '4']
+    assert asked == ['1', '2', '3', '5', '4']
     assert report.exit_code == 5
 
 
@@ -50,7 +54,12 @@ def test_datasets_are_sorted_by_what_their_mirror_needs():
         (StatusReport(ok=['a'], unreadable={'b': 'x'}), 3),
         (StatusReport(unpinned={'a': 'z'}, unreadable={'b': 'x'}), 5),
         (StatusReport(stale={'a': 'z'}), 5),
-        (StatusReport(stale={'a': 'z'}, manifest_errors={'m': 'x'}), 1),
+        (
+            StatusReport(
+                stale={'a': 'z'}, manifest_errors={'m': ProviderError(ErrorKind.CONFLICT, 'x')}
+            ),
+            1,
+        ),
     ],
 )
 def test_the_exit_code_puts_a_manifest_error_before_work_before_an_outage(report, code):
@@ -73,13 +82,20 @@ def test_the_command_prints_the_rows_and_exits_by_the_verdict(monkeypatch, capsy
     ]
 
 
-def test_a_manifest_that_fails_to_load_is_reported(monkeypatch):
-    """A manifest error is listed and fails the run."""
-    broken = {'broken': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+def test_a_manifest_left_out_is_reported_with_its_reason(monkeypatch):
+    """A manifest that fails to load and one left out for a conflict are listed as
+    check-mirrors lists them, and fail the run."""
+    broken = {
+        'other': ProviderError(ErrorKind.CONFLICT, 'claims a taken location'),
+        'broken': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load'),
+    }
     monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({}, broken))
     report = mirror_status(latest=lambda recid: recid)
-    assert report.manifest_errors == {'broken': 'cannot load'}
-    assert report.summary().splitlines()[0] == 'FAIL manifest broken: cannot load'
+    assert report.manifest_errors == broken and report.exit_code == 1
+    assert report.summary().splitlines()[:2] == [
+        'FAIL broken: MANIFEST FAILED TO LOAD, cannot load',
+        'FAIL other: MANIFEST NOT USED, claims a taken location',
+    ]
 
 
 def test_the_newest_version_is_read_from_the_versions_endpoint(monkeypatch):

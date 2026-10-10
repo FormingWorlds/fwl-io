@@ -3,13 +3,15 @@ the check of a draft against its Zenodo record, and the pin written into a manif
 against fakes."""
 
 import hashlib
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from fwl_io import mirror_sync as sync
 from fwl_io.cli import main
 from fwl_io.manifest import Dataset, ErrorKind, ProviderError, _Discovery
-from fwl_io.mirror import source_record
+from fwl_io.mirror import DataverseError, source_record
 from fwl_io.mirror_status import StatusReport
 from fwl_io.mirror_sync import (
     collection_mirrors,
@@ -63,40 +65,55 @@ def _version(state='DRAFT', license_name='CC-BY-4.0', note=NOTE, files=()):
     return {**version, 'files': list(files)}
 
 
-def test_collection_mirrors_reads_every_page_and_groups_by_record():
-    """Datasets are grouped by the record their description names, across pages; a dataset
-    without the note is left out."""
+def _search(second_page):
+    """Answer a search of 150 datasets in pages; the last item of a page carries the note."""
 
     def search(params):
+        start = params['start']
+        count = 100 if start == 0 else second_page
         items = [
-            {'global_id': f'doi:10.34894/P{params["start"]}', 'versionState': 'RELEASED'},
-            {'global_id': 'doi:10.34894/NONOTE', 'description': 'other data'},
+            {'global_id': f'doi:10.34894/N{start + i}', 'description': 'other data'}
+            for i in range(count - 1)
         ]
-        items[0]['description'] = f'x {NOTE}' if params['start'] == 0 else NOTE.upper()
+        note = f'x {NOTE}' if start == 0 else NOTE.upper()
+        items.append(
+            {'global_id': f'doi:10.34894/P{start}', 'versionState': 'RELEASED', 'description': note}
+        )
         return {'data': {'items': items, 'total_count': 150}}
 
-    client = FakeClient({'/api/search': search})
+    return search
+
+
+def test_collection_mirrors_reads_every_page_and_groups_by_record():
+    """Datasets are grouped by the record their description names, across pages of the
+    step size; a dataset without the note is left out."""
+    client = FakeClient({'/api/search': _search(50)})
     assert collection_mirrors(client, 'Coll') == {
         '55': [('RELEASED', 'doi:10.34894/P0'), ('RELEASED', 'doi:10.34894/P100')]
     }
-    assert [params['start'] for _, params in client.calls] == [0, 100]
-    assert client.calls[0][1]['subtree'] == 'Coll'
+    query = {'q': '*', 'subtree': 'Coll', 'type': 'dataset', 'per_page': 100}
+    assert client.calls == [('/api/search', {**query, 'start': start}) for start in (0, 100)]
+
+
+def test_a_listing_that_misses_a_dataset_is_an_error():
+    """Fewer items than the count the server gives raise: a missed dataset would get a
+    second draft."""
+    client = FakeClient({'/api/search': _search(49)})
+    with pytest.raises(DataverseError, match='listing of Coll: read 149 of 150 datasets'):
+        collection_mirrors(client, 'Coll')
 
 
 def _serve(monkeypatch, client_files, payloads=None, status=200):
     """Serve a two-file Zenodo record and the Dataverse downloads of ``payloads`` by id."""
-    record = {
-        'files': [
-            {'key': n, 'checksum': 'md5:' + hashlib.md5(d).hexdigest(), 'size': len(d)}
-            for n, d in DATA.items()
-        ]
-    }
-    monkeypatch.setattr(sync, 'fetch_zenodo_record', lambda doi, api_base: record)
+    registry = {n: 'md5:' + hashlib.md5(d).hexdigest() for n, d in DATA.items()}
+    monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: registry)
     payloads = payloads or {
         entry['id']: DATA.get(name, b'') for name, entry in client_files.items()
     }
 
     class _Reply:
+        is_redirect = False
+
         def __init__(self, url):
             self.status_code, self.data = status, payloads.get(int(url.rsplit('/', 1)[1]), b'')
 
@@ -109,7 +126,11 @@ def _serve(monkeypatch, client_files, payloads=None, status=200):
         def iter_content(self, size):
             return [self.data[:2], self.data[2:]]
 
-    monkeypatch.setattr(sync.requests, 'get', lambda url, **kwargs: _Reply(url))
+    asked = []
+    monkeypatch.setattr(
+        sync.requests, 'get', lambda url, **kwargs: asked.append((url, kwargs)) or _Reply(url)
+    )
+    return asked
 
 
 def _draft(**version):
@@ -121,10 +142,64 @@ def test_a_draft_with_the_bytes_of_its_record_is_verified(monkeypatch):
     """A draft with a license, the source note and both files byte for byte has no problem,
     also for the selected file alone."""
     client = _draft()
-    _serve(monkeypatch, client.files)
+    asked = _serve(monkeypatch, client.files)
     assert verify_draft(client, PID, '10.5281/zenodo.55') == []
+    options = {'headers': client._headers, 'allow_redirects': False, 'stream': True, 'timeout': 5}
+    assert asked == [(f'https://dv.example/api/access/datafile/{i}', options) for i in (1, 2)]
     del client.files['b.dat']
     assert verify_draft(client, PID, '10.5281/zenodo.55', files=['a.dat']) == []
+
+
+def _server(reply, seen):
+    """Start a local server that records the token header of each GET, then calls ``reply``."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get('X-Dataverse-key'))
+            reply(self)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_the_token_stays_on_the_dataverse_server_when_a_download_redirects(monkeypatch):
+    """Dataverse answers a download with a redirect to a storage server: the file is read
+    there and verified, and only the Dataverse server sees the token."""
+    at_dataverse, at_store = [], []
+
+    def stored(handler):
+        data = {'/1': DATA['a.dat'], '/2': DATA['b.dat']}[handler.path]
+        handler.send_response(200)
+        handler.send_header('Content-Length', str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    store = _server(stored, at_store)
+
+    def redirect(handler):
+        handler.send_response(303)
+        file_id = handler.path.rsplit('/', 1)[1]
+        handler.send_header('Location', f'http://127.0.0.1:{store.server_port}/{file_id}')
+        handler.send_header('Content-Length', '0')
+        handler.end_headers()
+
+    dataverse = _server(redirect, at_dataverse)
+    try:
+        client = _draft()
+        client.base_url = f'http://127.0.0.1:{dataverse.server_port}'
+        registry = {n: 'md5:' + hashlib.md5(d).hexdigest() for n, d in DATA.items()}
+        monkeypatch.setattr(sync, 'fetch_zenodo_registry', lambda doi, api_base: registry)
+        assert verify_draft(client, PID, '10.5281/zenodo.55') == []
+    finally:
+        for server in (dataverse, store):
+            server.shutdown()
+            server.server_close()
+    assert at_dataverse == ['t', 't'], 'the draft download needs the token'
+    assert at_store == [None, None], 'the token left the Dataverse server'
 
 
 @pytest.mark.parametrize(
@@ -162,12 +237,14 @@ def test_a_draft_that_differs_from_its_record_is_named(monkeypatch, version, cha
 
 def _plan(monkeypatch, datasets, status, mirrors, problems=(), errors=None):
     """Patch discovery, the status, the collection listing and the mirror; return the calls."""
-    made, _plan.clients = [], []
+    made, _plan.clients, _plan.verified = [], [], []
     monkeypatch.setattr(sync, 'DataverseClient', lambda *args: _plan.clients.append(args))
     monkeypatch.setattr(sync, '_discover_all', lambda: _Discovery({'m': datasets}, errors or {}))
     monkeypatch.setattr(sync, 'mirror_status', lambda found: status)
     monkeypatch.setattr(sync, 'collection_mirrors', lambda client, collection: mirrors)
-    monkeypatch.setattr(sync, 'verify_draft', lambda client, pid, doi, files: list(problems))
+    monkeypatch.setattr(
+        sync, 'verify_draft', lambda *args: _plan.verified.append(args) or list(problems)
+    )
     monkeypatch.setattr(
         sync, 'mirror_to_dataverse', lambda doi, **kwargs: made.append((doi, kwargs)) or PID
     )
@@ -219,6 +296,7 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
         f'CREATED draft {PID} for 10.5281/zenodo.5 (g.e, g.e2): verified',
     ]
     assert _plan.clients == [('https://dv.example', 't')], 'the listing needs the token'
+    assert _plan.verified == [(None, PID, '10.5281/zenodo.5', ['x.dat', 'y.dat'])]
     assert made == [
         (
             '10.5281/zenodo.5',
@@ -276,6 +354,33 @@ def test_a_check_that_fails_to_run_still_names_the_draft(monkeypatch):
     )
 
 
+def _raise(exc):
+    raise exc
+
+
+def test_a_listing_or_a_creation_that_fails_keeps_the_lines_before_it(monkeypatch):
+    """A failed listing still gives the status report; a failed creation still gives the
+    lines before it and the message, which names a draft that is kept. Both exit 1."""
+    datasets = [_ds('g.new', 8)]
+    status = StatusReport(unpinned={'g.new': datasets[0].zenodo})
+    made = _plan(monkeypatch, datasets, status, {})
+    monkeypatch.setattr(sync, 'collection_mirrors', lambda *args: _raise(DataverseError('down')))
+    assert _run() == ([status.summary(), 'FAIL listing of Coll: DataverseError: down'], 1)
+    assert made == []
+    _plan(monkeypatch, datasets, status, {})
+    kept = RuntimeError(f'{PID} is kept as a draft')
+    monkeypatch.setattr(sync, 'mirror_to_dataverse', lambda doi, **kwargs: _raise(kept))
+    assert _run() == (
+        [
+            status.summary(),
+            'records without a mirror: 1; this run takes Zenodo 8',
+            f'FAIL draft for 10.5281/zenodo.8: RuntimeError: {PID} is kept as a draft',
+        ],
+        1,
+    )
+    assert _plan.verified == []
+
+
 def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_out(monkeypatch):
     """All pinned: no draft and exit 0. A manifest left out: exit 1 before any request."""
     ok = [_ds('g.ok', 1, pin='10.34894/ONE')]
@@ -291,7 +396,7 @@ def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_o
     broken = {'p': ProviderError(ErrorKind.CONFLICT, 'claims a taken location')}
     made = _plan(monkeypatch, [], StatusReport(), {}, errors=broken)
     monkeypatch.setattr(sync, 'DataverseClient', lambda *a: pytest.fail('a client was made'))
-    assert _run() == (['p: manifest left out, claims a taken location'], 1) and made == []
+    assert _run() == (['FAIL p: MANIFEST NOT USED, claims a taken location'], 1) and made == []
 
 
 MANIFEST = """\
@@ -304,6 +409,7 @@ required_by = ["demo"]
 zenodo = "10.5281/zenodo.56"
 dataverse = "10.34894/OLDPIN"
 """
+TWO_OF_ONE_RECORD = MANIFEST + '\n[g.third]\nzenodo = "10.5281/zenodo.55"\n'
 
 
 @pytest.mark.parametrize(
@@ -381,14 +487,19 @@ def test_a_pin_that_cannot_be_written_leaves_the_manifest_as_it_was(tmp_path, ke
     assert manifest.read_text() == MANIFEST
 
 
-def _pin(monkeypatch, tmp_path, version, others=(), problem=None, errors=None):
+def _pin(monkeypatch, tmp_path, version, others=(), problem=None, errors=None, text=MANIFEST):
+    """Run mirror-pin on a manifest file; ``problem`` is the pin problem of ``g.first``,
+    or of each key of a dict."""
     manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(MANIFEST)
+    manifest.write_text(text)
+    problems = problem if isinstance(problem, dict) else dict.fromkeys(('g.first',), problem)
     found = {'other': list(others)}
     monkeypatch.setattr(sync, '_discover_all', lambda: _Discovery(found, errors or {}))
     checked = []
     monkeypatch.setattr(
-        sync, 'pin_problem', lambda ds, client: checked.append((ds.key, ds.dataverse)) or problem
+        sync,
+        'pin_problem',
+        lambda ds, client: checked.append((ds.key, ds.dataverse)) or problems.get(ds.key),
     )
     client = FakeClient({'/api/datasets/:persistentId': {'data': {'latestVersion': version}}})
     return manifest, checked, mirror_pin('doi:10.34894/NEWPIN', manifest=manifest, client=client)
@@ -405,9 +516,9 @@ def test_a_published_mirror_is_pinned_in_every_dataset_of_its_record(monkeypatch
     others.append(_ds('g.first', 9))  # an installed copy of a key the manifest file declares
     manifest, checked, (lines, code) = _pin(monkeypatch, tmp_path, _version('RELEASED'), others)
     assert code == 0 and lines == [
-        'PINNED g.first in manifest.toml',
         'other.done: already pinned',
         'other.same is declared by another package; add there: dataverse = "10.34894/NEWPIN"',
+        'PINNED g.first in manifest.toml',
     ]
     assert 'dataverse = "10.34894/NEWPIN"' in manifest.read_text()
     assert sorted(checked) == [
@@ -417,20 +528,70 @@ def test_a_published_mirror_is_pinned_in_every_dataset_of_its_record(monkeypatch
     ]
 
 
-def test_a_replaced_pin_and_a_manifest_left_out_are_reported(monkeypatch, tmp_path):
-    """A dataset pinned to another mirror gets the new pin with the old one named; a manifest
-    left out of discovery is listed and fails the run, since its datasets were not seen."""
+def test_a_replaced_pin_names_the_old_one_and_a_manifest_left_out_stops_the_write(
+    monkeypatch, tmp_path
+):
+    """A dataset pinned to another mirror gets the new pin with the old one named. With a
+    manifest left out of discovery, whose datasets were not seen, nothing is written."""
     version = _version('RELEASED', note=NOTE.replace('.55', '.56'))
-    errors = {'p': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version)
+    assert (lines, code) == (['PINNED g.second in manifest.toml (was 10.34894/OLDPIN)'], 0)
+    assert manifest.read_text() == MANIFEST.replace('OLDPIN', 'NEWPIN')
+    errors = {
+        'p': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load'),
+        'c': ProviderError(ErrorKind.CONFLICT, 'claims a taken location'),
+    }
     manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, errors=errors)
     assert code == 1 and lines == [
-        'p: manifest left out, cannot load',
-        'PINNED g.second in manifest.toml (was 10.34894/OLDPIN)',
+        'FAIL c: MANIFEST NOT USED, claims a taken location',
+        'FAIL p: MANIFEST FAILED TO LOAD, cannot load',
+        'NOT PINNED g.second: nothing is written after a FAIL',
     ]
-    assert manifest.read_text() == MANIFEST.replace('OLDPIN', 'NEWPIN')
+    assert manifest.read_text() == MANIFEST
     version = _version('RELEASED', note=NOTE.replace('.55', '.77'))
     _, _, (lines, code) = _pin(monkeypatch, tmp_path, version, errors=errors)
-    assert lines[-1] == 'no installed dataset pins Zenodo 77' and len(lines) == 2 and code == 1
+    assert lines[-1] == 'no installed dataset pins Zenodo 77' and len(lines) == 3 and code == 1
+
+
+def test_no_pin_is_written_when_one_dataset_of_the_record_fails(monkeypatch, tmp_path):
+    """With two datasets of one record, a mirror that does not serve the second, or a second
+    pin that cannot be written, leaves the file as it was and says which pins wait."""
+    version = _version('RELEASED')
+    manifest, checked, (lines, code) = _pin(
+        monkeypatch, tmp_path, version, problem={'g.third': 'a.dat missing'}, text=TWO_OF_ONE_RECORD
+    )
+    assert (
+        len(checked) == 2
+        and code == 1
+        and lines
+        == [
+            'FAIL g.third: a.dat missing',
+            'NOT PINNED g.first: nothing is written after a FAIL',
+        ]
+    )
+    assert manifest.read_text() == TWO_OF_ONE_RECORD
+    write = sync.write_pin
+    monkeypatch.setattr(
+        sync,
+        'write_pin',
+        lambda path, key, pin: (
+            write(path, key, pin) if key == 'g.first' else _raise(ValueError('x'))
+        ),
+    )
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    assert code == 1 and lines == [
+        'FAIL x',
+        'NOT PINNED g.first: nothing is written after a FAIL',
+        'NOT PINNED g.third: nothing is written after a FAIL',
+    ]
+    assert manifest.read_text() == TWO_OF_ONE_RECORD
+    monkeypatch.setattr(sync, 'write_pin', write)
+    manifest, _, (lines, code) = _pin(monkeypatch, tmp_path, version, text=TWO_OF_ONE_RECORD)
+    assert code == 0 and [line.split()[:2] for line in lines] == [
+        ['PINNED', 'g.first'],
+        ['PINNED', 'g.third'],
+    ]
+    assert manifest.read_text().count('dataverse = "10.34894/NEWPIN"') == 2
 
 
 @pytest.mark.parametrize(
@@ -453,7 +614,7 @@ def test_a_mirror_that_cannot_be_pinned_writes_nothing(
 
 def test_the_commands_print_the_report_and_exit_by_it(monkeypatch, capsys):
     """mirror-sync needs the token and passes its options on; both print their lines and
-    return the code."""
+    return the code, also that of a pin that failed."""
     seen = {}
     monkeypatch.delenv('DATAVERSE_TOKEN', raising=False)
     assert main(['mirror-sync', '--collection', 'C']) == 1
@@ -470,6 +631,6 @@ def test_the_commands_print_the_report_and_exit_by_it(monkeypatch, capsys):
         True,
         'c@x',
     )
-    monkeypatch.setattr(sync, 'mirror_pin', lambda pid, manifest: ([f'{pid} {manifest}'], 0))
-    assert main(['mirror-pin', 'doi:10.34894/X', '--manifest', 'm.toml']) == 0
+    monkeypatch.setattr(sync, 'mirror_pin', lambda pid, manifest: ([f'{pid} {manifest}'], 1))
+    assert main(['mirror-pin', 'doi:10.34894/X', '--manifest', 'm.toml']) == 1
     assert capsys.readouterr().out == 'doi:10.34894/X m.toml\n'

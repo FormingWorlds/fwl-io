@@ -1,9 +1,9 @@
 """Create a draft mirror for a record that has none, and pin a published mirror
 (``fwl-io mirror-sync``, ``fwl-io mirror-pin``).
 
-Neither command publishes or deletes a dataset. ``mirror-sync`` creates at most one draft
-per run, for a person to review and publish; ``mirror-pin`` edits a manifest file, for a
-person to commit.
+Neither command publishes a dataset. ``mirror-sync`` creates at most one draft per run, for
+a person to review and publish, and deletes only a draft of its own run whose set-up failed
+before a file reached it; ``mirror-pin`` edits a manifest file, for a person to commit.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import hashlib
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
@@ -19,6 +20,7 @@ from fwl_io.doi import zenodo_record_id
 from fwl_io.manifest import _discover_all, load_manifest, shared_manifest_path
 from fwl_io.mirror import (
     DataverseClient,
+    DataverseError,
     _listing,
     checksum_algorithm,
     descriptions,
@@ -26,9 +28,9 @@ from fwl_io.mirror import (
     names_source,
     source_record,
 )
-from fwl_io.mirror_status import mirror_status
+from fwl_io.mirror_status import manifest_lines, mirror_status
 from fwl_io.pins import dataverse_server, pin_problem
-from fwl_io.sync import ZENODO_API, _extract_files, fetch_zenodo_record, select_files
+from fwl_io.sync import ZENODO_API, fetch_zenodo_registry, select_files
 
 
 def collection_mirrors(
@@ -38,7 +40,7 @@ def collection_mirrors(
     each as ``(version state, persistent id)``; drafts are listed when the client holds a
     token. The search index can lag a dataset created seconds ago."""
     found: dict[str, list[tuple[str | None, str]]] = {}
-    start = 0
+    start = read = 0
 
     def page(start: int) -> dict:
         params = {'q': '*', 'subtree': collection, 'type': 'dataset', 'per_page': 100}
@@ -49,12 +51,30 @@ def collection_mirrors(
 
     while True:
         data = page(start)
+        read += len(data['items'])
         for item in data['items']:
             if recid := source_record(item.get('description') or ''):
                 found.setdefault(recid, []).append((item.get('versionState'), item['global_id']))
         start += 100
         if start >= data['total_count']:
-            return found
+            break
+    if read != data['total_count']:
+        raise DataverseError(
+            f'listing of {collection}: read {read} of {data["total_count"]} datasets'
+        )
+    return found
+
+
+def _download(client: DataverseClient, file_id) -> requests.Response:
+    """Open the download of a Dataverse file. The token goes to the Dataverse server only: a
+    redirect (DataverseNL answers with a signed storage URL) is followed without it."""
+    url = f'{client.base_url}/api/access/datafile/{file_id}'
+    options = {'stream': True, 'timeout': client.timeout}
+    response = requests.get(url, headers=client._headers, allow_redirects=False, **options)
+    if response.is_redirect:
+        response.close()
+        response = requests.get(urljoin(url, response.headers['Location']), **options)
+    return response
 
 
 def verify_draft(
@@ -71,7 +91,7 @@ def verify_draft(
     from Dataverse and hashed: against the Zenodo checksum, and against the checksum
     Dataverse lists for it.
     """
-    registry = _extract_files(fetch_zenodo_record(zenodo_doi, api_base=api_base))
+    registry = fetch_zenodo_registry(zenodo_doi, api_base=api_base)
     if files is not None:
         registry = select_files(registry, files, source=zenodo_doi)
     version = (
@@ -100,12 +120,7 @@ def verify_draft(
         algorithm, _, digest = registry[name].partition(':')
         theirs = checksum_algorithm(entry)
         hashes = {a: hashlib.new(a) for a in {algorithm, theirs} - {None}}
-        with requests.get(
-            f'{client.base_url}/api/access/datafile/{entry.get("id")}',
-            headers=client._headers,
-            stream=True,
-            timeout=client.timeout,
-        ) as response:
+        with _download(client, entry.get('id')) as response:
             if response.status_code != 200:
                 problems.append(f'{name} cannot be downloaded (HTTP {response.status_code})')
                 continue
@@ -136,23 +151,28 @@ def mirror_sync(
     or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version
     or could not be read.
     One draft per run, never published; it holds the files every dataset of the record
-    asks for, and is verified with :func:`verify_draft`.
+    asks for, and is verified with :func:`verify_draft`. A listing or a creation that
+    fails is a ``FAIL`` line after the lines gathered so far, not an exception.
 
     Returns
     -------
     tuple
         The report lines, and the exit code: 0 when there was nothing to create or the new
-        draft is verified, 1 when a manifest was left out or the draft is not verified, 3
-        when nothing failed but a Zenodo record could not be read.
+        draft is verified, 1 when a manifest was left out, the listing or the creation
+        failed, or the draft is not verified, 3 when nothing failed but a Zenodo record
+        could not be read.
     """
     discovery = _discover_all()
     if discovery.errors:
-        return [f'{p}: manifest left out, {e.message}' for p, e in discovery.errors.items()], 1
+        return manifest_lines(discovery.errors), 1
     datasets = [ds for group in discovery.found.values() for ds in group]
     status = mirror_status(datasets)
     lines = [status.summary()]
     client = DataverseClient(dataverse_url, token)
-    mirrors = collection_mirrors(client, collection)
+    try:
+        mirrors = collection_mirrors(client, collection)
+    except Exception as exc:  # noqa: BLE001 -- the status lines must reach the report
+        return [*lines, f'FAIL listing of {collection}: {type(exc).__name__}: {exc}'], 1
     pinned = {
         zenodo_record_id(ds.zenodo): ds.dataverse.removeprefix('doi:')
         for ds in datasets
@@ -184,16 +204,19 @@ def mirror_sync(
     lines.append(f'records without a mirror: {len(todo)}; this run takes Zenodo {recid}')
     if dry_run:
         return [*lines, f'WOULD CREATE a draft for {doi} ({", ".join(keys)})'], unread
-    persistent_id = mirror_to_dataverse(
-        doi,
-        dataverse_url=dataverse_url,
-        collection=collection,
-        token=token,
-        contact_name=contact_name,
-        contact_email=contact_email,
-        publish=False,
-        files=files,
-    )
+    try:
+        persistent_id = mirror_to_dataverse(
+            doi,
+            dataverse_url=dataverse_url,
+            collection=collection,
+            token=token,
+            contact_name=contact_name,
+            contact_email=contact_email,
+            publish=False,
+            files=files,
+        )
+    except Exception as exc:  # noqa: BLE001 -- the message names a draft that is kept
+        return [*lines, f'FAIL draft for {doi}: {type(exc).__name__}: {exc}'], 1
     try:
         problems = verify_draft(client, persistent_id, doi, files)
     except Exception as exc:  # noqa: BLE001 -- the draft exists: its id must reach the report
@@ -224,7 +247,8 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
         afterwards; the file is left as it was.
     """
     before = manifest.read_bytes()
-    lines = before.decode('utf-8').splitlines(keepends=True)
+    old = before.decode('utf-8')
+    lines = old.splitlines(keepends=True)
     try:
         start = next(i for i, line in enumerate(lines) if line.rstrip('\r\n') == f'[{key}]')
         end = next(
@@ -240,7 +264,7 @@ def write_pin(manifest: Path, key: str, pin: str) -> None:
     body.insert(at, f'dataverse = "{pin}"{eol}')
     text = ''.join(lines[: start + 1] + body + lines[end:])
     try:
-        same = _without_pin(text, key) == _without_pin(before.decode('utf-8'), key)
+        same = _without_pin(text, key) == _without_pin(old, key)
     except (KeyError, TypeError, ValueError):
         same = False
     if not same:
@@ -267,6 +291,7 @@ def mirror_pin(
     that record is checked with :func:`fwl_io.pins.pin_problem`; one that the mirror
     serves gets the pin written into ``manifest`` (the shared manifest by default) when
     that file declares it, and otherwise a line with the pin to add in its own package.
+    Pins are written only when the exit code is 0; otherwise the file stays as it was.
 
     Returns
     -------
@@ -292,22 +317,30 @@ def mirror_pin(
     own = load_manifest(manifest)
     discovery = _discover_all()
     datasets = {ds.key: ds for group in [*discovery.found.values(), own] for ds in group}
-    lines = [f'{p}: manifest left out, {e.message}' for p, e in discovery.errors.items()]
-    code, matched = (1 if lines else 0), False
-    for ds in sorted(datasets.values(), key=lambda ds: ds.key):
-        if zenodo_record_id(ds.zenodo) != recid:
-            continue
-        matched, old = True, (ds.dataverse or '').removeprefix('doi:')
+    lines = manifest_lines(discovery.errors)
+    record = [ds for _, ds in sorted(datasets.items()) if zenodo_record_id(ds.zenodo) == recid]
+    if not record:
+        return [*lines, f'no installed dataset pins Zenodo {recid}'], 1
+    code, to_write = (1 if lines else 0), {}
+    for ds in record:
+        old = (ds.dataverse or '').removeprefix('doi:')
         if problem := pin_problem(replace(ds, dataverse=pin), client):
             lines.append(f'FAIL {ds.key}: {problem}')
             code = 1
         elif old == pin:
             lines.append(f'{ds.key}: already pinned')
         elif any(ds.key == mine.key for mine in own):
-            write_pin(manifest, ds.key, pin)
-            lines.append(f'PINNED {ds.key} in {manifest.name}' + (f' (was {old})' if old else ''))
+            to_write[ds.key] = f' (was {old})' if old else ''
         else:
             lines.append(f'{ds.key} is declared by another package; add there: dataverse = "{pin}"')
-    if not matched:
-        return [*lines, f'no installed dataset pins Zenodo {recid}'], 1
-    return lines, code
+    before = manifest.read_bytes()
+    try:
+        for key in to_write if code == 0 else ():
+            write_pin(manifest, key, pin)
+    except ValueError as exc:
+        manifest.write_bytes(before)
+        lines.append(f'FAIL {exc}')
+        code = 1
+    if code:
+        return lines + [f'NOT PINNED {key}: nothing is written after a FAIL' for key in to_write], 1
+    return lines + [f'PINNED {key} in {manifest.name}{was}' for key, was in to_write.items()], 0

@@ -436,7 +436,11 @@ def main(argv: list[str] | None = None) -> int:
     p_mirror_sync.add_argument(
         '--contact-name', default='PROTEUS Framework', help='dataset contact'
     )
-    p_mirror_sync.add_argument('--contact-email', default='', help='dataset contact email')
+    p_mirror_sync.add_argument(
+        '--contact-email',
+        default='',
+        help='dataset contact email; a run that creates a draft needs it',
+    )
     p_mirror_sync.add_argument(
         '--dry-run', action='store_true', help='say which draft a run would create; no write'
     )

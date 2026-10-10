@@ -12,20 +12,25 @@ from dataclasses import dataclass, field
 import requests
 
 from fwl_io.doi import zenodo_record_id
-from fwl_io.manifest import Dataset, _discover_all
+from fwl_io.manifest import Dataset, ProviderError, _discover_all
 from fwl_io.sync import ZENODO_API
+
+
+def manifest_lines(errors: dict[str, ProviderError]) -> list[str]:
+    """Return one ``FAIL`` line per manifest left out, worded as ``fwl-io check-mirrors``."""
+    return [f'FAIL {p}: MANIFEST {e.verdict}, {e.message}' for p, e in sorted(errors.items())]
 
 
 @dataclass
 class StatusReport:
     """Outcome of :func:`mirror_status`: datasets that are in order, unpinned, stale or could
-    not be read, and the manifests that failed to load."""
+    not be read, and the manifests left out."""
 
     ok: list[str] = field(default_factory=list)
     unpinned: dict[str, str] = field(default_factory=dict)
     stale: dict[str, str] = field(default_factory=dict)
     unreadable: dict[str, str] = field(default_factory=dict)
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
 
     @property
     def exit_code(self) -> int:
@@ -39,7 +44,7 @@ class StatusReport:
 
     def summary(self) -> str:
         """Return one line per dataset that needs work or could not be read, and the counts."""
-        lines = [f'FAIL manifest {key}: {why}' for key, why in sorted(self.manifest_errors.items())]
+        lines = manifest_lines(self.manifest_errors)
         lines += [f'UNPINNED {key}: {doi}' for key, doi in sorted(self.unpinned.items())]
         lines += [f'STALE {key}: {why}' for key, why in sorted(self.stale.items())]
         lines += [f'UNREADABLE {key}: {why}' for key, why in sorted(self.unreadable.items())]
@@ -65,7 +70,7 @@ def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusR
     ----------
     datasets : list of Dataset, optional
         Datasets to check; defaults to those of every installed manifest, and a manifest
-        that fails to load is reported in ``manifest_errors``.
+        left out of discovery is reported in ``manifest_errors``.
     latest : callable, optional
         Returns the newest record id of a Zenodo record id; :func:`latest_record_id` by
         default.
@@ -79,7 +84,7 @@ def mirror_status(datasets: list[Dataset] | None = None, latest=None) -> StatusR
     if datasets is None:
         discovery = _discover_all()
         datasets = [ds for group in discovery.found.values() for ds in group]
-        report.manifest_errors.update({p: e.message for p, e in discovery.errors.items()})
+        report.manifest_errors.update(discovery.errors)
     newest: dict[str, str | Exception] = {}
     for ds in datasets:
         recid = zenodo_record_id(ds.zenodo)
