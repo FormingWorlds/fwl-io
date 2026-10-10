@@ -2804,7 +2804,7 @@ def test_uploads_are_spaced_and_slow_down_after_a_bot_check_page(
     remain, and not after the last file."""
     monkeypatch.setattr('fwl_io.mirror.UPLOAD_SPACING_S', 60.0)
     monkeypatch.setattr('fwl_io.mirror.BOT_CHECK_SPACING_S', 600.0)
-    caplog.set_level('INFO', logger='fwl.fwl_io.mirror')
+    caplog.set_level('WARNING', logger='fwl.fwl_io.mirror')  # the level a workflow log shows
     three = {'a.dat': b'AAA\n', 'b.dat': b'BBBB\n', 'c.dat': b'C\n'}
     _mirror(http_server, dataverse_server, publish=False, deposit=three)
     assert sleeps == [60.0, 60.0]
@@ -3251,6 +3251,13 @@ def test_a_bad_upload_that_cannot_be_deleted_reports_both_failures(
         _mirror(http_server, dataverse_server)
     assert 'DELETE /api/files/50 failed' in str(raised.value.__cause__.__cause__)
     assert raised.value.state['wrong'] == ['a.dat']
+
+
+def test_a_fresh_run_skips_a_file_the_draft_already_holds(http_server, dataverse_server, sleeps):
+    """A draft file with the bytes of the Zenodo file is not uploaded again."""
+    _DataverseHandler.draft_files = [_entry('a.dat', b'AAA\n', 1)]
+    result, calls = _mirror(http_server, dataverse_server, publish=False)
+    assert result == PID and not _adds(calls, 'a.dat') and len(_adds(calls, 'b.dat')) == 1
 
 
 def test_a_differing_file_stops_a_fresh_run_before_the_spacing_wait(

@@ -873,7 +873,7 @@ def _fill_draft(
                 )
             if wait:
                 why = 'after a bot-check page' if streak else 'upload spacing'
-                log.info('waiting %.0f s before the upload of %s (%s)', wait, name, why)
+                log.warning('waiting %.0f s before the upload of %s (%s)', wait, name, why)
                 _sleep(wait)
             checks = client.bot_checks
             if entry is not None:
