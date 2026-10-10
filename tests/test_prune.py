@@ -262,7 +262,9 @@ def test_a_manifest_dropped_for_a_conflict_blocks_and_reads_as_not_used(tmp_path
     assert {e.kind for e in report.manifest_errors.values()} == {ErrorKind.CONFLICT}
     assert 'demoprovider: MANIFEST NOT USED' in report.summary()
     assert 'twin: MANIFEST NOT USED' in report.summary()
-    assert 'FAILED TO LOAD' not in report.summary()
+    assert 'FAILED TO LOAD' not in report.summary() and 'did not load' not in report.summary()
+    assert 'a manifest was left out' in report.summary()
+    assert 'a manifest was left out' in report.deletion_refusal(include_orphans=True)
     for directory in dirs.values():
         assert directory.exists(), 'a blocked run deletes nothing'
 

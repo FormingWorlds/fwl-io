@@ -11,9 +11,10 @@ proven unreferenced: it must carry the fetcher's own stamp naming the record it
 holds and the subdir it sits under, it must sit under a subdirectory that a
 currently declared dataset uses (an older pin of a known dataset), and the
 reference set it is checked against must be complete. If any installed
-manifest fails to load, any dataset's version directory cannot be computed,
-part of the tree cannot be read, or a fetch lock is held anywhere on the tree,
-the run refuses to delete rather than act on a partial or contested view. An
+manifest is left out (it fails to load or conflicts with another), any
+dataset's version directory cannot be computed, part of the tree cannot be
+read, or a fetch lock is held anywhere on the tree, the run refuses to
+delete rather than act on a partial or contested view. An
 orphan-including run also refuses when the reference set is empty.
 
 A directory that matches the version-directory name shape but carries no stamp
@@ -213,7 +214,7 @@ class PruneReport:
         if self.blocked:
             return (
                 'the reference set is incomplete '
-                '(a manifest did not load or a version dir was unresolvable)'
+                '(a manifest was left out or a version dir was unresolvable)'
             )
         if self.scan_error is not None:
             return f'the data root cannot be fully read ({self.scan_error})'
@@ -252,7 +253,7 @@ class PruneReport:
             # The reason deletion is refused: a version listed superseded above
             # could be the referenced one whose pin this run failed to read.
             closing += (
-                '; reference set is INCOMPLETE (a manifest did not load or a '
+                '; reference set is INCOMPLETE (a manifest was left out or a '
                 'version dir was unresolvable), so nothing can be deleted'
             )
         if self.lock_problem is not None:
@@ -394,11 +395,10 @@ def _reference_set(
     from fwl_io.manifest import _discover_all
 
     discovery = _discover_all()
-    providers, manifest_errors = discovery.found, discovery.errors
     referenced: set[Path] = set()
     known_subdirs: set[str] = set()
     resolve_error: str | None = None
-    for provider_datasets in providers.values():
+    for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             known_subdirs.add(ds.subdir)
             if ds.zenodo is None:
@@ -409,8 +409,8 @@ def _reference_set(
                 # One unresolvable pin makes the whole reference set a subset of
                 # the truth, so the run must refuse to delete; record it and stop.
                 resolve_error = f'{ds.key}: {exc}'
-                return referenced, known_subdirs, dict(manifest_errors), resolve_error
-    return referenced, known_subdirs, dict(manifest_errors), resolve_error
+                return referenced, known_subdirs, dict(discovery.errors), resolve_error
+    return referenced, known_subdirs, dict(discovery.errors), resolve_error
 
 
 def _scan(
