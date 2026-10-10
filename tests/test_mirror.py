@@ -31,6 +31,7 @@ from fwl_io.mirror import (
     MirrorIncomplete,
     mirror_to_dataverse,
     publish_existing_dataverse_draft,
+    source_note,
     zenodo_record_to_citation,
 )
 
@@ -552,7 +553,7 @@ def test_no_publish_when_the_source_record_is_outside_the_community(
     assert _published(dataverse_server) == []
 
 
-NOTE_55 = 'Mirror of Zenodo deposit 10.5281/zenodo.55. Zenodo is the primary source.'
+NOTE_55 = source_note('10.5281/zenodo.55')
 NOTE_77 = 'mirror of zenodo deposit 10.5281/zenodo.77.'
 
 
@@ -573,6 +574,28 @@ def test_no_publish_unless_the_draft_names_exactly_one_source_record(
     assert _published(dataverse_server) == []
 
 
+def test_a_published_dataset_gives_already_published_before_the_source_check(
+    http_server, dataverse_server, source_check
+):
+    """A dataset that is RELEASED gives its own error, also without a source note and with
+    Zenodo not read, and no publish request is sent."""
+    _DataverseHandler.released = True
+    _DataverseHandler.source_note = 'Some other data.'
+    with pytest.raises(DataverseAlreadyPublished, match='is already published'):
+        _publish(http_server, dataverse_server)
+    assert _published(dataverse_server) == []
+
+
+def test_the_note_that_the_mirror_writes_passes_the_source_check(
+    http_server, dataverse_server, source_check
+):
+    """The publish check reads the note in the form that source_note writes it, also with
+    the description of the record before it and another DOI in that description."""
+    _serve_zenodo_record(http_server[1], 55, {'a.dat': b'AAA\n'})
+    _DataverseHandler.source_note = f'See 10.5281/zenodo.77 for the paper.\n{NOTE_55}'
+    assert len(_publish(http_server, dataverse_server)) == 1
+
+
 @pytest.mark.parametrize(
     'served', [None, '["not", "an", "object"]', '{"id": 55, "conceptrecid": "55"}']
 )
@@ -585,7 +608,7 @@ def test_no_publish_when_the_source_record_is_not_read(
         api_dir = http_server[1] / 'api' / 'records'
         api_dir.mkdir(parents=True, exist_ok=True)
         (api_dir / '55').write_text(served)
-    with pytest.raises(DataverseError, match='Zenodo record 55, .* was not read') as err:
+    with pytest.raises(DataverseError, match=r'10\.5281/zenodo\.55, .* was not read') as err:
         _publish(http_server, dataverse_server)
     assert 'accepted record' not in str(err.value)
     assert _published(dataverse_server) == []

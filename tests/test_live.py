@@ -58,7 +58,9 @@ def test_shared_manifest_records_are_in_a_zenodo_community():
         try:
             if not in_community(_record(doi)):
                 outside.append(doi)
-        except requests.RequestException as exc:
+        except (requests.RequestException, ValueError, AttributeError) as exc:
             unread.append(f'{doi} ({exc})')
-    assert not outside, f'not in a Zenodo community of {ZENODO_COMMUNITIES}: {outside}'
-    assert not unread, f'not read after the retries: {unread}'
+    assert not (outside or unread), (
+        f'not in a Zenodo community of {ZENODO_COMMUNITIES}: {outside}; '
+        f'not read after the retries: {unread}'
+    )

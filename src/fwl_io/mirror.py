@@ -169,17 +169,19 @@ def _creators_to_authors(creators: list[dict]) -> list[dict]:
     return authors or [{'authorName': _primitive('authorName', 'Unknown')}]
 
 
+_NOTE = 'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
+# The words of the note before the DOI, as a pattern that takes any spacing.
+_NOTE_HEAD = r'\s+'.join(map(re.escape, _NOTE.split('{doi}')[0].split())) + r'\s+'
+
+
 def source_note(doi: str) -> str:
     """Return the description line that names a mirror's Zenodo source DOI."""
-    return f'Mirror of Zenodo deposit {doi}. Zenodo is the primary source.'
-
-
-_NOTE = r'Mirror\s+of\s+Zenodo\s+deposit\s+'
+    return _NOTE.format(doi=doi)
 
 
 def names_source(text: str, doi: str) -> bool:
     """Return whether ``text`` holds the :func:`source_note` of ``doi`` (any case or spacing)."""
-    return re.search(_NOTE + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
+    return re.search(_NOTE_HEAD + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
 
 
 def _outside(recid: str) -> str:
@@ -539,6 +541,16 @@ class DataverseClient:
         )
         return True
 
+    def _dataset(self, persistent_id: str) -> dict:
+        """Return the data block of a dataset, read with the retries."""
+        body = self._retry(
+            lambda: self._request(
+                'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
+            ),
+            f'state of {persistent_id}',
+        )
+        return body.get('data') or {}
+
     def _released(self, persistent_id: str) -> bool:
         """Return whether the dataset's latest version is published."""
         body = self._request(
@@ -587,13 +599,7 @@ class DataverseClient:
         """
 
         def dataset():
-            body = self._retry(
-                lambda: self._request(
-                    'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
-                ),
-                f'state of {persistent_id}',
-            )
-            return body.get('data') or {}
+            return self._dataset(persistent_id)
 
         reply = dataset()
         dataset_id = reply.get('id')
@@ -814,13 +820,7 @@ def _check_own_draft(client: DataverseClient, persistent_id: str, zenodo_doi: st
     DataverseError
         If the dataset was ever published, or its description lacks the source note.
     """
-    body = client._retry(
-        lambda: client._request(
-            'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
-        ),
-        f'state of {persistent_id}',
-    )
-    data = body.get('data') or {}
+    data = client._dataset(persistent_id)
     version = data.get('latestVersion') or {}
     released = data.get('publicationDate') or version.get('versionNumber') is not None
     if version.get('versionState') != 'DRAFT' or released:
@@ -1284,30 +1284,28 @@ def mirror_to_dataverse(
 
 
 def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: str) -> None:
-    """Refuse the publish of a draft whose description does not name exactly one Zenodo
-    record, or whose record is not read or is outside the communities of the framework."""
-    body = client._retry(
-        lambda: client._request(
-            'GET', '/api/datasets/:persistentId', params={'persistentId': persistent_id}
-        ),
-        f'state of {persistent_id}',
-    )
-    version = (body.get('data') or {}).get('latestVersion') or {}
-    named = set(re.findall(_NOTE + r'10\.5281/zenodo\.(\d+)', descriptions(version), re.IGNORECASE))
+    """Refuse the publish of a dataset that is published already, of a draft whose
+    description does not name exactly one Zenodo DOI in a source note, and of one whose
+    record is not read or is outside the communities of the framework."""
+    version = client._dataset(persistent_id).get('latestVersion') or {}
+    if version.get('versionState') == 'RELEASED':
+        raise DataverseAlreadyPublished(f'{persistent_id} is already published')
+    text = descriptions(version)
+    named = {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
     if len(named) != 1:
         raise DataverseError(
             f'{persistent_id} names {len(named)} Zenodo records as its source, not 1; not published'
         )
-    recid = named.pop()
+    doi = named.pop()
     try:
-        record = fetch_zenodo_record(f'10.5281/zenodo.{recid}', api_base=api_base)
-    except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+        record = fetch_zenodo_record(doi, api_base=api_base)
+    except (requests.RequestException, ValueError, AttributeError) as exc:
         raise DataverseError(
-            f'Zenodo record {recid}, the source of {persistent_id}, was not read as a version '
-            f'record ({exc}); not published'
+            f'{doi}, the source of {persistent_id}, was not read as a Zenodo version record '
+            f'({exc}); not published'
         ) from exc
     if not in_community(record):
-        raise ValueError(_outside(recid))
+        raise ValueError(_outside(zenodo_record_id(doi)))
 
 
 def publish_existing_dataverse_draft(
