@@ -235,13 +235,13 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes 1 to 3 minutes. It prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes some minutes (48 s to 173 s in four runs). It prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
 ```
 
-The first count covers the shared manifest and the demo dataset, so your number can be larger. `wrong: 0` and `not checked (could not be read): 0` are what matters: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1; a pin that could not be read gives an `UNREACHABLE` line, and you run the command again.
+The first count covers the shared manifest and the demo dataset, so your number can be larger. The four counts after the first must be 0: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1; a pin that could not be read gives an `UNREACHABLE` line, and you run the command again; a dataset without a pin is listed below the counts.
 
 ## 10. Open the pull request
 
