@@ -184,10 +184,19 @@ def names_source(text: str, doi: str) -> bool:
     return re.search(_NOTE_HEAD + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
 
 
+def source_dois(text: str) -> set[str]:
+    """Return every DOI that a :func:`source_note` in ``text`` names, in lower case."""
+    return {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
+
+
 def source_record(text: str) -> str | None:
-    """Return the Zenodo record id a :func:`source_note` in ``text`` names, or None."""
-    match = re.search(_NOTE_HEAD + r'10\.5281/zenodo\.(\d+)', text, re.IGNORECASE)
-    return match and match.group(1)
+    """Return the Zenodo record id that the source notes of ``text`` name, or None when
+    they name no DOI, several, or one that is not a Zenodo version DOI."""
+    named = source_dois(text)
+    try:
+        return zenodo_record_id(named.pop()) if len(named) == 1 else None
+    except ValueError:
+        return None
 
 
 def _outside(recid: str) -> str:
@@ -719,8 +728,8 @@ class DataverseClient:
                 )
                 _sleep(delay)
             except Exception as exc:
-                if isinstance(exc, DataverseError) and 400 <= (exc.status_code or 0) < 500:
-                    raise
+                if isinstance(exc, DataverseError) and 300 <= (exc.status_code or 0) < 500:
+                    raise  # a rejection, or a redirect that was not followed: not published
                 return self._await_release(persistent_id, attempt, exc)
             else:
                 return self._await_release(persistent_id, attempt, f'accepted ({reply})')
@@ -1304,8 +1313,7 @@ def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: s
         raise DataverseAlreadyPublished(f'{persistent_id} is already published')
     if state != 'DRAFT':
         raise DataverseError(f'{persistent_id} is in the state {state!r}, not DRAFT; not published')
-    text = descriptions(version)
-    named = {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
+    named = source_dois(descriptions(version))
     if len(named) != 1:
         raise DataverseError(
             f'{persistent_id} names {len(named)} Zenodo records as its source, not 1; not published'

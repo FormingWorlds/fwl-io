@@ -91,9 +91,9 @@ def test_collection_mirrors_reads_every_page_and_groups_by_record():
     """Datasets are grouped by the record their description names, across pages of the
     step size; a dataset without the note is left out."""
     client = FakeClient({'/api/search': _search(50)})
-    assert collection_mirrors(client, 'Coll') == {
-        '55': [('RELEASED', 'doi:10.34894/P0'), ('RELEASED', 'doi:10.34894/P100')]
-    }
+    found = collection_mirrors(client, 'Coll')
+    assert found['55'] == [('RELEASED', 'doi:10.34894/P0'), ('RELEASED', 'doi:10.34894/P100')]
+    assert sorted(found, key=str) == ['55', None] and len(found[None]) == 148, 'no note: not filed'
     query = {'q': '*', 'subtree': 'Coll', 'type': 'dataset', 'per_page': 100}
     assert client.calls == [('/api/search', {**query, 'start': start}) for start in (0, 100)]
 
@@ -345,7 +345,7 @@ def test_only_a_record_with_no_dataset_and_no_pin_gets_a_draft(monkeypatch):
         'WAITING g.d: the collection holds doi:10.34894/FOUR (DRAFT), '
         'doi:10.34894/GONE (DEACCESSIONED)',
         'SKIPPED g.f: its Zenodo record could not be read',
-        'records without a mirror: 1; this run takes Zenodo 5',
+        'records without a mirror: 1',
         f'CREATED draft {PID} for 10.5281/zenodo.5 (g.e, g.e2): verified',
     ]
     assert _plan.clients == [('https://dv.example', 't')], 'the listing needs the token'
@@ -426,12 +426,62 @@ def test_a_listing_or_a_creation_that_fails_keeps_the_lines_before_it(monkeypatc
     assert _run() == (
         [
             status.summary(),
-            'records without a mirror: 1; this run takes Zenodo 8',
+            'records without a mirror: 1',
             f'FAIL draft for 10.5281/zenodo.8: RuntimeError: {PID} is kept as a draft',
         ],
         1,
     )
     assert _plan.verified == []
+
+
+def test_a_record_that_is_refused_before_a_draft_does_not_block_the_next_one(monkeypatch):
+    """Of three records without a mirror, the first is refused before a draft exists: it
+    gets a FAIL line, the second gets the one draft of the run, the third is not tried,
+    and the run exits 1. When every record is refused, no draft is created."""
+    datasets = [_ds('g.a', 1), _ds('g.b', 2), _ds('g.c', 3)]
+    status = StatusReport(unpinned={ds.key: ds.zenodo for ds in datasets})
+    made = _plan(monkeypatch, datasets, status, {})
+
+    def mirror(doi, **kwargs):
+        made.append(doi)
+        return _raise(ValueError('no license of the server matches')) if doi.endswith('.1') else PID
+
+    monkeypatch.setattr(sync, 'mirror_to_dataverse', mirror)
+    lines, code = _run()
+    assert code == 1 and lines[1:] == [
+        'records without a mirror: 3',
+        'FAIL draft for 10.5281/zenodo.1: no license of the server matches; no draft was created',
+        f'CREATED draft {PID} for 10.5281/zenodo.2 (g.b): verified',
+    ]
+    assert made == ['10.5281/zenodo.1', '10.5281/zenodo.2']
+    monkeypatch.setattr(sync, 'mirror_to_dataverse', lambda doi, **kw: _raise(ValueError('x')))
+    lines, code = _run()
+    assert code == 1 and [line.split(':')[0] for line in lines[2:]] == [
+        f'FAIL draft for 10.5281/zenodo.{n}' for n in (1, 2, 3)
+    ]
+    assert _run(dry_run=True)[0][-1] == 'WOULD CREATE a draft for 10.5281/zenodo.1 (g.a)'
+
+
+def test_a_key_in_two_groups_gets_the_line_of_the_first_and_an_unfiled_dataset_is_named(
+    monkeypatch,
+):
+    """A newer version comes before a record outside the communities, and that before a
+    record that was not read; a dataset of the collection whose description names no single
+    record gets its own line."""
+    datasets = [_ds('g.a', 1), _ds('g.b', 2)]
+    status = StatusReport(
+        unpinned={ds.key: ds.zenodo for ds in datasets},
+        stale={'g.a': 'newer'},
+        outside={'g.a': 'out', 'g.b': 'out'},
+        unreadable={'g.a': 'down', 'g.b': 'down'},
+    )
+    _plan(monkeypatch, datasets, status, {None: [('DRAFT', 'doi:10.34894/ODD')]})
+    assert _run()[0][1:] == [
+        'SKIPPED g.a: pin the newest Zenodo version first',
+        'SKIPPED g.b: its Zenodo record is in no community of the framework',
+        'NOT FILED doi:10.34894/ODD (DRAFT): its description names no single Zenodo record',
+        'no draft to create',
+    ]
 
 
 def test_nothing_is_created_without_a_record_to_mirror_or_with_a_manifest_left_out(monkeypatch):
@@ -472,11 +522,14 @@ TWO_OF_ONE_RECORD = MANIFEST + '\n[g.third]\nzenodo = "10.5281/zenodo.55"\n'
         ('Mirror of Zenodo deposit 10.34894/ABCDEF.', None),
         ('other data', None),
         ('see 10.5281/zenodo.55 for details', None),
+        (f'{NOTE} Mirror of Zenodo deposit 10.5281/zenodo.77.', None),
+        (f'{NOTE}\n{NOTE.lower()}', '55'),
+        ('Mirror of Zenodo deposit 10.5281/zenodo.55x.', None),
     ],
 )
 def test_the_record_of_a_source_note_is_read_in_any_case_or_spacing(text, expected):
-    """The note names a Zenodo record in any case or spacing; another DOI or no note gives
-    None."""
+    """The note names a Zenodo record in any case or spacing; another DOI, no note, or notes
+    for two records give None, and the same note twice names one record."""
     assert source_record(text) == expected
 
 
@@ -733,7 +786,7 @@ def test_a_manifest_that_cannot_be_restored_says_that_a_pin_can_be_in_it(monkeyp
     ('version', 'problem', 'line'),
     [
         (_version('DRAFT'), None, 'doi:10.34894/NEWPIN is not published'),
-        (_version('RELEASED', note='no note'), None, 'does not name a Zenodo record'),
+        (_version('RELEASED', note='no note'), None, 'names no single Zenodo record'),
         (_version('RELEASED', note=NOTE.replace('.55', '.77')), None, 'no installed dataset pins'),
         (_version('RELEASED'), 'a.dat missing', 'FAIL g.first: a.dat missing'),
     ],

@@ -24,7 +24,7 @@ def test_datasets_are_sorted_by_what_their_mirror_needs():
 
     def community(doi):
         members.append(doi)
-        if doi.endswith('.7'):
+        if doi.endswith(('.7', '.4')):
             raise requests.ConnectionError('no answer')
         return not doi.endswith('.6')
 
@@ -44,21 +44,37 @@ def test_datasets_are_sorted_by_what_their_mirror_needs():
         _ds('g.out', 6, pin=None),
         _ds('g.out2', 6, pin=None),
         _ds('g.unknown', 7, pin=None),
+        _ds('g.down2', 4, pin=None),
     ]
     report = mirror_status(datasets, latest=latest, community=community)
     assert report.ok == ['g.ok', 'g.ok2']
-    assert sorted(report.unpinned) == ['g.both', 'g.out', 'g.out2', 'g.unknown', 'g.unpinned']
+    assert sorted(report.unpinned) == [
+        'g.both',
+        'g.down2',
+        'g.out',
+        'g.out2',
+        'g.unknown',
+        'g.unpinned',
+    ]
     assert report.outside == dict.fromkeys(
         ('g.out', 'g.out2'), 'Zenodo 6 is in no community of the framework'
     )
-    assert members == [f'10.5281/zenodo.{n}' for n in (2, 3, 6, 7)]
+    assert members == [f'10.5281/zenodo.{n}' for n in (2, 3, 6, 7, 4)]
     assert report.stale == {
         'g.both': 'pins Zenodo 3, newest version is 30',
         'g.stale': 'pins Zenodo 5, newest version is 50',
     }
-    assert report.unreadable == {'g.down': 'Zenodo 4: down', 'g.unknown': 'Zenodo 7: no answer'}
+    assert report.unreadable == {
+        'g.down': 'Zenodo 4: down',
+        'g.unknown': 'Zenodo 7: no answer',
+        'g.down2': 'Zenodo 4: down',
+    }, 'the reason of the first failed read stays'
     assert asked == ['1', '2', '3', '5', '4', '6', '7']
     assert 'OUTSIDE g.out: Zenodo 6 is in no community of the framework' in report.summary()
+    assert report.summary().splitlines()[-1] == (
+        'in order: 2, without a pin: 6, with a newer Zenodo version: 2, '
+        'outside the communities: 2, not checked (Zenodo could not be read): 3'
+    )
     assert report.exit_code == 5
 
 
@@ -113,6 +129,25 @@ def test_a_manifest_left_out_is_reported_with_its_reason(monkeypatch):
         'FAIL broken: MANIFEST FAILED TO LOAD, cannot load',
         'FAIL other: MANIFEST NOT USED, claims a taken location',
     ]
+
+
+def test_the_count_line_names_each_group_with_its_own_count():
+    """Five groups of five sizes: each count stands after its own words."""
+
+    def group(letter, size):
+        return {f'{letter}{i}': 'x' for i in range(size)}
+
+    report = StatusReport(
+        ok=['a'],
+        unpinned=group('u', 2),
+        stale=group('s', 3),
+        outside=group('o', 4),
+        unreadable=group('r', 5),
+    )
+    assert report.summary().splitlines()[-1] == (
+        'in order: 1, without a pin: 2, with a newer Zenodo version: 3, '
+        'outside the communities: 4, not checked (Zenodo could not be read): 5'
+    )
 
 
 def test_a_record_is_accepted_when_its_zenodo_record_lists_a_community(monkeypatch):

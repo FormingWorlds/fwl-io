@@ -803,6 +803,29 @@ def _publish_route(seen, post_reply, states=('DRAFT',)):
 
 
 @pytest.mark.unit
+def test_a_redirect_of_the_publish_request_fails_at_once(monkeypatch):
+    """A 302 answer to the publish request did not publish: it raises the redirect error
+    without a wait for the release and without a second request."""
+    import requests
+
+    from fwl_io import mirror
+
+    seen, waits = [], []
+
+    def redirect(method, *args, **kwargs):
+        response = _fake_response(302, b'')
+        response.headers['Location'] = 'https://other.example/publish?x=1'
+        return response
+
+    monkeypatch.setattr(requests, 'request', _publish_route(seen, redirect))
+    monkeypatch.setattr(mirror, '_sleep', waits.append)
+    with pytest.raises(DataverseError, match='redirect to https://other.example/publish, not') as e:
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert not isinstance(e.value, DataversePublishUnconfirmed) and e.value.status_code == 302
+    assert seen.count('POST') == 1 and waits == []
+
+
+@pytest.mark.unit
 def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id():
     """A 2xx create response with an empty body still fails, for the missing id."""
     import requests

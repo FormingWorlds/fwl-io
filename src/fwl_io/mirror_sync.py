@@ -36,8 +36,9 @@ from fwl_io.sync import ZENODO_API, fetch_zenodo_registry, select_files
 def collection_mirrors(
     client: DataverseClient, collection: str
 ) -> dict[str, list[tuple[str | None, str]]]:
-    """Return the datasets of a collection by the Zenodo record id their description names,
-    each as ``(version state, persistent id)``; drafts are listed when the client holds a
+    """Return the datasets of a collection by the Zenodo record id their description names
+    (None for a description that names no single record), each as ``(version state,
+    persistent id)``; drafts are listed when the client holds a
     token. The search index can lag a dataset created seconds ago. Raises
     :class:`~fwl_io.mirror.DataverseError` when the items read differ from the count the
     server gives."""
@@ -55,8 +56,8 @@ def collection_mirrors(
         data = page(start)
         read += len(data['items'])
         for item in data['items']:
-            if recid := source_record(item.get('description') or ''):
-                found.setdefault(recid, []).append((item.get('versionState'), item['global_id']))
+            recid = source_record(item.get('description') or '')
+            found.setdefault(recid, []).append((item.get('versionState'), item['global_id']))
         start += 100
         if start >= data['total_count']:
             if read != data['total_count']:
@@ -157,7 +158,9 @@ def mirror_sync(
     or ``fwl-io mirror-pin``); so does a dataset whose Zenodo record has a newer version,
     is in no community of the framework, or could not be read.
     One draft per run, never published; it holds the files every dataset of the record
-    asks for, and is verified with :func:`verify_draft`. A listing or a creation that
+    asks for, and is verified with :func:`verify_draft`. A record that is refused before a
+    draft exists (a ``ValueError`` of the mirror) is a ``FAIL`` line, and the next record
+    gets its turn. A listing or a creation that
     fails is a ``FAIL`` line after the lines gathered so far, not an exception.
 
     Returns
@@ -202,36 +205,45 @@ def mirror_sync(
             lines.append(f'WAITING {key}: the collection holds {states}')
         else:
             todo.setdefault(recid, []).append(key)
-    unread = 3 if status.unreadable else 0
+    lines += [
+        f'NOT FILED {pid} ({state}): its description names no single Zenodo record'
+        for state, pid in mirrors.get(None, [])
+    ]
+    code = 3 if status.unreadable else 0
     if not todo:
-        return [*lines, 'no draft to create'], unread
-    recid, keys = next(iter(todo.items()))
-    doi = f'10.5281/zenodo.{recid}'
-    wanted = [ds.files for ds in datasets if zenodo_record_id(ds.zenodo) == recid]
-    files = None if None in wanted else sorted({name for names in wanted for name in names})
-    lines.append(f'records without a mirror: {len(todo)}; this run takes Zenodo {recid}')
-    if dry_run:
-        return [*lines, f'WOULD CREATE a draft for {doi} ({", ".join(keys)})'], unread
-    try:
-        persistent_id = mirror_to_dataverse(
-            doi,
-            dataverse_url=dataverse_url,
-            collection=collection,
-            token=token,
-            contact_name=contact_name,
-            contact_email=contact_email,
-            publish=False,
-            files=files,
-        )
-    except Exception as exc:  # noqa: BLE001 -- the lines so far must reach the report
-        return [*lines, f'FAIL draft for {doi}: {type(exc).__name__}: {exc}'], 1
-    try:
-        problems = verify_draft(client, persistent_id, doi, files)
-    except Exception as exc:  # noqa: BLE001 -- the draft exists: its id must reach the report
-        problems = [f'the check failed: {type(exc).__name__}: {exc}']
-    verdict = 'verified' if not problems else 'NOT verified: ' + '; '.join(problems)
-    lines.append(f'CREATED draft {persistent_id} for {doi} ({", ".join(keys)}): {verdict}')
-    return lines, 1 if problems else unread
+        return [*lines, 'no draft to create'], code
+    lines.append(f'records without a mirror: {len(todo)}')
+    for recid, keys in todo.items():
+        doi = f'10.5281/zenodo.{recid}'
+        wanted = [ds.files for ds in datasets if zenodo_record_id(ds.zenodo) == recid]
+        files = None if None in wanted else sorted({name for names in wanted for name in names})
+        if dry_run:
+            return [*lines, f'WOULD CREATE a draft for {doi} ({", ".join(keys)})'], code
+        try:
+            persistent_id = mirror_to_dataverse(
+                doi,
+                dataverse_url=dataverse_url,
+                collection=collection,
+                token=token,
+                contact_name=contact_name,
+                contact_email=contact_email,
+                publish=False,
+                files=files,
+            )
+        except ValueError as exc:  # refused before a draft exists: the next record gets its turn
+            lines.append(f'FAIL draft for {doi}: {exc}; no draft was created')
+            code = 1
+            continue
+        except Exception as exc:  # noqa: BLE001 -- the lines so far must reach the report
+            return [*lines, f'FAIL draft for {doi}: {type(exc).__name__}: {exc}'], 1
+        try:
+            problems = verify_draft(client, persistent_id, doi, files)
+        except Exception as exc:  # noqa: BLE001 -- the draft exists: its id must reach the report
+            problems = [f'the check failed: {type(exc).__name__}: {exc}']
+        verdict = 'verified' if not problems else 'NOT verified: ' + '; '.join(problems)
+        lines.append(f'CREATED draft {persistent_id} for {doi} ({", ".join(keys)}): {verdict}')
+        return lines, 1 if problems else code
+    return lines, 1
 
 
 def _without_pin(text: str, key: str) -> dict:
@@ -323,7 +335,7 @@ def mirror_pin(
         return [f'doi:{pin} is not published'], 1
     recid = source_record(descriptions(version))
     if recid is None:
-        return [f'doi:{pin} does not name a Zenodo record as its source'], 1
+        return [f'doi:{pin} names no single Zenodo record as its source'], 1
     manifest = Path(manifest or shared_manifest_path())
     own = load_manifest(manifest)
     discovery = _discover_all()
