@@ -45,7 +45,7 @@ jobs:
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
           # Exit 5: a dataset needs work. Exit 3: a Zenodo record was not read. Both warn.
           if [ "${code}" -eq 5 ]; then
-            echo "::warning title=A dataset needs a mirror or a new pin::see the summary of this run"
+            echo "::warning title=A dataset needs work::see the summary of this run"
             exit 0
           fi
           if [ "${code}" -eq 3 ]; then

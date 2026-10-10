@@ -72,7 +72,7 @@ def accepted(doi: str) -> bool:
 def mirror_status(
     datasets: list[Dataset] | None = None, latest=None, community=None
 ) -> StatusReport:
-    """Sort every dataset into in order, unpinned, stale or unreadable.
+    """Sort every dataset into in order, unpinned, stale, outside or unreadable.
 
     Parameters
     ----------

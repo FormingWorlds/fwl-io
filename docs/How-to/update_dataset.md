@@ -24,7 +24,7 @@ A dataset is pinned to one version of a Zenodo record and to a committed list of
 | User | Runs `fwl-io fetch` and gets the versions that the installed packages pin. Gets a new version by upgrading the package whose manifest declares the dataset. | Nothing |
 | Dataset owner | Brings the record, or its new version, into a Zenodo community of the framework ([the rule and the routes](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)), alone or through a dataset request. Changes the pin and the registry in a pull request on the repository that holds the manifest. | A GitHub account; a Zenodo account for an own upload; edit access to the record for a new version |
 | Maintainer of the repository that holds the manifest | Reviews and merges the pull request, and makes the release that carries it. | Write access to that repository |
-| Maintainer of the framework | Accepts or refuses a dataset request. Uploads data to Zenodo on request, and accepts a record that is submitted to the PROTEUS Framework community. Runs the two mirror workflows, which hold the DataverseNL token, and approves their runs. For the shared manifest, also the row above. | Two rights, which the maintainers hold together: membership of the GitHub team `proteus-maintainer` for the workflows, and the curator role in the Zenodo community for the acceptance |
+| Maintainer of the framework | Accepts or refuses a dataset request. Uploads data to Zenodo on request, and accepts a record that is submitted to the PROTEUS Framework community. Runs the workflows that hold the DataverseNL token (the mirror, the publish, and the draft job of the weekly report workflow), and approves their runs. For the shared manifest, also the row above. | Two rights, which the maintainers hold together: membership of the GitHub team `proteus-maintainer` for the workflows, and the curator role in the Zenodo community for the acceptance |
 | Weekly job | Compares the committed registries of the shared manifest with Zenodo, checks that each of its records is in a Zenodo community of the framework, and checks every `dataverse` pin of the shared manifest. Reports a difference; changes nothing. | Nothing |
 
 The shared manifest is `src/fwl_io/data/shared_manifest.toml` in the fwl-io repository; its package is fwl-io. A dataset that one model reads is declared in that model's own manifest, and its pull request goes to that model's repository, where the maintainers of the model review it.
@@ -135,7 +135,7 @@ A mirror is a second download source, used when Zenodo does not answer. The mirr
 
 ### A maintainer creates the mirror
 
-The two mirror workflows are on the **Actions** tab of the fwl-io repository, and each run waits for the approval of a maintainer ([Approval](mirror_dataset.md#running-the-mirror)). [Mirror a deposit to Dataverse](mirror_dataset.md) has the details of each input and says what to do when a run fails.
+The mirror workflows are on the **Actions** tab of the fwl-io repository, and each run of a job that holds the token waits for the approval of a maintainer ([Approval](mirror_dataset.md#running-the-mirror)); the weekly report and the pin workflow hold no token and need none. [Mirror a deposit to Dataverse](mirror_dataset.md) has the details of each input and says what to do when a run fails.
 
 1. Run the workflow **Mirror a Zenodo deposit to Dataverse**. The table gives the name of each input, the description that the workflow file gives it, and the value:
 
