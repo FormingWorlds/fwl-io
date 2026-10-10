@@ -567,14 +567,16 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
         One entry per dataset that declares a legacy location, whether or not
         that location exists on this machine.
     """
-    from fwl_io.manifest import _discover_all
+    from fwl_io.manifest import ErrorKind, _discover_all
 
     root = resolve_data_root(data_root)
     locations, layout_error = _legacy_locations()
     entries: list[Relocation] = []
     seen: set[str] = set()
     discovery = _discover_all()
-    conflict_providers = frozenset(discovery.conflict_models)
+    conflict_providers = frozenset(
+        name for name, error in discovery.errors.items() if error.kind is ErrorKind.CONFLICT
+    )
     for provider_datasets in discovery.found.values():
         for ds in provider_datasets:
             legacy = locations.get(ds.key)
@@ -616,7 +618,10 @@ def plan_relocations(data_root: str | Path | None = None) -> RelocationReport:
                 )
             )
     return RelocationReport(
-        tuple(entries), dict(discovery.errors), layout_error, conflict_providers
+        tuple(entries),
+        {name: error.message for name, error in discovery.errors.items()},
+        layout_error,
+        conflict_providers,
     )
 
 

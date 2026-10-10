@@ -16,6 +16,7 @@ nav:
       - Mirror a deposit to Dataverse: How-to/mirror_dataset.md
       - Migrate a model to fwl-io: How-to/migrate_model.md
       - Run on clusters: How-to/clusters.md
+      - Use the data from a non-Python code: How-to/non_python_codes.md
 
   - Explanations:
       - Design decisions: Explanations/design.md

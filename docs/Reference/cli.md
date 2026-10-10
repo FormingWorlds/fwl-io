@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has ten subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has eleven subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors` also exits 3 when some pins could not be read and 4 when none could. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -22,11 +22,20 @@ Lists every dataset from all installed manifests with its key and consumers. Whe
 
 ```bash
 fwl-io fetch <model> [--data-root PATH] [--progress | --no-progress]
+fwl-io fetch --key <dotted.key> [--data-root PATH] [--progress | --no-progress]
 ```
 
-Fetches every dataset that lists `<model>` in its `required_by`. All datasets are attempted; failures are aggregated into one report. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
+Fetches every dataset that lists `<model>` in its `required_by`, or with `--key` the one dataset of that key, through the same mirrors and checksum checks. With a model, all datasets are attempted and failures are aggregated into one report. With `--key`, the first file that cannot be fetched stops the command with exit 1, as does a stamp that cannot be written after the fetch (then `fwl-io path` could not confirm the dataset); on success it prints the number of files. `--data-root` overrides the `FWL_DATA` tree. `fwl-io fetch zalmoxis` downloads the ten shared interior tables and `interior.radial_profiles`, about 2.2 GB (measured on 2026-10-07).
 
 A download progress bar shows by default when stderr is a terminal; `--progress` forces it on and `--no-progress` off. The bar needs the optional `tqdm` dependency (`pip install fwl-io[progress]`); without it, or when there is no stderr to draw on, the fetch runs with no bar.
+
+## fwl-io path
+
+```bash
+fwl-io path <dotted.key> [--data-root PATH]
+```
+
+Prints the version directory of a dataset, for example `$FWL_DATA/atmos_clim/spectral_files/dayspring/48/r15721749`, when a completed fetch left it in place: a current stamp and every registry file present (every recorded member for an archive dataset). Contents are not hashed again; `fwl-io check` does that. Otherwise it names the directory and the fetch command on stderr and exits 1. A key that no installed manifest declares, or a data root that does not exist, exits 1 too. Nothing is downloaded or written.
 
 ## fwl-io check
 
@@ -100,10 +109,10 @@ Exit is 1 when the reference set is incomplete, when the data root cannot be ful
 ```bash
 DATAVERSE_TOKEN=... fwl-io mirror <zenodo-doi> --collection <alias> \
     [--dataverse-url URL] [--contact-email EMAIL] [--subject SUBJECT] \
-    [--file NAME ...] [--no-publish] [--dry-run]
+    [--file NAME ...] [--licence NAME] [--into PERSISTENT_ID] [--no-publish] [--dry-run]
 ```
 
-Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. A contact email (`--contact-email`) is required to create a dataset; only `--dry-run`, which makes no Dataverse writes, is exempt. `--subject` is validated by the server when the dataset is created, so a value outside the target installation's citation vocabulary is rejected then. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. `--file NAME` restricts the mirror to that file of the deposit; repeat it for several files. Without `--file`, every file of the deposit is mirrored, and a name the deposit does not hold is an error. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
+Mirrors a pinned Zenodo deposit to a Dataverse collection: it downloads and checksum-verifies the deposit's files, creates a matching Dataverse dataset with citation metadata taken from the Zenodo record, uploads the files byte-identically (tabular ingest disabled), and by default publishes the dataset, then prints the Dataverse DOI to add to the consuming manifest. The API token is read from the `DATAVERSE_TOKEN` environment variable, never a command-line argument. A contact email (`--contact-email`) is required to create a dataset; only `--dry-run`, which makes no Dataverse writes, is exempt. `--subject` is validated by the server when the dataset is created, so a value outside the target installation's citation vocabulary is rejected then. `--dry-run` performs the download and metadata mapping only, making no Dataverse changes; `--no-publish` leaves the created dataset as a private draft. `--file NAME` restricts the mirror to that file of the deposit; repeat it for several files. Without `--file`, every file of the deposit is mirrored, and a name the deposit does not hold is an error. Files go one at a time (download, upload, check, delete the local copy), 60 s apart. A failure once a file has reached the draft keeps it and names the missing files; `--into PERSISTENT_ID` finishes such a draft (a never-published draft of the same record): it keeps a file of the Zenodo name and size, and of the registry checksum where the draft lists one of that type, without a download (where the draft lists another checksum type, as DataverseNL does, only the size is compared, so check the contents before a publish), sends missing and differing files, removes files the Zenodo record does not hold, needs no contact email, never publishes (use `mirror-publish`), refuses `--dry-run`, and never deletes the draft. `--licence NAME` gives a new draft the Dataverse license of that name in place of the one matched from the Zenodo record, for a record whose author licenses it so; the draft's description then names it and the Zenodo licence field. It needs `--no-publish`, so the draft is reviewed first, needs a record with exactly one Zenodo license entry, and is refused when that license matches one or more licenses the server lists. Without it the license always comes from the Zenodo record. See [Mirror a deposit to Dataverse](../How-to/mirror_dataset.md).
 
 ## fwl-io mirror-publish
 
