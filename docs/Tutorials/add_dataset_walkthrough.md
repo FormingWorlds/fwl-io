@@ -16,11 +16,11 @@ cd fwl-tutorial
 export FWL_DATA="$PWD/data"
 ```
 
-`FWL_DATA` is the directory that fwl-io downloads into. Every command below must run in this shell, in `fwl-tutorial`.
+`FWL_DATA` is the directory that fwl-io downloads into. When your shell had a value for it, note that value: step 11 removes the variable. Every command below must run in this shell, in `fwl-tutorial`.
 
 ## 2. Deposit the files on Zenodo
 
-**Not run here.** For your own dataset, create a new upload on Zenodo, add the files, and fill in the title, the authors, the description and the license. The mirror in step 9 copies these four from the record, so write them for a reader who finds the dataset without context. Publish the record, and note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
+**Not run here.** For your own dataset, create a new upload on Zenodo, add the files, and fill in the title, the authors, the description and the license. The mirror of step 8 copies these four from the record, so write them for a reader who finds the dataset without context. Publish the record, and note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
 
 For this tutorial the record exists: `10.5281/zenodo.15728072`.
 
@@ -129,16 +129,15 @@ fwl-io: 1 dataset(s) failed to sync (0 registries written):
 fwl-io list
 ```
 
-The output lists the datasets of every installed manifest. It starts with the demo package:
+The output lists the datasets of every installed manifest, one block per package in alphabetical order. The block of the demo package is:
 
 ```text
 [demo]
   demo.melting_curves                                required_by: demo
     Demo melting curves
-[fwl-io-shared]
 ```
 
-The datasets of the shared manifest follow, two lines each. `required_by: -` marks a dataset that no model fetches by its name.
+The block `[fwl-io-shared]` holds the datasets of the shared manifest, two lines each. `required_by: -` marks a dataset that no model fetches by its name.
 
 ## 6. Fetch and check the files
 
@@ -186,13 +185,13 @@ The dataset works with Zenodo as its one source. Steps 7 to 9 give it a second s
 
 ## 7. Try the mirror without a write
 
-A mirror is a copy of the record on DataverseNL, which a fetch uses when Zenodo does not answer. The command that creates one has a dry run, which downloads the files and builds the metadata and stops before it writes to DataverseNL. It needs no token:
+A mirror is a copy of the record on DataverseNL, which a fetch uses when Zenodo does not answer. `Proteus_Fr` is the collection of the Proteus Framework there. The command that creates one has a dry run, which downloads the files and builds the metadata and stops before it writes to DataverseNL. It needs no token:
 
 ```bash
 fwl-io mirror 10.5281/zenodo.15728072 --collection Proteus_Fr --dry-run
 ```
 
-In your output, `<temporary directory>` is a long path below the temporary directory of your system, another one for each file:
+In your output, `<temporary directory>` stands for a long path of several directories below the temporary directory of your system, another one for each file:
 
 ```text
 Downloading data from 'doi:10.5281/zenodo.15728072/liquidus.dat' to file '<temporary directory>/liquidus.dat'.
@@ -235,13 +234,13 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, which takes 1 to 2 minutes. It prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes about a minute (48 to 98 s in three runs). It prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
 ```
 
-The first count covers the shared manifest and the demo dataset, so your number can be larger. `wrong: 0` is what matters: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1.
+The first count covers the shared manifest and the demo dataset, so your number can be larger. No new fetch is needed after this change. `wrong: 0` is what matters: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1.
 
 ## 10. Open the pull request
 
@@ -266,6 +265,8 @@ cd ..
 rm -r fwl-tutorial
 unset FWL_DATA
 ```
+
+Set `FWL_DATA` back to the value that you noted in step 1, if there was one.
 
 ## Where to go next
 

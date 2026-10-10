@@ -52,7 +52,7 @@ Ask a maintainer of fwl-io for a mirror of the deposit on DataverseNL: [A mirror
 dataverse = "10.34894/ABCDEF"
 ```
 
-The mirror workflow uploads **byte-identical** copies of the originals, with Dataverse's tabular ingest disabled, since ingest re-encodes tabular files and changes their bytes. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors` to confirm that the pin serves the dataset.
+The mirror must host **byte-identical** copies of the originals: the mirror workflow checks each file in the Dataverse dataset against the Zenodo record after its upload. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors` to confirm that the pin serves the dataset.
 
 ## 5. Ship it
 

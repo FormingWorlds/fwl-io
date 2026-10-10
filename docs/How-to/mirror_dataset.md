@@ -12,7 +12,7 @@ Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions 
 
 1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
 2. Leave **publish** unchecked: the run then creates a private draft, which you inspect and publish with the [**Publish an existing Dataverse draft** workflow](#publishing-a-reviewed-draft). Check **publish** only for a deposit that needs no review: the run then publishes the dataset, and its files become downloadable. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
-3. The run prints the Dataverse DOI. Add it to the dataset's manifest entry, then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
+3. The run prints the Dataverse DOI. Once the dataset is published, add the DOI to the dataset's manifest entry, then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
 
     ```toml
     [star.tracks.baraffe_2015]
