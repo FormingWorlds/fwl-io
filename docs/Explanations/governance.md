@@ -6,7 +6,7 @@ This page states who may change the data the ecosystem depends on, and how such 
 
 A dataset is pinned by two committed files: the Zenodo version DOI in a manifest, and the registry file beside it that lists the dataset's files and their checksums. A data change is a change to those: nothing else changes which dataset version is pinned, because a fetch reads the committed registry, not the live Zenodo record.
 
-A dataset of the framework is an accepted record of the PROTEUS Framework community on Zenodo or of the PALEOS community; a maintainer accepts a record that is submitted to the first. fwl-io creates a mirror for no other record, publishes a draft only when its description names exactly one such record, and a check fails for a record of the shared manifest that is outside it.
+A dataset of the framework is an accepted record of a Zenodo community of the framework; [Add a dataset](../How-to/add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) states the rule and the routes into the community.
 
 fwl-io provides the manifest for shared datasets. A model's own datasets are declared in that model's manifest, installed with the model through the `fwl_io.manifests` entry point. Ownership follows the manifest: a shared dataset is changed in fwl-io, a model dataset in the model that owns it.
 
@@ -22,7 +22,7 @@ To change a dataset (the how-to [Update a dataset or its mirror](../How-to/updat
 
 The registry diff shows the new file list and checksums, so a reviewer sees exactly which files and hashes change. `fwl-io sync` rejects a concept DOI, so a manifest can pin only a fixed version, and the data cannot change under pinned code without a visible manifest edit.
 
-The Dataverse mirror is a separate access surface. Publishing or updating the mirrored copy requires the `DATAVERSE_TOKEN`, a secret bound to a `dataverse` GitHub deployment environment and never distributed outside CI; the workflow that runs it is triggered manually, not through pull-request review, and each run waits until a maintainer, a member of the team `proteus-maintainer`, approves it; a maintainer can approve a run that they started. It hosts a copy of already-pinned data and does not change which version a fetch resolves, so it is not part of the data-change path above. A mirror is a copy of one Zenodo version and does not follow the record: a new version needs a new mirror dataset and a new `dataverse` pin.
+The Dataverse mirror is a separate access surface. Publishing or updating the mirrored copy requires the `DATAVERSE_TOKEN`, a secret bound to a `dataverse` GitHub deployment environment and never distributed outside CI; the workflow that runs it is triggered manually, not through pull-request review, and each run waits for the approval of a maintainer ([Approval](../How-to/mirror_dataset.md#running-the-mirror)); a draft is published only after a check of its source record ([The check before a publish](../How-to/mirror_dataset.md#publishing-a-reviewed-draft)). It hosts a copy of already-pinned data and does not change which version a fetch resolves, so it is not part of the data-change path above. A mirror is a copy of one Zenodo version and does not follow the record: a new version needs a new mirror dataset and a new `dataverse` pin.
 
 ## How data is tested
 

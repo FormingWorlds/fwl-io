@@ -1,11 +1,11 @@
 name: Dataset request
-description: Ask for a new dataset, a new version of a dataset, or a mirror, in the PROTEUS Framework community on Zenodo.
+description: Ask for a new dataset, a new version of a dataset, or a mirror.
 title: "Dataset request: "
 body:
   - type: markdown
     attributes:
       value: |
-        A dataset of the framework is a record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework), accepted by a maintainer. The steps of each route are in [Add a dataset](https://proteus-framework.org/fwl-io/How-to/add_dataset/). A field marked "Needed for" can stay empty for the other routes.
+        A dataset of the framework is an accepted record of the PROTEUS Framework community or of the PALEOS community on Zenodo: [Add a dataset](https://proteus-framework.org/fwl-io/How-to/add_dataset/) has the rule and the steps of each route. A field marked "Needed for" can stay empty for the other routes.
   - type: dropdown
     id: route
     attributes:
@@ -15,7 +15,7 @@ body:
         - A maintainer uploads my data
         - I upload the record myself and submit it to the community
         - My record exists on Zenodo; add it to the community
-        - My record is in the community; I ask for a mirror
+        - My record is an accepted record; I ask for a mirror
     validations:
       required: true
   - type: input
@@ -50,7 +50,7 @@ body:
     id: zenodo_doi
     attributes:
       label: Zenodo DOI
-      description: 'Needed for: every route with a record on Zenodo. The version DOI (10.5281/zenodo.<record-id>) of the record to add or to mirror. For a new upload of your own, add it when the record is published. For a new version that a maintainer uploads, the DOI of the version that it replaces.'
+      description: 'Needed for: every route with a record on Zenodo. The version DOI (10.5281/zenodo.<record-id>) of the record to add or to mirror; for a new version of your own, the DOI of the new version. For a new upload of your own, add it in a comment when the record is published. For a new version that a maintainer uploads, the DOI of the version that it replaces.'
     validations:
       required: false
   - type: dropdown
@@ -60,7 +60,7 @@ body:
       description: 'Needed for: every route except a mirror alone.'
       options:
         - A new dataset
-        - A new version of a record that exists
+        - A new version of a record that the framework has as a dataset
     validations:
       required: false
   - type: input

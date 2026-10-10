@@ -4,17 +4,19 @@ Zenodo is the primary source of every dataset. DataverseNL is a download mirror:
 
 ## When to mirror
 
-Mirror a version of a Zenodo record that a manifest pins, or will pin, when you want a second download source for it. The mirror needs only the version DOI, so the record can be mirrored as soon as that version is public on Zenodo. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror. A mirror is a copy of one Zenodo version: a new version of the record needs a new mirror dataset and a new pin (see [What happens to the mirror](update_dataset.md#what-happens-to-the-mirror)).
+Mirror a version of a Zenodo record that a manifest pins, or will pin, when you want a second download source for it. The record must be an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)); the mirror needs only its version DOI. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror. A mirror is a copy of one Zenodo version: a new version of the record needs a new mirror dataset and a new pin (see [What happens to the mirror](update_dataset.md#what-happens-to-the-mirror)).
 
 ## Running the mirror
 
-Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a secret of the `dataverse` environment that lives only in CI, so no one needs personal upload rights to the collection. The access control is the approval rule of that environment, for each workflow that holds the token. A run waits until a maintainer approves it in the **Actions** tab (**Review deployments**, then **Approve and deploy**); a maintainer can approve a run that they started.
+Mirroring runs from the **Mirror a Zenodo deposit to Dataverse** GitHub Actions workflow, not from a laptop. The Dataverse API token is a secret of the `dataverse` environment that lives only in CI, so no one needs personal upload rights to the collection.
 
-The mirror accepts only an accepted record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework) or of the PALEOS community. For any other record the run stops before a Dataverse write, also in a dry run, with a message that names the two communities; [Add a dataset](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes into the community.
+**Approval.** Each workflow that holds the token runs in the `dataverse` environment, and a run waits until a maintainer (a member of the team `proteus-maintainer`) approves it: open the run in the **Actions** tab, select **Review deployments**, tick `dataverse`, and select **Approve and deploy**. A maintainer can approve a run that they started.
+
+A record that is not an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)) stops the run before a Dataverse write, also in a dry run, with a message that names the two communities.
 
 1. Open the workflow in the Actions tab and run it, supplying the Zenodo version DOI and the target collection alias. To mirror only some files of the deposit, list their names in **files**, separated by spaces (see [Mirroring part of a deposit](#mirroring-part-of-a-deposit)).
 2. Leave **publish** unchecked: the run then creates a private draft, which you inspect and publish with the [**Publish an existing Dataverse draft** workflow](#publishing-a-reviewed-draft). Check **publish** only for a deposit that needs no review: the run then publishes the dataset, and its files become downloadable. The first time you mirror a new kind of deposit, run with **dry run** checked to confirm the download and metadata mapping without touching Dataverse.
-3. The run prints the Dataverse DOI. Once the dataset is published, add the DOI to the dataset's manifest entry, then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
+3. The run prints the Dataverse DOI. Once the dataset is published, write the DOI into the dataset request; the dataset owner adds it to the dataset's manifest entry (or you do, for a dataset of your own), then run `fwl-io check-mirrors` to confirm the pin serves the dataset:
 
     ```toml
     [star.tracks.baraffe_2015]
@@ -34,7 +36,15 @@ The run logs the DOI of the dataset it creates. The dataset creation is not repe
 
 ## Publishing a reviewed draft
 
-A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Before the publish it reads the Zenodo record that the description of the draft names: a draft that does not name exactly one record, a record that Zenodo does not serve at that moment, and a record that is not an accepted record of a community of the framework each stop the run with their own message, and nothing is published. The check reads the description of the draft, not its files. Add the DOI to the manifest as in step 3 above once it is published. If the dataset is not RELEASED after its publish request, the run stops with an error saying the publish was not confirmed: check the dataset's state on DataverseNL before running it again.
+A draft created with **publish** unchecked stays private until it is published. Run the **Publish an existing Dataverse draft** GitHub Actions workflow, supplying the draft's persistent id (the DOI printed by the mirror run, with a `doi:` prefix, for example `doi:10.34894/XXXXXX`). It only publishes; it never creates a dataset, so it cannot mint a duplicate one. Add the DOI to the manifest as in step 3 above once it is published. If the dataset is not RELEASED after its publish request, the run stops with an error saying the publish was not confirmed: check the dataset's state on DataverseNL before running it again.
+
+**The check before a publish.** The mirror writes one line into the description of the draft, the source note:
+
+```text
+Mirror of Zenodo deposit 10.5281/zenodo.<record-id>. Zenodo is the primary source.
+```
+
+Do not edit or remove that line in a draft. Before it publishes, the run reads the description, takes every DOI that follows the words "Mirror of Zenodo deposit", and reads that record from Zenodo. It publishes only when the description names exactly one DOI in this way, Zenodo serves it as a version record, and the record is an accepted record of a community of the framework ([the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)). Each other case stops the run with its own message, and nothing is published. A dataset that is published already gives "already published" before this check. The check reads the description of the draft, not its files.
 
 ## What the mirror does
 

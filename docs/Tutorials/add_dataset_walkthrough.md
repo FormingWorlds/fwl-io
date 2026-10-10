@@ -46,9 +46,9 @@ Every command below must run in this shell, in `fwl-tutorial`.
 
 ## 2. Deposit the files on Zenodo
 
-**Not run here.** A dataset of the framework must be an accepted record of the PROTEUS Framework community on Zenodo (or of the PALEOS community). For your own dataset, either open a dataset request, and a maintainer uploads the files for you, or upload them yourself and submit the upload to the community; [Add a dataset](../How-to/add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) gives the routes. For an own upload, add the files and fill in the title, the authors, the description and the license. The mirror of step 8 copies these four from the record, so write them for a reader who finds the dataset without context. When the record is published and in the community, note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
+**Not run here.** A dataset of the framework must be an accepted record of a Zenodo community of the framework: [Add a dataset](../How-to/add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo) states the rule and the routes. For your own dataset, either open a dataset request, and a maintainer uploads the files for you, or upload them yourself and submit the upload to the community. For an own upload, add the files and fill in the title, the authors, the description and the license. The mirror of step 8 copies these four from the record, so write them for a reader who finds the dataset without context. When the record is published and in the community, note its **version DOI**, of the form `10.5281/zenodo.<record-id>`.
 
-For this tutorial the record exists, and it is in the community: `10.5281/zenodo.15728072`.
+For this tutorial the record exists, and it is an accepted record: `10.5281/zenodo.15728072`.
 
 ## 3. Create the package that declares the dataset
 
@@ -246,8 +246,8 @@ A dry run that ends with this line shows that the record can be mirrored.
 
 **Not run here.** The real mirror is created by a maintainer of fwl-io, because the DataverseNL token is in the fwl-io repository and nowhere else. For your own dataset:
 
-1. Use the dataset request that brought the record into the community, or open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) with the route "My record is in the community; I ask for a mirror", the version DOI and the dataset key.
-2. A maintainer runs the workflow **Mirror a Zenodo deposit to Dataverse** with the version DOI, and a maintainer approves the run. It creates a private draft and prints its DOI.
+1. Use the dataset request that brought the record into the community, or open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) with the route "My record is an accepted record; I ask for a mirror", the version DOI and the dataset key.
+2. A maintainer runs the workflow **Mirror a Zenodo deposit to Dataverse** with the version DOI, and a maintainer approves the run ([Approval](../How-to/mirror_dataset.md#running-the-mirror)). It creates a private draft and prints its DOI.
 3. The maintainer checks the draft and runs the workflow **Publish an existing Dataverse draft**.
 4. The maintainer gives you the DOI of the mirror, of the form `10.34894/<id>`.
 
