@@ -1,10 +1,10 @@
 # Mirror a deposit to Dataverse
 
-Zenodo is the primary source of every dataset. DataverseNL is a download mirror: the second link in the fetch fallback chain, so a dataset stays reachable when Zenodo is unavailable. This guide covers mirroring one pinned Zenodo deposit into the Proteus Framework collection.
+Zenodo is the primary source of every dataset. DataverseNL is a download mirror: the second link in the fetch fallback chain, so a dataset stays reachable when Zenodo is unavailable. This guide covers mirroring one pinned Zenodo deposit into the Proteus Framework collection. It is written for the maintainer who runs the workflows; a dataset owner who needs a mirror starts at [A mirror for my dataset](update_dataset.md#a-mirror-for-my-dataset).
 
 ## When to mirror
 
-Mirror a dataset once its Zenodo version DOI is pinned in a manifest and you want a second download source for it. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror.
+Mirror a dataset once its Zenodo version DOI is pinned in a manifest and you want a second download source for it. A dataset that lists only a `zenodo` DOI works, but is single-sourced; adding a `dataverse` DOI makes the fetch chain fall back to the mirror. A mirror is a copy of one Zenodo version: a new version of the record needs a new mirror dataset and a new pin (see [What happens to the mirror](update_dataset.md#what-happens-to-the-mirror)).
 
 ## Running the mirror
 

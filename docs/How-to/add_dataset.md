@@ -1,6 +1,6 @@
 # Add a dataset
 
-Follow these steps to make a new dataset fetchable through fwl-io.
+Follow these steps to make a new dataset fetchable through fwl-io. The tutorial [Add a dataset, step by step](../Tutorials/add_dataset_walkthrough.md) runs the same steps on a small real record, with the output of each command.
 
 ## 1. Deposit the files on Zenodo
 
@@ -8,7 +8,7 @@ Upload the files to Zenodo and note the **version DOI** of the deposit, the DOI 
 
 !!! warning "Version DOI, not concept DOI"
 
-    Every Zenodo deposit has two DOIs: the version DOI of each specific deposit and a concept DOI that always resolves to the newest deposit. Manifests must pin the version DOI. `fwl-io sync` rejects concept DOIs, because data that silently updates underneath pinned code is exactly the failure mode fwl-io exists to prevent. Publishing a new version of the data means minting a new version DOI and updating the manifest deliberately.
+    Every Zenodo deposit has two DOIs: the version DOI of each specific deposit and a concept DOI that always resolves to the newest deposit. Manifests must pin the version DOI. `fwl-io sync` rejects concept DOIs, because data that silently updates underneath pinned code is exactly the failure mode fwl-io exists to prevent. Publishing a new version of the data means minting a new version DOI and updating the manifest deliberately: see [Update a dataset or its mirror](update_dataset.md).
 
 ## 2. Declare the dataset in a manifest
 
@@ -46,13 +46,13 @@ This queries the Zenodo record and writes a registry file next to the manifest (
 
 ## 4. Mirror to Dataverse (optional but encouraged)
 
-Mirror the deposit to Dataverse and add its DOI:
+Ask a maintainer of fwl-io for a mirror of the deposit on DataverseNL: [A mirror for my dataset](update_dataset.md#a-mirror-for-my-dataset) says how, and what the maintainer runs. Add the DOI of the published mirror:
 
 ```toml
 dataverse = "10.34894/ABCDEF"
 ```
 
-The mirror must host **byte-identical** copies of the originals; disable Dataverse's tabular ingest for mirrored deposits, since ingest re-encodes tabular files and changes their bytes. Checksums always come from the Zenodo record.
+The mirror workflow uploads **byte-identical** copies of the originals, with Dataverse's tabular ingest disabled, since ingest re-encodes tabular files and changes their bytes. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors` to confirm that the pin serves the dataset.
 
 ## 5. Ship it
 
