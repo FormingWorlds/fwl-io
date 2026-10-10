@@ -60,16 +60,6 @@ fwl-io mirror 10.5281/zenodo.17674612 --collection Proteus_Fr --into doi:10.3489
 
 It accepts only a draft that was never published and whose description names the same Zenodo record. A file the draft holds with the Zenodo name and size (and the registry checksum, where the draft lists a checksum of the same type) is kept without a download, any other is downloaded, compared and, if it differs, sent again, and a file the Zenodo record does not hold is deleted, so a second run into a complete draft sends nothing. A file kept where the draft lists no checksum of the registry type is compared by size only. DataverseNL lists SHA-1 and the registries hold MD5, so on DataverseNL every kept file is compared by size only. Check the draft's contents before you publish it: download each file from DataverseNL and compare its MD5 with the registry. A draft whose publish fails is kept; publish it with the workflow below. Each deletion is logged. The draft is never deleted and never published: publish it with the **Publish an existing Dataverse draft** workflow below. **into** takes no dry run. Workflow runs for the same DOI, or into the same draft, wait for each other, and a second waiting run replaces the first waiting one.
 
-## Finding datasets without a mirror
-
-The workflow **Report datasets without a mirror, and create a draft mirror** has two jobs.
-
-**The weekly report.** Every Monday, and on each manual run, the first job runs `fwl-io mirror-status`. It reads Zenodo only, holds no token and needs no approval. Its summary lists each dataset that needs work: `UNPINNED` (no `dataverse` pin), `STALE` (the Zenodo record has a newer version than the pinned one), `OUTSIDE` (no pin, and the record is not an accepted record of a community of the framework, [the rule](add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo): no mirror is created for it) and `UNREADABLE` (Zenodo did not answer). A dataset that needs work, or a record that was not read, leaves a warning on the run while the job passes; a manifest that is left out fails it.
-
-**The draft.** To create a draft, run the workflow by hand with **dry run** unchecked. The second job holds the token, so it waits for an approval ([Approval](#running-the-mirror)). It creates one draft per run, for the first record that has no dataset in the collection and is an accepted record, checks the draft against Zenodo file by file, and never publishes; a dataset whose record is outside the communities, has a newer version or was not read gets a `SKIPPED` line and no draft. A creation that fails before a file has reached the draft deletes that draft, as the mirror run above does. Review the draft and publish it with the **Publish an existing Dataverse draft** workflow.
-
-**The pin.** Run the **Pin a published Dataverse mirror** workflow with the DOI of the published mirror. It holds no token and needs no approval. It checks the mirror against the registry of every dataset of the record, writes the pins into the shared manifest only when all of them pass and no installed manifest was left out, and pushes the edit as a branch named `tl/pin-<DOI suffix>`. Open the pull request from that branch yourself. A dataset that another package declares gets no edit, only the line to add there. The workflows see the manifests of the packages installed in the run, which is fwl-io alone.
-
 ## Mirroring part of a deposit
 
 When the manifest entry sets `files`, mirror the same files so the mirror matches what the dataset fetches. In the workflow, fill **files**; file names in it must not contain spaces. From the command line, pass each name with `--file`:
@@ -89,3 +79,13 @@ fwl-io mirror 10.5281/zenodo.15729114 --collection Proteus_Fr --dry-run
 This downloads the files and builds the citation metadata, then stops before any Dataverse write, so it needs no token.
 
 A real local run (with or without `--no-publish`) does create a Dataverse dataset, so it needs both a token and a contact email: pass `--contact-email` and set `DATAVERSE_TOKEN`. Only the dry run above is exempt. The GitHub Actions workflow supplies both from the `dataverse` environment secrets, so its runs already satisfy this.
+
+## The weekly report, the draft and the pin
+
+The workflow **Report datasets without a mirror, and create a draft mirror** has two jobs.
+
+**The weekly report.** Every Monday, and on each manual run, the first job runs `fwl-io mirror-status` ([its lines and exit codes](../Reference/cli.md#fwl-io-mirror-status)). It reads Zenodo only, holds no DataverseNL token and needs no approval. A dataset that needs work, or a record that was not read, leaves a warning on the run while the job passes; a manifest that is left out fails it.
+
+**The draft.** A manual run has two inputs: **collection** (default `Proteus_Fr`) and **dry_run** (checked by default). Every manual run waits for an approval ([Approval](#running-the-mirror)), also a dry run, because the second job holds the DataverseNL token. The job runs `fwl-io mirror-sync` ([which record it takes, and how it checks the draft](../Reference/cli.md#fwl-io-mirror-sync)): with **dry_run** checked it says which draft a run would create, and with it unchecked it creates at most one draft, which it never publishes. Review the draft and publish it with the **Publish an existing Dataverse draft** workflow.
+
+**The pin.** Run the **Pin a published Dataverse mirror** workflow with **persistent_id**, the DOI of the published mirror. It holds no DataverseNL token and needs no approval. It runs `fwl-io mirror-pin` ([what it checks, and when it writes](../Reference/cli.md#fwl-io-mirror-pin)) on the shared manifest and pushes the edit as a branch named `tl/pin-<DOI suffix>`. It opens no pull request: open one from that branch yourself. A dataset that another package declares gets no edit, only the line to add there. The workflows see the manifests of the packages installed in the run, which is fwl-io alone.

@@ -53,6 +53,6 @@ Every write is staged on the destination filesystem and moved into place with an
 These are tracked as issues and open for input:
 
 - **Per-member archive checksums**: an archive dataset (`extract = "tar"` / `"zip"`) verifies the downloaded archive against its checksum, but the registry does not record a checksum per extracted member; a member deleted after extraction is detected on refetch (the stamp lists the member names) and healed, but a member corrupted in place is not.
-- **Mirror of a new version**: a maintainer creates the Dataverse mirror of one Zenodo version by running a workflow. A weekly report lists the datasets without a mirror and the records with a newer version ([Finding datasets without a mirror](../How-to/mirror_dataset.md#finding-datasets-without-a-mirror)); no job creates a mirror or changes a pin by itself.
+- **Mirror of a new version**: a maintainer creates the Dataverse mirror of one Zenodo version by running a workflow. A weekly report lists the datasets without a mirror and the records with a newer version ([The weekly report, the draft and the pin](../How-to/mirror_dataset.md#the-weekly-report-the-draft-and-the-pin)); no job creates a mirror or changes a pin by itself.
 - **Checksum strength**: registries carry the checksums Zenodo publishes (md5); recording sha256 at sync time is under consideration.
 - **Progress reporting for mirroring**: the downloads run by `fwl-io mirror` show no progress bar, unlike `fwl-io fetch`.
