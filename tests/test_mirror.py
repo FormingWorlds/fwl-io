@@ -803,6 +803,29 @@ def _publish_route(seen, post_reply, states=('DRAFT',)):
 
 
 @pytest.mark.unit
+def test_a_redirect_of_the_publish_request_fails_at_once(monkeypatch):
+    """A 302 answer to the publish request did not publish: it raises the redirect error
+    without a wait for the release and without a second request."""
+    import requests
+
+    from fwl_io import mirror
+
+    seen, waits = [], []
+
+    def redirect(method, *args, **kwargs):
+        response = _fake_response(302, b'')
+        response.headers['Location'] = 'https://other.example/publish?x=1'
+        return response
+
+    monkeypatch.setattr(requests, 'request', _publish_route(seen, redirect))
+    monkeypatch.setattr(mirror, '_sleep', waits.append)
+    with pytest.raises(DataverseError, match='redirect to https://other.example/publish, not') as e:
+        DataverseClient('http://unused', 'tok').publish('doi:10.34894/DEMO01')
+    assert not isinstance(e.value, DataversePublishUnconfirmed) and e.value.status_code == 302
+    assert seen.count('POST') == 1 and waits == []
+
+
+@pytest.mark.unit
 def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id():
     """A 2xx create response with an empty body still fails, for the missing id."""
     import requests
@@ -815,6 +838,33 @@ def test_create_with_an_empty_success_body_raises_for_the_missing_persistent_id(
             client.create_dataset('coll', {'datasetVersion': {}})
     finally:
         requests.request = orig
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('status', [301, 302, 303, 307, 308])
+def test_a_request_with_a_token_does_not_follow_a_redirect(monkeypatch, status):
+    """With a token, a redirect of a read or a write is an error that names its target
+    without the query, and no second request follows; without a token, redirects are
+    followed."""
+    import requests
+
+    seen = []
+
+    def request(method, url, **kwargs):
+        seen.append(kwargs['allow_redirects'])
+        response = _fake_response(200 if kwargs['allow_redirects'] else status, b'{}')
+        response.headers['Location'] = 'https://store.example/x?signature=s'
+        return response
+
+    monkeypatch.setattr(requests, 'request', request)
+    for method in ('GET', 'POST'):
+        with pytest.raises(
+            DataverseError, match=r'redirect to https://store.example/x, not'
+        ) as err:
+            DataverseClient('http://unused', 'tok')._request(method, '/api/search')
+        assert err.value.status_code == status and 'signature' not in str(err.value)
+    assert DataverseClient('http://unused', '')._request('GET', '/api/search') == {}
+    assert seen == [False, False, True], 'one request per call, none after a redirect'
 
 
 @pytest.mark.unit
@@ -1431,6 +1481,30 @@ def test_rollback_failure_does_not_mask_the_original_error(http_server, datavers
     # Both the failed add and the attempted (also-failed) delete were issued;
     # the operator is told to clean up manually, but the original error wins.
     assert any(c['method'] == 'DELETE' for c in calls)
+
+
+@pytest.mark.parametrize(
+    ('fail_on_delete', 'outcome'),
+    [(False, 'was deleted again'), (True, 'could not be deleted: delete it by hand')],
+)
+def test_a_value_error_after_the_draft_exists_leaves_as_an_error_that_names_the_draft(
+    http_server, dataverse_server, monkeypatch, fail_on_delete, outcome
+):
+    """A ValueError between the creation of the draft and its first file is not a
+    ValueError of the mirror, which means that nothing was created: it names the draft and
+    says whether the roll-back worked."""
+    monkeypatch.setattr(DataverseClient, 'set_license', lambda *args: _raise_value_error())
+    _DataverseHandler.fail_on_delete = fail_on_delete
+    with pytest.raises(
+        DataverseError, match=f'draft doi:10.34894/DEMO01 was created and {outcome}'
+    ) as e:
+        _mirror(http_server, dataverse_server)
+    assert not isinstance(e.value, ValueError) and 'ValueError: bad checksum' in str(e.value)
+    assert any(c['method'] == 'DELETE' for c in dataverse_server[1])
+
+
+def _raise_value_error():
+    raise ValueError('bad checksum')
 
 
 def test_missing_persistent_id_is_an_error(http_server, dataverse_server):

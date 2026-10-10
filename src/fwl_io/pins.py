@@ -43,6 +43,11 @@ class UnknownServer(Exception):
     """doi.org names no landing page, so no Dataverse server, for a pinned DOI."""
 
 
+def manifest_lines(errors: dict[str, ProviderError]) -> list[str]:
+    """Return one ``FAIL`` line per manifest left out of discovery."""
+    return [f'FAIL {p}: MANIFEST {e.verdict}, {e.message}' for p, e in sorted(errors.items())]
+
+
 @dataclass
 class MirrorReport:
     """Outcome of :func:`check_mirrors`: passed, failed, unreachable and unpinned datasets,
@@ -73,10 +78,7 @@ class MirrorReport:
 
     def summary(self) -> str:
         """Return a line per problem, the counts, and the unpinned datasets."""
-        lines = [
-            f'FAIL {provider}: MANIFEST {error.verdict}, {error.message}'
-            for provider, error in sorted(self.manifest_errors.items())
-        ]
+        lines = manifest_lines(self.manifest_errors)
         lines += [f'FAIL {key}: {why}' for key, why in sorted(self.failed.items())]
         lines += [f'UNREACHABLE {key}: {why}' for key, why in sorted(self.unreachable.items())]
         lines += [f'WARNING {key}: {note}' for key, note in sorted(self.warnings.items())]

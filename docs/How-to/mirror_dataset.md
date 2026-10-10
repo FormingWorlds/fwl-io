@@ -79,3 +79,13 @@ fwl-io mirror 10.5281/zenodo.15729114 --collection Proteus_Fr --dry-run
 This downloads the files and builds the citation metadata, then stops before any Dataverse write, so it needs no token.
 
 A real local run (with or without `--no-publish`) does create a Dataverse dataset, so it needs both a token and a contact email: pass `--contact-email` and set `DATAVERSE_TOKEN`. Only the dry run above is exempt. The GitHub Actions workflow supplies both from the `dataverse` environment secrets, so its runs already satisfy this.
+
+## The weekly report, the draft and the pin
+
+The workflow **Report datasets without a mirror, and create a draft mirror** has two jobs.
+
+**The weekly report.** Every Monday, and on each manual run, the first job runs `fwl-io mirror-status` ([its lines and exit codes](../Reference/cli.md#fwl-io-mirror-status)). It reads Zenodo only, holds no DataverseNL token and needs no approval. A dataset that needs work, or a record that was not read, leaves a warning on the run while the job passes; a manifest that is left out fails it.
+
+**The draft.** A manual run has two inputs: **collection** (default `Proteus_Fr`) and **dry_run** (checked by default). Every manual run waits for an approval ([Approval](#running-the-mirror)), also a dry run, because the second job holds the DataverseNL token. The job runs `fwl-io mirror-sync` ([which record it takes, and how it checks the draft](../Reference/cli.md#fwl-io-mirror-sync)): with **dry_run** checked it says which draft a run would create, and with it unchecked it creates at most one draft, which it never publishes. Review the draft and publish it with the **Publish an existing Dataverse draft** workflow.
+
+**The pin.** Run the **Pin a published Dataverse mirror** workflow with **persistent_id**, the DOI of the published mirror. It holds no DataverseNL token and needs no approval. It runs `fwl-io mirror-pin` ([what it checks, and when it writes](../Reference/cli.md#fwl-io-mirror-pin)) on the shared manifest and pushes the edit as a branch named `tl/pin-<DOI suffix>`. It opens no pull request: open one from that branch yourself. A dataset that another package declares gets no edit, only the line to add there. The workflows see the manifests of the packages installed in the run, which is fwl-io alone.

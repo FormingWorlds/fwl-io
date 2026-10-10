@@ -184,6 +184,21 @@ def names_source(text: str, doi: str) -> bool:
     return re.search(_NOTE_HEAD + re.escape(doi) + r'(?!\d)', text, re.IGNORECASE) is not None
 
 
+def source_dois(text: str) -> set[str]:
+    """Return every DOI that a :func:`source_note` in ``text`` names, in lower case."""
+    return {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
+
+
+def source_record(text: str) -> str | None:
+    """Return the Zenodo record id that the source notes of ``text`` name, or None when
+    they name no DOI, several, or one that is not a Zenodo version DOI."""
+    named = source_dois(text)
+    try:
+        return zenodo_record_id(named.pop()) if len(named) == 1 else None
+    except ValueError:
+        return None
+
+
 def _outside(recid: str) -> str:
     """Return the refusal text for a Zenodo record outside the communities of the framework."""
     return (
@@ -375,9 +390,11 @@ class DataverseClient:
             the connection fails, times out or breaks mid-body, or a TLS error
             occurs that is not a certificate verification failure.
         DataverseError
-            If another transport error occurs, another status is 400 or
-            higher, or a non-empty successful body fails to parse as JSON or
-            parses to something other than a JSON object.
+            If another transport error occurs, another status is 300 or
+            higher (a request with a token does not follow a redirect, so
+            the token stays on this server), or a non-empty successful body
+            fails to parse as JSON or parses to something other than a JSON
+            object.
         """
         try:
             response = requests.request(
@@ -385,6 +402,7 @@ class DataverseClient:
                 f'{self.base_url}{path}',
                 headers=self._headers,
                 timeout=self.timeout,
+                allow_redirects=not self.token,
                 **kwargs,
             )
         except (
@@ -416,13 +434,15 @@ class DataverseClient:
                 float(wait) if wait.isdecimal() else None,
                 unprocessed=response.status_code == 429,
             )
-        if not response.ok:
+        if response.status_code >= 300:
             try:
                 body = response.json()
             except ValueError:
                 body = None
+            target = response.headers.get('Location', '').split('?')[0]
+            why = f'redirect to {target}, not followed' if target else response.text[:500]
             raise DataverseError(
-                f'Dataverse {method} {path} failed ({response.status_code}): {response.text[:500]}',
+                f'Dataverse {method} {path} failed ({response.status_code}): {why}',
                 response.status_code,
                 body,
             )
@@ -708,8 +728,8 @@ class DataverseClient:
                 )
                 _sleep(delay)
             except Exception as exc:
-                if isinstance(exc, DataverseError) and 400 <= (exc.status_code or 0) < 500:
-                    raise
+                if isinstance(exc, DataverseError) and 300 <= (exc.status_code or 0) < 500:
+                    raise  # a rejection, or a redirect that was not followed: not published
                 return self._await_release(persistent_id, attempt, exc)
             else:
                 return self._await_release(persistent_id, attempt, f'accepted ({reply})')
@@ -1074,7 +1094,9 @@ def mirror_to_dataverse(
         dataset directory (Dataverse flattens on the basename, so it would
         collide), or if the record lists no license or several, or its license
         matches no license the Dataverse server lists, or more than one; all
-        before the draft is created.
+        before the draft is created. A ``ValueError`` after the draft exists
+        leaves as a ``DataverseError`` that names the draft, so a ``ValueError``
+        means that nothing was created.
     DataverseError
         If a Dataverse native-API request fails: the server rejects it (for
         example an unknown subject in the citation metadata), the HTTP transport
@@ -1260,10 +1282,12 @@ def mirror_to_dataverse(
             message = f'{persistent_id} is kept as a draft ({found}); {advice} ({exc})'
             log.error('%s', message)
             raise MirrorIncomplete(message, persistent_id, state) from exc
+        outcome = 'was deleted again'
         try:
             client.delete_draft(persistent_id)
             log.warning('rolled back the draft dataset %s after a failed mirror', persistent_id)
         except Exception as cleanup_exc:  # noqa: BLE001 -- surface, do not mask the original
+            outcome = 'could not be deleted: delete it by hand'
             log.error(
                 'could not roll back draft %s (delete it manually): %s',
                 persistent_id,
@@ -1272,6 +1296,10 @@ def mirror_to_dataverse(
         except BaseException:
             log.error('rollback of %s interrupted; check it by hand', persistent_id)
             raise
+        if isinstance(exc, ValueError):  # a ValueError leaves only when no draft was created
+            raise DataverseError(
+                f'draft {persistent_id} was created and {outcome} ({type(exc).__name__}: {exc})'
+            ) from exc
         raise
     except BaseException:
         if made[0] is not None:
@@ -1293,8 +1321,7 @@ def _check_draft_source(client: DataverseClient, persistent_id: str, api_base: s
         raise DataverseAlreadyPublished(f'{persistent_id} is already published')
     if state != 'DRAFT':
         raise DataverseError(f'{persistent_id} is in the state {state!r}, not DRAFT; not published')
-    text = descriptions(version)
-    named = {doi.rstrip('.').lower() for doi in re.findall(_NOTE_HEAD + r'(\S+)', text, re.I)}
+    named = source_dois(descriptions(version))
     if len(named) != 1:
         raise DataverseError(
             f'{persistent_id} names {len(named)} Zenodo records as its source, not 1; not published'

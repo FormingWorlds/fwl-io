@@ -1,0 +1,98 @@
+name: Report datasets without a mirror, and create a draft mirror
+
+# The report job runs each week and on a manual run: it reads Zenodo only, holds no token
+# and needs no approval. The draft job runs only on a manual run: it holds the Dataverse
+# token, so it waits for an approval (docs: How-to/mirror_dataset, Approval).
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      collection:
+        description: "Dataverse collection alias"
+        required: true
+        default: "Proteus_Fr"
+      dry_run:
+        description: "Only say which draft a run would create; make no Dataverse changes"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Datasets whose mirror needs work
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Report
+        shell: bash
+        run: |
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          set +e
+          fwl-io mirror-status | tee -a "${GITHUB_STEP_SUMMARY}"
+          code=${PIPESTATUS[0]}
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          # Exit 5: a dataset needs work. Exit 3: a Zenodo record was not read. Both warn.
+          if [ "${code}" -eq 5 ]; then
+            echo "::warning title=A dataset needs work::see the summary of this run"
+            exit 0
+          fi
+          if [ "${code}" -eq 3 ]; then
+            echo "::warning title=Zenodo not fully read::a Zenodo record could not be read; see the summary"
+            exit 0
+          fi
+          exit "${code}"
+
+  draft:
+    name: Create one draft mirror
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dataverse
+    # One run at a time: a second run must see the draft the first one created.
+    concurrency:
+      group: mirror-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Report, and create one draft when asked
+        shell: bash
+        env:
+          DATAVERSE_TOKEN: ${{ secrets.DATAVERSE_TOKEN }}
+          DATAVERSE_CONTACT_EMAIL: ${{ secrets.DATAVERSE_CONTACT_EMAIL }}
+          COLLECTION: ${{ inputs.collection }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          args=()
+          if [ "${DRY_RUN}" != "false" ]; then args+=(--dry-run); fi
+          set +e
+          fwl-io mirror-sync --collection "${COLLECTION}" \
+            --contact-email "${DATAVERSE_CONTACT_EMAIL}" "${args[@]}" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+          code=${PIPESTATUS[0]}
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          # Exit 3: nothing failed, but Zenodo did not answer for a record. Warn and pass.
+          if [ "${code}" -eq 3 ]; then
+            echo "::warning title=Zenodo not fully read::a Zenodo record could not be read; see the summary"
+            exit 0
+          fi
+          exit "${code}"
