@@ -43,6 +43,7 @@ import stat
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from fwl_io.fetch import (
     _LOCK_DIRNAME,
@@ -68,6 +69,9 @@ from fwl_io.fs_guard import (
 )
 from fwl_io.paths import existing_data_root
 from fwl_io.relocate import _version_dir
+
+if TYPE_CHECKING:
+    from fwl_io.manifest import ProviderError
 
 log = logging.getLogger('fwl.' + __name__)
 
@@ -128,7 +132,7 @@ class PruneReport:
     """
 
     candidates: tuple[PruneCandidate, ...] = ()
-    manifest_errors: dict[str, str] = field(default_factory=dict)
+    manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
     resolve_error: str | None = None
     scan_error: str | None = None
     known_subdirs: frozenset[str] = frozenset()
@@ -230,7 +234,7 @@ class PruneReport:
         for c in sorted(self.candidates, key=lambda c: c.rel):
             lines.append(c.summary())
         for provider, error in sorted(self.manifest_errors.items()):
-            lines.append(f'{provider}: MANIFEST UNREADABLE, {error}')
+            lines.append(f'{provider}: MANIFEST {error.verdict}, {error.message}')
         if self.resolve_error is not None:
             lines.append(f'VERSION DIR UNRESOLVABLE, {self.resolve_error}')
         kept = len(self.referenced)
@@ -349,7 +353,7 @@ class _Build:
     candidates: tuple[PruneCandidate, ...]
     referenced: set[Path]
     known_subdirs: frozenset[str]
-    manifest_errors: dict[str, str]
+    manifest_errors: dict[str, ProviderError]
     resolve_error: str | None
     scan_error: str | None
     lock_problem: str | None
@@ -372,7 +376,9 @@ class _Build:
         )
 
 
-def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str | None]:
+def _reference_set(
+    root: Path,
+) -> tuple[set[Path], set[str], dict[str, ProviderError], str | None]:
     """Compute the version directories in use and the subdirs datasets declare.
 
     Returns
@@ -385,9 +391,10 @@ def _reference_set(root: Path) -> tuple[set[Path], set[str], dict[str, str], str
         a directory no manifest references. Either error field being set means
         the reference set is incomplete.
     """
-    from fwl_io.manifest import _discover
+    from fwl_io.manifest import _discover_all
 
-    providers, manifest_errors = _discover()
+    discovery = _discover_all()
+    providers, manifest_errors = discovery.found, discovery.errors
     referenced: set[Path] = set()
     known_subdirs: set[str] = set()
     resolve_error: str | None = None

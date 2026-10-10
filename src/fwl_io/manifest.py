@@ -483,6 +483,11 @@ class ProviderError:
     message: str
     models: frozenset[str] = frozenset()
 
+    @property
+    def verdict(self) -> str:
+        """The label a report prints for this provider: ``NOT USED`` or ``FAILED TO LOAD``."""
+        return 'NOT USED' if self.kind is ErrorKind.CONFLICT else 'FAILED TO LOAD'
+
 
 @dataclass(frozen=True)
 class _Discovery:
@@ -621,12 +626,6 @@ def _discover_all() -> _Discovery:
     return _Discovery(found, errors)
 
 
-def _discover() -> tuple[dict[str, list[Dataset]], dict[str, str]]:
-    """Return ``(datasets per provider, error per provider left out)``."""
-    result = _discover_all()
-    return result.found, {name: error.message for name, error in result.errors.items()}
-
-
 def discover_manifests() -> dict[str, list[Dataset]]:
     """Collect datasets from every installed ``fwl_io.manifests`` entry point.
 
@@ -636,8 +635,7 @@ def discover_manifests() -> dict[str, list[Dataset]]:
     ``check_for``, so one broken package cannot break data access for every
     other model.
     """
-    found, _ = _discover()
-    return found
+    return _discover_all().found
 
 
 _TQDM_HINT = 'progress bar needs tqdm: pip install fwl-io[progress]; continuing without it'

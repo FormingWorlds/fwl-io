@@ -24,6 +24,7 @@ import pytest
 from filelock import FileLock
 
 from fwl_io.fetch import _LOCK_DIRNAME, _STAGING_DIRNAME, _STAMP_FILENAME
+from fwl_io.manifest import ErrorKind
 from fwl_io.prune import (
     GONE,
     ORPHANED,
@@ -76,7 +77,7 @@ def _install_manifest(monkeypatch, manifest_path, *, extra_eps=()):
 
     eps = [_EP()]
     for name, loader in extra_eps:
-        eps.append(type('_EP', (), {'name': name, 'load': lambda self, ldr=loader: ldr}))
+        eps.append(type('_EP', (), {'name': name, 'load': lambda self, ldr=loader: ldr})())
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
 
 
@@ -240,7 +241,27 @@ def test_a_manifest_that_did_not_load_blocks_every_deletion(tmp_path, monkeypatc
     assert report.blocked
     assert report.superseded == (), 'nothing may be classed superseded off a partial set'
     assert not report.ok
-    assert 'MANIFEST UNREADABLE' in report.summary()
+    assert 'brokenprovider: MANIFEST FAILED TO LOAD' in report.summary()
+    assert 'line 1' in report.manifest_errors['brokenprovider'].message, 'the TOML is the cause'
+    for directory in dirs.values():
+        assert directory.exists(), 'a blocked run deletes nothing'
+
+
+def test_a_manifest_dropped_for_a_conflict_blocks_and_reads_as_not_used(tmp_path, monkeypatch):
+    """Two providers claiming one location are both left out: the run is blocked, and the
+    summary names the conflict, not a load failure."""
+    manifest = _write_manifest(tmp_path)
+    _install_manifest(monkeypatch, manifest, extra_eps=[('twin', lambda: manifest)])
+    root = tmp_path / 'data'
+    dirs = _make_tree(root)
+
+    report = prune_versions(data_root=root, delete=True, include_orphans=True)
+
+    assert report.blocked
+    assert {e.kind for e in report.manifest_errors.values()} == {ErrorKind.CONFLICT}
+    assert 'demoprovider: MANIFEST NOT USED' in report.summary()
+    assert 'twin: MANIFEST NOT USED' in report.summary()
+    assert 'FAILED TO LOAD' not in report.summary()
     for directory in dirs.values():
         assert directory.exists(), 'a blocked run deletes nothing'
 

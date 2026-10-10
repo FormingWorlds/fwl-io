@@ -31,6 +31,7 @@ from fwl_io.check import (
     check_for,
 )
 from fwl_io.fetch import create_fetcher
+from fwl_io.manifest import ErrorKind, ProviderError
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
 
@@ -333,11 +334,12 @@ def test_an_unreadable_manifest_fails_the_report(tmp_path):
     assert healthy.complete, 'the dataset must be sound, or this proves nothing'
 
     clean = CheckReport(datasets={'demo': healthy}, manifest_errors={})
-    broken = CheckReport(datasets={'demo': healthy}, manifest_errors={'other': 'no such file'})
+    unread = ProviderError(ErrorKind.LOAD_FAILURE, 'no such file')
+    broken = CheckReport(datasets={'demo': healthy}, manifest_errors={'other': unread})
 
     assert clean.ok
     assert not broken.ok
-    assert 'MANIFEST FAILED TO LOAD' in broken.summary()
+    assert 'other: MANIFEST FAILED TO LOAD, no such file' in broken.summary()
     assert broken.faults == (), 'the datasets are sound; the fault is the unread manifest'
 
 
