@@ -2,22 +2,47 @@
 
 This tutorial takes one small dataset from a Zenodo record to a pinned, fetched, checked and mirrored dataset. You run every command yourself, in a scratch directory, and nothing you do here changes a repository or a server. It takes about 10 minutes.
 
-The dataset is hypothetical: a model named `demo` needs two melting-curve files. The files are real. They are in the public Zenodo record `10.5281/zenodo.15728072` (2 files of 50 kB), which stands in for the record that you would upload yourself.
+The dataset is hypothetical: a model named `demo` needs two melting-curve files. The files are real. They are in the public Zenodo record `10.5281/zenodo.15728072` (2 files of 50 kB), which stands in for the record that you would upload yourself. The shared manifest of fwl-io declares the same record as `interior.melting_curves.wolf_bower_2018`, so you see it a second time in the lists below; the two datasets do not disturb each other.
 
 You need Python 3.11 or newer, an internet connection, and a Python environment with fwl-io installed ([Installation](../How-to/installation.md) says how). Activate that environment in the shell that you use, and check it: `fwl-io --help` must print a text that starts with `usage: fwl-io`. Create and edit the files below with a text editor.
 
 The steps that you cannot run here are marked **Not run here**: the upload to Zenodo, the two mirror workflows and the pull request.
 
+## Terms
+
+| Term | Meaning |
+| --- | --- |
+| Manifest | A TOML file in a Python package that declares datasets, one table per dataset. |
+| Dataset key | The name of that table, for example `demo.melting_curves`. It is also the place of the files below `FWL_DATA`. |
+| Registry | The file `<dataset key>.registry.txt` beside the manifest, with the name and the checksum of each file. `fwl-io sync` writes it. |
+| Pin | A DOI written in the manifest. The `zenodo` line pins one version of a Zenodo record; the `dataverse` line pins one mirror. |
+| Entry point | The line in the `pyproject.toml` of a package, in the group `fwl_io.manifests`, through which fwl-io finds the manifest of that package once the package is installed. |
+| DataverseNL | The data repository at dataverse.nl that holds the mirrors, the second download source. |
+| Collection | The place on DataverseNL that holds the mirror datasets. For the Proteus Framework its name is `Proteus_Fr`. |
+| Draft | A dataset on DataverseNL that is not published: only people with access to the collection see it. |
+
 ## 1. Make a scratch directory
+
+Start in a directory that is not inside a git clone, your home directory for example. Print the value that your shell has for `FWL_DATA`, the directory that fwl-io downloads into:
 
 ```bash
 echo "$FWL_DATA"
+```
+
+Note the value when the line is not empty: step 11 removes the variable. Make the scratch directory and go into it:
+
+```bash
 mkdir fwl-tutorial
 cd fwl-tutorial
+```
+
+Point `FWL_DATA` at a new directory below it:
+
+```bash
 export FWL_DATA="$PWD/data"
 ```
 
-`FWL_DATA` is the directory that fwl-io downloads into. The first command prints the value that your shell had for it, or an empty line: note that value, since step 11 removes the variable. Every command below must run in this shell, in `fwl-tutorial`.
+Every command below must run in this shell, in `fwl-tutorial`.
 
 ## 2. Deposit the files on Zenodo
 
@@ -94,6 +119,8 @@ Install the package:
 pip install -e demo_model
 ```
 
+The output holds the line `Successfully installed demo-model-0.1`.
+
 ## 4. Generate the registry
 
 ```bash
@@ -140,6 +167,11 @@ The output lists the datasets of every installed manifest, one block per manifes
 
 The block `[fwl-io-shared]` holds the datasets of the shared manifest, two lines each. `required_by: -` marks a dataset that no model fetches by its name.
 
+When it fails:
+
+- No `[demo]` block: the package is not installed in this environment. Run `pip install -e demo_model` again, in `fwl-tutorial`.
+- A line `[demo] FAILED TO LOAD: ...` in place of the block: the text after the colon names the cause. `module 'demo_model' has no attribute ...` is a wrong function name in the entry point of `pyproject.toml` or in `__init__.py`; correct it and install the package again. `table 'demo.melting_curves' has no "zenodo" key ...` is a misspelt line in `manifest.toml`; correct it.
+
 ## 6. Fetch and check the files
 
 ```bash
@@ -165,7 +197,15 @@ liquidus.dat
 solidus.dat
 ```
 
-Run the fetch again. It downloads nothing, because the files are in place:
+When Zenodo is slow, lines that start with `mirror failed for` and `retrying` come between them: the fetch tries each file up to 4 times, and it passes when its last line is the one above. When the fetch prints `no data root configured: set the FWL_DATA environment variable or pass an explicit data_root path`, your shell has no `FWL_DATA`: run the `export` line of step 1 in `fwl-tutorial`, then fetch again.
+
+Run the fetch again:
+
+```bash
+fwl-io fetch demo
+```
+
+It downloads nothing, because the files are in place:
 
 ```text
 demo.melting_curves: 2 file(s)
@@ -235,13 +275,15 @@ Check that the mirror serves the dataset:
 fwl-io check-mirrors
 ```
 
-The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo, which takes some minutes (48 s to 173 s in four runs). It prints one line of counts:
+The command reads every pin of every installed manifest from DataverseNL, and the file sizes from Zenodo. It takes 1 to 3 minutes. On a day with no failed read it prints one line of counts:
 
 ```text
 pins served by their mirror: 37, wrong: 0, not checked (could not be read): 0, datasets without a pin: 0, manifests left out: 0
 ```
 
-The first count covers the shared manifest and the demo dataset, so your number can be larger. The four counts after the first must be 0: a wrong pin gives a line that starts with `FAIL` and names the dataset, and the command exits 1; a pin that could not be read gives an `UNREACHABLE` line, and you run the command again; a dataset without a pin is listed below the counts.
+The first count covers the shared manifest and the demo dataset, so your number can differ.
+
+Look for the demo dataset, not at the counts. The pin of the demo dataset is served when no line that starts with `FAIL` or `UNREACHABLE` names `demo.melting_curves`. Lines for other datasets are not caused by this tutorial: an `UNREACHABLE` line means that a server did not answer for that dataset, and on a day when Zenodo is slow the shared manifest can have some. When `demo.melting_curves` itself is `UNREACHABLE`, run the command again later. The [CLI reference](../Reference/cli.md#fwl-io-check-mirrors) lists every line and exit code of the command.
 
 ## 10. Open the pull request
 
@@ -249,12 +291,12 @@ The first count covers the shared manifest and the demo dataset, so your number 
 
 Checklist for the pull request:
 
-- [ ] The manifest has the dataset table, with a **version** DOI in `zenodo`.
-- [ ] The registry file `<dataset key>.registry.txt` is committed beside the manifest, as `fwl-io sync` wrote it.
-- [ ] The package data of the package includes the manifest and the registry files (the `package-data` lines of step 3).
-- [ ] `fwl-io fetch <model>` and `fwl-io check <model>` pass on your machine.
-- [ ] The `dataverse` line is there when the mirror is published, and `fwl-io check-mirrors` reports no `FAIL` line. A dataset without the line works, with Zenodo as its one source; the line can follow in a second pull request.
-- [ ] The model code reads the files from the directory that fwl-io returns, not from a fixed path.
+- The manifest has the dataset table, with a **version** DOI in `zenodo`.
+- The registry file `<dataset key>.registry.txt` is committed beside the manifest, as `fwl-io sync` wrote it.
+- The package data of the package includes the manifest and the registry files (the `package-data` lines of step 3).
+- `fwl-io fetch <model>` and `fwl-io check <model>` pass on your machine.
+- The `dataverse` line is there when the mirror is published, and `fwl-io check-mirrors` prints no `FAIL` line for the dataset. A dataset without the line works, with Zenodo as its one source; the line can follow in a second pull request.
+- The model code reads the files from the directory that fwl-io returns, not from a fixed path.
 
 After the merge, the dataset reaches users with the next release of the package.
 

@@ -14,7 +14,7 @@ A data change is a code change and takes the same path. There is no separate dat
 
 To change a dataset (the how-to [Update a dataset or its mirror](../How-to/update_dataset.md) gives the commands, their output and the content of the pull request):
 
-1. Edit the `zenodo` version DOI in the owning manifest.
+1. Edit the `zenodo` version DOI in the owning manifest, and remove the `dataverse` line of that dataset: the mirror it names is a copy of the previous version.
 2. Run `fwl-io sync <manifest>` to regenerate the committed registry from the Zenodo record.
 3. Commit the manifest and the registry together, and open a pull request.
 
@@ -24,7 +24,7 @@ The Dataverse mirror is a separate access surface. Publishing or updating the mi
 
 ## How data is tested
 
-The committed registry is the contract a fetch trusts, so the test is whether that contract still matches its source. A scheduled workflow runs the slow test tier once a week. It fetches the live Zenodo registry of every dataset in the shared manifest and compares it to the committed registry, and it fails if the two have drifted. A change made to a Zenodo record outside a reviewed `fwl-io sync` is therefore caught by the scheduled run, not by a user's failing fetch. The same run checks every `dataverse` pin with `fwl-io check-mirrors`, so a pin that does not serve its dataset fails the run. It does not look for new versions of a record.
+The committed registry is the contract a fetch trusts, so the test is whether that contract still matches its source. A scheduled workflow runs the slow test tier once a week. It fetches the live Zenodo registry of every dataset in the shared manifest and compares it to the committed registry, and it fails if the two have drifted. A change made to a Zenodo record outside a reviewed `fwl-io sync` is therefore caught by the scheduled run, not by a user's failing fetch. The same run checks every `dataverse` pin with `fwl-io check-mirrors`, so a pin that does not serve its dataset fails the run, and a pin that could not be read leaves a warning. It does not look for new versions of a record.
 
 For an archive dataset, the registry records member names rather than a per-file digest, so a file that is corrupted or truncated on disk after its first fetch is not re-verified by a later fetch that finds the extracted tree already in place. That check does not cover this case either, since it compares registry contents to the Zenodo record, not files already on disk.
 
