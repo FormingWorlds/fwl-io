@@ -30,7 +30,7 @@ body:
     id: zenodo_doi
     attributes:
       label: Zenodo DOI
-      description: The version DOI (10.5281/zenodo.<record-id>) of your record, when it exists. For a new version, the DOI of the version that it replaces. Leave empty for data that is not on Zenodo.
+      description: The version DOI (10.5281/zenodo.<record-id>) of the record to add, when it is on Zenodo. For a new version that a maintainer uploads, the DOI of the version that it replaces. Leave empty for data that is not on Zenodo.
     validations:
       required: false
   - type: input

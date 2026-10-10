@@ -152,4 +152,3 @@ def test_a_record_is_in_the_community_only_when_its_metadata_lists_it(record, ex
 
     assert ZENODO_COMMUNITY == 'proteus_framework'
     assert in_community(record) is expected
-    assert in_community({'metadata': {'communities': [{'id': 'x'}]}}, slug='x')

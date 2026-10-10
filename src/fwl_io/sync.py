@@ -65,11 +65,11 @@ def fetch_zenodo_record(doi: str, api_base: str = ZENODO_API) -> dict:
     return record
 
 
-def in_community(record: dict, slug: str = ZENODO_COMMUNITY) -> bool:
+def in_community(record: dict) -> bool:
     """Whether a Zenodo record, as :func:`fetch_zenodo_record` returns it, is an accepted
-    record of the community ``slug`` (it is listed in ``metadata.communities``)."""
+    record of the community of the framework (listed in ``metadata.communities``)."""
     listed = (record.get('metadata') or {}).get('communities') or []
-    return any(entry.get('id') == slug for entry in listed)
+    return any(entry.get('id') == ZENODO_COMMUNITY for entry in listed)
 
 
 def fetch_zenodo_registry(doi: str, api_base: str = ZENODO_API) -> dict[str, str]:

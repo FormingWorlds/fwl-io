@@ -40,13 +40,12 @@ def test_committed_registries_match_live_zenodo_records():
 
 def _record(doi, tries=4):
     """Read a Zenodo record; a failed read is tried again, since one timeout is common."""
-    for attempt in range(tries):
+    for _ in range(tries - 1):
         try:
             return fetch_zenodo_record(doi)
         except requests.RequestException:
-            if attempt == tries - 1:
-                raise
             time.sleep(15)
+    return fetch_zenodo_record(doi)
 
 
 def test_shared_manifest_records_are_in_the_zenodo_community():

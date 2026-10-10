@@ -2,8 +2,8 @@ name: Mirror a Zenodo deposit to Dataverse
 
 # Manually triggered: a maintainer runs this to mirror one pinned Zenodo
 # deposit into the Proteus Framework collection on DataverseNL. The Dataverse
-# API token is a protected environment secret, so it lives only in CI and is
-# never distributed; access is controlled by who may run this workflow.
+# API token is a secret of the dataverse environment, so it lives only in CI and is
+# never distributed; a run waits for the approval that this environment asks for.
 
 on:
   workflow_dispatch:

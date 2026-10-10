@@ -975,9 +975,6 @@ def _missing(client: DataverseClient, persistent_id: str, names) -> list[str] | 
     return sorted(n for n in names if n not in listed)
 
 
-_COMMUNITY_DOCS = 'https://proteus-framework.org/fwl-io/How-to/add_dataset/'
-
-
 def mirror_to_dataverse(
     zenodo_doi: str,
     *,
@@ -1130,7 +1127,7 @@ def mirror_to_dataverse(
             f'Zenodo record {recid} is not an accepted record of the Zenodo community '
             f'{ZENODO_COMMUNITY}, and fwl-io mirrors only records of that community. When the '
             'record is submitted to the community, wait until a curator accepts it; when it is '
-            f'not, open a dataset request: {_COMMUNITY_DOCS}'
+            'not, open a dataset request: https://proteus-framework.org/fwl-io/How-to/add_dataset/'
         )
     from fwl_io.sync import _extract_files
 

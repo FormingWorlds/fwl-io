@@ -1,12 +1,14 @@
 name: Shared manifest records are in the Zenodo community
 
-# Runs only for a pull request that changes the shared manifest (or this file): it reads
-# each record that the manifest pins from Zenodo. The weekly job runs the same test.
+# Runs only for a pull request that changes the shared manifest, the check or this file:
+# it reads each record that the manifest pins from Zenodo. The weekly job runs the same test.
 
 on:
   pull_request:
     paths:
       - src/fwl_io/data/shared_manifest.toml
+      - src/fwl_io/sync.py
+      - tests/test_live.py
       - .github/workflows/community.yaml
 
 jobs:
@@ -21,4 +23,4 @@ jobs:
       - name: Install package
         run: pip install -e ".[develop]"
       - name: Check the Zenodo community of each record
-        run: pytest -m slow -k zenodo_community
+        run: pytest tests/test_live.py::test_shared_manifest_records_are_in_the_zenodo_community

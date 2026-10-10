@@ -469,14 +469,23 @@ def test_dry_run_downloads_but_makes_no_dataverse_calls(http_server, dataverse_s
 
 
 @pytest.mark.parametrize('communities', [None, [], [{'id': 'another_community'}]])
-@pytest.mark.parametrize('dry_run', [False, True])
+@pytest.mark.parametrize(
+    'run',
+    [
+        {},
+        {'dry_run': True},
+        {'into': 'doi:10.34894/DEMO01', 'publish': False},
+        {'licence': 'CC0 1.0', 'publish': False},
+    ],
+)
 def test_a_record_outside_the_community_is_refused_before_any_write(
-    http_server, dataverse_server, communities, dry_run
+    http_server, dataverse_server, communities, run
 ):
     """A record that is not an accepted record of the community is refused with the name of
-    the community and the docs page, in a dry run too, and Dataverse gets no request."""
+    the community and the docs page, also in a dry run, a run into a draft and a run with
+    a licence, and Dataverse gets no request."""
     with pytest.raises(ValueError, match='not an accepted record of the Zenodo community') as err:
-        _mirror(http_server, dataverse_server, communities=communities, dry_run=dry_run)
+        _mirror(http_server, dataverse_server, communities=communities, **run)
     assert 'proteus_framework' in str(err.value) and 'How-to/add_dataset/' in str(err.value)
     assert dataverse_server[1] == []
 
