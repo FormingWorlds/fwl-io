@@ -241,8 +241,9 @@ def test_a_manifest_that_did_not_load_blocks_every_deletion(tmp_path, monkeypatc
     assert report.blocked
     assert report.superseded == (), 'nothing may be classed superseded off a partial set'
     assert not report.ok
-    assert 'brokenprovider: MANIFEST FAILED TO LOAD' in report.summary()
-    assert 'line 1' in report.manifest_errors['brokenprovider'].message, 'the TOML is the cause'
+    message = report.manifest_errors['brokenprovider'].message
+    assert 'line 1' in message, 'the TOML is the cause'
+    assert f'brokenprovider: MANIFEST FAILED TO LOAD, {message}' in report.summary()
     for directory in dirs.values():
         assert directory.exists(), 'a blocked run deletes nothing'
 
