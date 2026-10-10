@@ -474,6 +474,9 @@ class ErrorKind(Enum):
     CONFLICT = 'conflicts with another provider'
 
 
+_VERDICTS = {ErrorKind.CONFLICT: 'NOT USED', ErrorKind.LOAD_FAILURE: 'FAILED TO LOAD'}
+
+
 @dataclass(frozen=True)
 class ProviderError:
     """A provider left out of discovery: the reason, the message, and for a conflict the
@@ -483,10 +486,13 @@ class ProviderError:
     message: str
     models: frozenset[str] = frozenset()
 
+    def __str__(self) -> str:
+        return self.message
+
     @property
     def verdict(self) -> str:
         """The label a report prints for this provider: ``NOT USED`` or ``FAILED TO LOAD``."""
-        return 'NOT USED' if self.kind is ErrorKind.CONFLICT else 'FAILED TO LOAD'
+        return _VERDICTS[self.kind]
 
 
 @dataclass(frozen=True)

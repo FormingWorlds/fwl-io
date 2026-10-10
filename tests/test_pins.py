@@ -36,6 +36,7 @@ from fwl_io.pins import MirrorReport, Unreachable, check_mirrors, pin_problem, z
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
 
 _UNREAD = ProviderError(ErrorKind.LOAD_FAILURE, 'x')
+_CONFLICT = ProviderError(ErrorKind.CONFLICT, 'x')
 MD5_A = 'md5:' + 'a' * 32
 MD5_B = 'md5:' + 'b' * 32
 SOURCE = '10.5281/zenodo.1'
@@ -462,7 +463,7 @@ def test_check_mirrors_sorts_every_dataset(tmp_path, monkeypatch):
     ]
     assert report.summary().splitlines()[-2:] == [
         'pins served by their mirror: 1, wrong: 2, not checked (could not be read): 0, '
-        'datasets without a pin: 1, manifests not used: 2',
+        'datasets without a pin: 1, manifests left out: 2',
         'unpinned group.loose',
     ]
 
@@ -526,6 +527,7 @@ def test_check_mirrors_command_exits_by_the_verdict(
     [
         (MirrorReport(passed=['a'], failed={'b': 'x'}, unreachable={'c': 'y'}), 1),
         (MirrorReport(passed=['a'], manifest_errors={'m': _UNREAD}, unreachable={'c': 'y'}), 1),
+        (MirrorReport(passed=['a'], manifest_errors={'m': _CONFLICT}), 1),
         (MirrorReport(passed=['a'], unreachable={'c': 'y'}), 3),
         (MirrorReport(unreachable={'c': 'y'}), 4),
         (MirrorReport(unpinned=['d']), 1),

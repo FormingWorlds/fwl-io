@@ -73,6 +73,8 @@ from fwl_io.relocate import _version_dir
 
 log = logging.getLogger('fwl.' + __name__)
 
+_INCOMPLETE = 'a manifest was left out or a version dir was unresolvable'
+
 #: A version directory is ``r`` followed by the Zenodo record-id digits.
 _VERSION_DIR_PATTERN = re.compile(r'r[0-9]+\Z')
 
@@ -209,10 +211,7 @@ class PruneReport:
         so each blocks deletion on its own.
         """
         if self.blocked:
-            return (
-                'the reference set is incomplete '
-                '(a manifest was left out or a version dir was unresolvable)'
-            )
+            return f'the reference set is incomplete ({_INCOMPLETE})'
         if self.scan_error is not None:
             return f'the data root cannot be fully read ({self.scan_error})'
         if self.lock_problem is not None:
@@ -249,10 +248,7 @@ class PruneReport:
         if self.blocked:
             # The reason deletion is refused: a version listed superseded above
             # could be the referenced one whose pin this run failed to read.
-            closing += (
-                '; reference set is INCOMPLETE (a manifest was left out or a '
-                'version dir was unresolvable), so nothing can be deleted'
-            )
+            closing += f'; reference set is INCOMPLETE ({_INCOMPLETE}), so nothing can be deleted'
         if self.lock_problem is not None:
             closing += f'; {self.lock_problem}, so nothing can be deleted'
         if self.apply_refusal is not None:

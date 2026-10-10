@@ -178,7 +178,7 @@ class RelocationReport:
         if self.manifest_errors:
             # An unloaded or conflict-dropped manifest may declare a dataset this
             # tree still holds, so the counts above are a floor.
-            closing += f'; {len(self.manifest_errors)} manifest(s) not used, so this may be partial'
+            closing += f'; {len(self.manifest_errors)} manifest(s) left out, so this may be partial'
         lines.append(closing)
         return '\n'.join(lines)
 

@@ -84,7 +84,7 @@ class MirrorReport:
             f'pins served by their mirror: {len(self.passed)}, wrong: {len(self.failed)}, '
             f'not checked (could not be read): {len(self.unreachable)}, '
             f'datasets without a pin: {len(self.unpinned)}, '
-            f'manifests not used: {len(self.manifest_errors)}'
+            f'manifests left out: {len(self.manifest_errors)}'
         )
         lines += [f'unpinned {key}' for key in sorted(self.unpinned)]
         return '\n'.join(lines)

@@ -18,6 +18,8 @@ from fwl_io import (
 )
 ```
 
+The reports of `check_for`, `plan_relocations`, `relocate_all` and the prune functions list each manifest left out in `manifest_errors`, a mapping from the provider name to a `ProviderError`: its `message` holds the text and its `kind` (an `ErrorKind`) the reason, a load failure or a conflict with another provider. The reports have no `conflict_providers` field.
+
 Per-module reference pages:
 
 - [Fetching](fetch.md): `Fetcher`, `create_fetcher`, error types

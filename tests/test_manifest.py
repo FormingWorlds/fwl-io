@@ -53,6 +53,28 @@ def test_a_provider_error_names_its_verdict_by_kind(kind, verdict):
     assert manifest.ProviderError(kind, 'why').verdict == verdict
 
 
+def test_a_provider_error_prints_as_its_message_and_every_kind_has_a_label():
+    """``str()`` and an f-string give the message, as when the reports held strings, and no
+    kind lacks a label."""
+    error = manifest.ProviderError(manifest.ErrorKind.CONFLICT, 'two claim x')
+    assert str(error) == f'{error}' == 'two claim x'
+    assert set(manifest._VERDICTS) == set(manifest.ErrorKind)
+
+
+@pytest.mark.parametrize('report', ['CheckReport', 'RelocationReport', 'PruneReport'])
+def test_a_report_labels_a_conflict_and_a_load_failure_each_by_its_kind(report):
+    """One summary with both kinds prints each provider under its own label."""
+    import fwl_io
+
+    errors = {
+        'a': manifest.ProviderError(manifest.ErrorKind.CONFLICT, 'claims x'),
+        'b': manifest.ProviderError(manifest.ErrorKind.LOAD_FAILURE, 'no file'),
+    }
+    lines = getattr(fwl_io, report)(manifest_errors=errors).summary().splitlines()
+    assert 'a: MANIFEST NOT USED, claims x' in lines
+    assert 'b: MANIFEST FAILED TO LOAD, no file' in lines
+
+
 def test_the_report_classes_resolve_their_provider_error_type():
     """The reports name ``ProviderError`` in their annotations, importable from the package
     and resolvable at runtime."""
@@ -967,6 +989,8 @@ def test_duplicate_entry_point_name_drops_every_provider_with_it(tmp_path, monke
     found, errors = _discover()
     assert set(found) == {'other'}
     assert len(errors) == 2, 'one error per dropped provider'
+    kinds = {error.kind for error in manifest._discover_all().errors.values()}
+    assert kinds == {manifest.ErrorKind.CONFLICT}
     for message in errors.values():
         assert 'mors-data' in message and 'proteus-data' in message
         assert 'uninstall or pin' in message
