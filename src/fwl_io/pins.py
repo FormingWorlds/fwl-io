@@ -20,6 +20,7 @@ from fwl_io.mirror import (
     DataverseError,
     DataverseRetryableError,
     checksum_algorithm,
+    descriptions,
     names_source,
 )
 from fwl_io.sync import fetch_zenodo_record
@@ -155,17 +156,6 @@ def _embargo(meta: dict, today: date) -> str | None:
     return f'embargoed until {until}' if until > today else None
 
 
-def _descriptions(version: dict) -> str:
-    """Return the dsDescription values of a dataset version's citation block, one per line."""
-    fields = ((version.get('metadataBlocks') or {}).get('citation') or {}).get('fields') or []
-    return '\n'.join(
-        str(((item or {}).get('dsDescriptionValue') or {}).get('value', ''))
-        for f in fields
-        if f.get('typeName') == 'dsDescription'
-        for item in f.get('value') or []
-    )
-
-
 def pin_problem(
     dataset: Dataset,
     client: DataverseClient,
@@ -229,7 +219,7 @@ def pin_problem(
     version = (body.get('data') or {}).get('latestVersion') or {}
     if version.get('versionState') != 'RELEASED':
         return f'doi:{pin} latest version is {version.get("versionState")!r}'
-    if not names_source(_descriptions(version), zenodo_doi):
+    if not names_source(descriptions(version), zenodo_doi):
         return f'doi:{pin} does not name Zenodo {zenodo_doi} as its source'
     files: dict[str, dict] = {}
     for entry in version.get('files') or []:

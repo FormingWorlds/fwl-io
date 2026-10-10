@@ -211,12 +211,20 @@ def _cmd_mirror(args: argparse.Namespace) -> int:
         contact_name=args.contact_name,
         contact_email=args.contact_email,
         subject=args.subject,
-        publish=not args.no_publish,
+        publish=not args.no_publish and args.into is None,
         dry_run=args.dry_run,
         files=args.file or None,
+        into=args.into,
+        licence=args.licence,
     )
     if persistent_id is None:
         print(f'dry run complete for {args.zenodo_doi} (no Dataverse changes)')
+    elif args.into is not None or args.no_publish:
+        done = 'completed' if args.into is not None else 'created'
+        print(
+            f'draft {persistent_id} {done}, not published; verify its files, then run '
+            f'fwl-io mirror-publish {persistent_id}'
+        )
     else:
         print(f'mirrored to {persistent_id}')
         print(f'add this to the manifest:  dataverse = "{persistent_id.removeprefix("doi:")}"')
@@ -352,6 +360,17 @@ def main(argv: list[str] | None = None) -> int:
         help='mirror only this file of the record (repeatable); match the dataset "files" list',
     )
     p_mirror.add_argument('--no-publish', action='store_true', help='create a draft only')
+    p_mirror.add_argument(
+        '--licence',
+        metavar='NAME',
+        help='Dataverse license for a new draft in place of the Zenodo one (author-approved; '
+        'needs --no-publish)',
+    )
+    p_mirror.add_argument(
+        '--into',
+        metavar='PERSISTENT_ID',
+        help='complete this existing draft of the record instead of creating one (never publishes)',
+    )
     p_mirror.add_argument(
         '--dry-run', action='store_true', help='download and map metadata only; no Dataverse writes'
     )
