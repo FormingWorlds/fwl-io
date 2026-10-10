@@ -4,52 +4,71 @@ Follow these steps to make a new dataset fetchable through fwl-io. Steps 3 to 5 
 
 ## 1. Bring the files into the PROTEUS Framework community on Zenodo
 
-A dataset of the framework is a record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework), accepted by a curator of that community. fwl-io creates a mirror for no other record: `fwl-io mirror` refuses a record outside the community, and a check of the shared manifest fails for one.
+A dataset of the framework is an accepted record of the [PROTEUS Framework community on Zenodo](https://zenodo.org/communities/proteus_framework) or of the PALEOS community (`paleos`). fwl-io creates and publishes a mirror for no other record: `fwl-io mirror` and `fwl-io mirror-publish` refuse a record outside the two communities, and a check of the shared manifest fails for one. A record of the PALEOS community needs no step of this section: go to step 2.
 
-There are four routes into the community. Each one ends with a record in the community and its **version DOI**, of the form `10.5281/zenodo.<record-id>`; steps 2 to 5 below are the same for all of them.
+The maintainers of the framework are the curators of the PROTEUS Framework community: a maintainer accepts a record that is submitted to it.
 
-| Route | For whom | Who uploads | What you do |
+There are four routes into the community. Each one ends with an accepted record and its **version DOI**, of the form `10.5281/zenodo.<record-id>`; steps 2 to 5 below are the same for all of them.
+
+| Route | For whom | Who uploads | What you do on Zenodo |
 | --- | --- | --- | --- |
-| A. A maintainer uploads on request | You have the files and no Zenodo record, or you prefer not to upload. | A maintainer | Open a [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml) with the route "A maintainer uploads my data" and a download link. |
-| B. You upload a new record | You have a Zenodo account and the files. | You | Start a new upload on Zenodo from the page of the community, so that the upload is submitted to the community for review. A curator accepts it, and Zenodo publishes the record. |
-| C. You upload a new version | Your record is in the community and the data changed. | You | Create the new version of your record on Zenodo and publish it. Check on its page that the version is in the community; when it is not, submit it as in route D. |
-| D. Your record exists | Your record is published on Zenodo and is not in the community. | Nobody | On the page of the record, open the communities menu, choose the PROTEUS Framework community and submit the record. A curator accepts it. |
+| A. A maintainer uploads on request | You have the files and no Zenodo record, or you prefer not to upload. | A maintainer | Nothing. |
+| B. You upload a new record | You have a Zenodo account and the files. | You | Open the page of the community and select **New upload** there, so that the form shows the community. Add the files and the metadata and select **Submit for review**. The upload stays a draft, which nobody else can read, until a maintainer accepts it; Zenodo then publishes it. |
+| C. You make a new version | Your record is in the community and the data changed. | You | On the page of the record, select **New version**, add the files and publish. Only a person with edit access to the record sees that button. Check on the page of the new version that it shows the community; when it does not, submit it as in route D. |
+| D. Your record exists | Your record is published on Zenodo and is not in a community of the framework. | Nobody | On the page of the record, open the communities menu (the cog-wheel icon), select **Submit to community**, and select the PROTEUS Framework community. The record stays public; a maintainer accepts it into the community. |
 
-The Zenodo help describes the two ways to submit: [Submit for review](https://help.zenodo.org/docs/share/submit-for-review/) for a new upload (route B) and [Submit to community](https://help.zenodo.org/docs/share/submit-to-community/) for a published record (routes C and D). When Zenodo does not let you submit to the community, open a dataset request with the route "A maintainer uploads my data" and say so in its description.
+The Zenodo help has the details: [Submit for review](https://help.zenodo.org/docs/share/submit-for-review/) (route B), [Manage versions](https://help.zenodo.org/docs/deposit/manage-versions/) (route C) and [Submit to community](https://help.zenodo.org/docs/share/submit-to-community/) (route D). When Zenodo does not let you submit to the community, open a dataset request with the route "A maintainer uploads my data" and say so in its notes.
+
+A new version of a record can only be made by a person with edit access to it. A record that a maintainer uploaded for you (route A) is shared with you with that access, so you or a maintainer can make its next version. For a record of your own, you make the version (route C), or you give a maintainer edit access with the **Share** button of the record ([User sharing](https://help.zenodo.org/docs/share/user-sharing/)) and open a dataset request with route A.
 
 ### The dataset request
 
-Every route has one [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml), an issue form on the fwl-io repository. For route A it starts the work. For routes B, C and D it tells the maintainers which record waits for a curator. For all of them it is also the request for the mirror of step 4. The form asks for:
+Every route has one [dataset request](https://github.com/FormingWorlds/fwl-io/issues/new?template=dataset_request.yml), an issue form on the fwl-io repository; it needs a GitHub account. For route A it starts the work. For routes B, C and D it tells the maintainers which record waits for them. For all of them it is also the request for the mirror of step 4, and a record that is in the community already uses the form for the mirror alone.
 
-| Field | What to enter |
-| --- | --- |
-| Route | "A maintainer uploads my data" (route A), "I upload the record myself and submit it to the community" (routes B and C), or "My record exists on Zenodo; add it to the community" (route D) |
-| New dataset or new version | one of the two |
-| Zenodo DOI | the version DOI of your record for routes B, C and D, as soon as it exists; empty for route A |
-| Download link | for route A only: a folder on Google Drive, Dropbox or another service, shared so that anyone with the link can read it. The form cannot enforce it; a request of route A without a link is not complete. |
-| Title, Short description | as the Zenodo record must show them |
-| Models that read the data, Proposed dataset key | the models, by the names that `required_by` takes (step 2), and your proposal for the dotted key, which step 2 explains. A maintainer can ask for another key in the issue; write the manifest when the key is settled there. |
-| Files | one line per file, the README too, with its size in any unit |
-| Licence | your choice among the licences that Zenodo offers, for example CC-BY-4.0 |
-| Authors, Contact, Reference to cite | each author with affiliation and ORCID; the person who answers questions; the DOI of the publication to cite |
-| README | you confirm that the data holds a README, a text file among the files (for example `README.txt`), that describes each file (format, columns, units, source). A record without one needs a new version with a README before it is accepted. |
+| Field | Needed for | What to enter |
+| --- | --- | --- |
+| Route | every route | "A maintainer uploads my data" (route A), "I upload the record myself and submit it to the community" (routes B and C), "My record exists on Zenodo; add it to the community" (route D), or "My record is in the community; I ask for a mirror" |
+| Proposed dataset key | every route | your proposal for the dotted key, which step 2 explains; for a dataset that exists, its key. A maintainer confirms the key, or asks for another one, in a comment of the issue; write the manifest after that. |
+| Models that read the data | every route | the name of each model as its `fwl-io fetch <model>` call writes it, in lower case (for example `aragog`), or "none" |
+| Repository that holds the manifest | every route | `FormingWorlds/fwl-io` for the shared manifest, or the repository of the model |
+| Contact | every route | the person who answers questions on the data |
+| Zenodo DOI | every route with a record on Zenodo | the version DOI of the record to add or to mirror; for route B, add it when the record is published; for a new version that a maintainer uploads, the DOI of the version that it replaces |
+| New dataset or new version | every route except a mirror alone | "A new version" when the framework has a dataset for an earlier version of the record; "A new dataset" otherwise |
+| Download link | route A | a folder on Google Drive, Dropbox or another service, shared so that anyone with the link can read it. The form cannot enforce it; a request of route A without a link is not complete. |
+| Title, Description | route A | as the Zenodo record must show them; the description is public |
+| Files | route A | one line per file, the README too, with its size in any unit |
+| Licence | route A | your choice among the licences that Zenodo offers, for example CC-BY-4.0 |
+| Authors, Reference to cite | route A | each author with affiliation and ORCID; the DOI of the publication to cite |
+| Files that the dataset uses | a dataset that uses only some files of its record | the names of those files |
+| README | every route except a mirror alone | you confirm that the data holds a README, a text file among the files (for example `README.txt`), that describes each file (format, columns, units, source). A record without one needs a new version with a README before it is accepted: make that version (**New version** on the page of your record) and submit the new version. |
+| Notes for the maintainers | optional | what is not part of the record: that you want no mirror, that you ask a maintainer to do steps 2 to 5 for you, that you are not a developer of the model, or that Zenodo did not let you submit |
 
-A dataset request counts as a request for a mirror. Write into the short description what else the maintainers must know: that you want no mirror, or that you ask a maintainer to do steps 2 to 5 for you; the maintainer answers in the issue.
+A dataset request counts as a request for a mirror unless its notes say otherwise. A maintainer answers in the issue. A request is accepted when the fields of its route are complete and the data fits the community; a request that is refused gets the reason there, and you can correct the request in the same issue.
 
-A maintainer answers in the issue. A request is accepted when the form is complete and the data fits the community; a request that is refused gets the reason there, and you can correct the request in the same issue.
+### Route A in steps, for the requester
 
-### Route A in steps
-
-1. You open the dataset request with the download link.
-2. A maintainer downloads the files, uploads them to Zenodo with the metadata of the form, brings the record into the community and publishes it.
-3. The maintainer writes the version DOI into the issue.
+1. You put the files and the README into one shared folder, and open the dataset request with the download link; the field Zenodo DOI stays empty.
+2. A maintainer uploads the files to Zenodo as a record of the community (next section) and writes the version DOI into the issue. The record is then public and accepted.
+3. When you have a Zenodo account with a public profile, the maintainer shares the record with you, with edit access. Without a Zenodo account you can still do the steps below.
 4. You continue with step 2 below.
+
+### Route A in steps, for the maintainer
+
+You have an issue with a download link. The names in bold are those of the Zenodo pages ([Create new upload](https://help.zenodo.org/docs/deposit/create-new-upload/), [Describe records](https://help.zenodo.org/docs/deposit/describe-records/)).
+
+1. Check the request: the fields of route A are complete, and the key follows the [target layout](../Explanations/manifests.md#the-fwl_data-layout). Confirm the key in a comment, or ask for another one. Download the files of the link (unpack them when the service gives one archive), and compare their names and approximate sizes with the **Files** field of the request. Check that the README is there and describes each file. When something differs, ask in the issue and stop.
+2. Sign in to Zenodo with your own account. Open the [page of the community](https://zenodo.org/communities/proteus_framework) and select **New upload**; the header of the form then shows the community.
+3. Select **Upload files** and add every file.
+4. Fill in the form from the request: **Resource type** Dataset; the title from Title; **Creators** from Authors, each with family name, given names, the ORCID as name identifier and the affiliation; the description from Description, with a last line "Reference: https://doi.org/" and the DOI of Reference to cite; the license, under **Licenses and rights**, from Licence (CC-BY-4.0 is "Creative Commons Attribution 4.0 International"). Leave the other fields as the form sets them.
+5. Select **Submit for review**. A maintainer accepts the submission, you or another one: on the page of the community open the **Requests** tab and select **Accept and publish** ([Review submissions](https://help.zenodo.org/docs/communities/review-submissions/)). Zenodo then publishes the record. For a new version of a record that you can edit, open the record, select **New version**, select **Import files** or add the files, and select **Publish**.
+6. Give edit access, when the record is published: on its page select **Share**, then **Add people**; search the requester (ask in the issue for the Zenodo user name) and every other member of the team `proteus-maintainer` in the **User** field, select **Can edit** under **Access**, and select **Add**. Only a user with a public Zenodo profile can be found; note in the issue who could not be added.
+7. Write the version DOI of the record into a comment of the issue. Continue with [the mirror](update_dataset.md#a-maintainer-creates-the-mirror) unless the notes say that none is wanted.
 
 ### Routes B, C and D in steps
 
-1. You upload or submit on Zenodo, as the table says, and open the dataset request with the DOI.
-2. A curator of the community accepts the record on Zenodo; the page of the record then shows the community. Until then the record is not in the community: `fwl-io sync` works for it, and the mirror and the check of the shared manifest refuse it. To test it yourself, run `fwl-io mirror <version DOI> --collection Proteus_Fr --dry-run`: it writes nothing, needs no token, and ends with an error that names the community for a record that is not accepted. When the curator does not answer or declines, ask in the issue.
-3. You continue with step 2 below. You do not have to wait for the curator to write the manifest and the registry; the pull request of a dataset in the shared manifest passes its check only when the record is accepted, and a model manifest has no such check.
+1. You upload or submit on Zenodo, as the table says, and open the dataset request.
+2. A maintainer accepts the record on Zenodo. The page of the record then shows the community: that is the test for "accepted". A second test is `fwl-io mirror <version DOI> --collection Proteus_Fr --dry-run`, which writes nothing and needs no token, but downloads every file of the record: it ends with an error that names the communities for a record that is not accepted. When no maintainer answers, or the submission is declined, ask in the issue.
+3. You continue with step 2 below. For routes C and D the record is public before it is accepted, so `fwl-io sync` works at once and you can write the manifest and the registry while you wait. For route B the upload is not public before it is accepted, so `fwl-io sync` cannot read it: wait for the acceptance. The mirror, and the check of a pull request that changes the shared manifest, need the accepted record; a model manifest has no such check.
 
 !!! warning "Version DOI, not concept DOI"
 
@@ -75,11 +94,11 @@ required_by = ["aragog", "zalmoxis", "spider"]
 
 The root `manifest_schema` names the schema the file is written against. It is optional and worth declaring: it lets fwl-io tell a manifest written for a different schema from a misspelt field, so a load failure names the one that applies instead of offering both. Declaring it also means the manifest has to be updated when the schema number rises, which is the point, since that is when manifests written for the previous number stop loading. The current schema is in the [schema versions](../Explanations/manifests.md#schema-versions) table.
 
-The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018/r<record-id>`, the version directory named for its Zenodo record. Choose the key to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
+`name` is a label that `fwl-io list` prints below the key. The dotted key is the location below `FWL_DATA`, so this dataset lands in `interior/eos/wolf_bower_2018/r<record-id>`, the version directory named for its Zenodo record. Choose the key to follow the [target layout](../Explanations/manifests.md#the-fwl_data-layout), using only letters, digits, `_` and `-` per segment, each starting with a letter, digit or `_`. `required_by` lists the models whose `fwl-io fetch <model>` should include this dataset.
 
 If the deposit is a single archive that consumers expect unpacked, add `extract = "tar"` or `extract = "zip"`; the archive is downloaded, checksum-verified, and unpacked into the dataset directory. See [Archive datasets](../Explanations/manifests.md#archive-datasets).
 
-If the deposit holds files this dataset does not need, add `files = ["name1", "name2"]` to list the ones it does. The registry then lists only those, and fetch, check and mirror handle only those. See [Partial datasets](../Explanations/manifests.md#partial-datasets).
+If the deposit holds files this dataset does not need, add `files = ["name1", "name2"]` to list the ones it does; without the line the fetch takes every file, the README too. The registry then lists only those, and fetch, check and mirror handle only those. See [Partial datasets](../Explanations/manifests.md#partial-datasets).
 
 ## 3. Generate the registry
 
@@ -97,8 +116,8 @@ The dataset request of step 1 is also the request for a mirror of the record on 
 dataverse = "10.34894/ABCDEF"
 ```
 
-The mirror must host **byte-identical** copies of the originals: the mirror workflow downloads each file, checks it against the Zenodo checksum, uploads it, and compares the uploaded file with that copy. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors`, which takes no argument and reads the manifests of the installed packages (install yours with `pip install -e .` in the clone), to confirm that the pin serves the dataset ([how to read its output](update_dataset.md#the-dataset-owner-pins-the-mirror)). The registry does not change, so no new `fwl-io sync` is needed. The pull request of step 5 does not have to wait for the mirror: the `dataverse` line can follow in a second pull request.
+The mirror must host **byte-identical** copies of the originals: the mirror workflow downloads each file, checks it against the Zenodo checksum, uploads it, and compares the uploaded file with that copy. Checksums always come from the Zenodo record. Run `fwl-io check-mirrors`, which takes no argument and reads the manifests of the installed packages (install yours with `pip install -e .` in the clone), to confirm that the mirror of the `dataverse` line serves the dataset ([how to read its output](update_dataset.md#the-dataset-owner-pins-the-mirror)). The registry does not change, so no new `fwl-io sync` is needed. The pull request of step 5 does not have to wait for the mirror: the `dataverse` line can follow in a second pull request.
 
 ## 5. Ship it
 
-For the shared manifest, open a PR on fwl-io: it gets a review request to the team `proteus-maintainer` and needs the approval of a code owner. For a model manifest, open a PR on the repository of the model, from a fork when you have no write access; make sure the manifest and its registry files are included in the model's package data, or fetching fails at runtime on user machines.
+For the shared manifest, open a PR on fwl-io: it gets a review request to the team `proteus-maintainer` and needs the approval of a code owner. The code of the model that reads the files is changed by a developer of that model ([Migrate a model](migrate_model.md) for a Python model, [Use fwl-io data from a non-Python code](non_python_codes.md) for another one); when you are not that developer, say so in the notes of the dataset request, or in a comment of the issue. For a model manifest, open a PR on the repository of the model, from a fork when you have no write access; make sure the manifest and its registry files are included in the model's package data, or fetching fails at runtime on user machines.
