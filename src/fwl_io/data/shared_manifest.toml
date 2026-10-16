@@ -176,8 +176,8 @@ required_by = ["zalmoxis"]
 
 [interior.eos.rtpress_melt_100tpa]
 name = "MgSiO3 melt equation of state, RTPress, 100 TPa"
-zenodo = "10.5281/zenodo.18819027"
-dataverse = "10.34894/HJ7YIP"
+zenodo = "10.5281/zenodo.18822022"
+dataverse = "10.34894/QLCEBW"
 required_by = ["zalmoxis"]
 
 [interior.eos.paleos_mgsio3]
