@@ -35,11 +35,14 @@ class StatusReport:
     @property
     def exit_code(self) -> int:
         """Return 1 for a manifest error, 5 when a dataset needs a pin or a new version,
-        3 when the only problem is a Zenodo record that could not be read, else 0."""
+        4 for a Zenodo record that is gone, 3 when the only problem is a Zenodo record that
+        could not be read, else 0."""
         if self.manifest_errors:
             return 1
         if self.unpinned or self.stale:
             return 5
+        if self.gone:
+            return 4
         return 3 if self.unreadable else 0
 
     def summary(self) -> str:
@@ -48,21 +51,35 @@ class StatusReport:
         lines += [f'UNPINNED {key}: {doi}' for key, doi in sorted(self.unpinned.items())]
         lines += [f'STALE {key}: {why}' for key, why in sorted(self.stale.items())]
         lines += [f'OUTSIDE {key}: {why}' for key, why in sorted(self.outside.items())]
+        lines += [f'GONE {key}: {why}' for key, why in sorted(self.gone.items())]
         lines += [f'UNREADABLE {key}: {why}' for key, why in sorted(self.unreadable.items())]
         lines.append(
             f'in order: {len(self.ok)}, without a pin: {len(self.unpinned)}, '
             f'with a newer Zenodo version: {len(self.stale)}, '
             f'outside the communities: {len(self.outside)}, '
-            f'not checked (Zenodo could not be read): {len(self.unreadable)}'
+            f'not checked (Zenodo could not be read): {len(self.unreadable) + len(self.gone)}'
         )
         return '\n'.join(lines)
 
 
+class RecordWithoutId(LookupError):
+    """Zenodo answered for a record, but the reply holds no record id."""
+
+
 def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
-    """Return the record id of the newest version of the Zenodo record ``recid``."""
+    """Return the record id of the newest version of the Zenodo record ``recid``.
+
+    Raises
+    ------
+    RecordWithoutId
+        If the reply is a JSON object without ``id``.
+    """
     response = requests.get(f'{api_base}/{recid}/versions/latest', timeout=30)
     response.raise_for_status()
-    return str(response.json()['id'])
+    body = response.json()
+    if not isinstance(body, dict) or 'id' not in body:
+        raise RecordWithoutId(f'no record id in the reply for Zenodo {recid}')
+    return str(body['id'])
 
 
 def accepted(doi: str) -> bool:
@@ -132,8 +149,9 @@ def newer_versions(
     """Sort the datasets whose key starts with ``prefix`` into in order, stale or unreadable.
 
     Each Zenodo record is read once, with no retry, so a scheduled check costs one API call
-    per pinned record. A record that Zenodo does not serve (HTTP 4xx other than 408 and 429,
-    or a reply of another shape) is gone; any other read failure is unreadable.
+    per pinned record. A record that Zenodo does not serve (HTTP 4xx other than 401, 403, 408
+    and 429, or a reply without a record id) is gone; any other read failure is unreadable.
+    A key declared by more than one dataset is named ``'<key> (Zenodo <record>)'`` for each.
 
     Parameters
     ----------
@@ -158,32 +176,38 @@ def newer_versions(
         datasets = [ds for group in discovery.found.values() for ds in group]
         report.manifest_errors.update(discovery.errors)
     newest: dict[str, str | Exception] = {}
-    for ds in (ds for ds in datasets if ds.key.startswith(prefix)):
+    chosen = [ds for ds in datasets if ds.key.startswith(prefix)]
+    twice = {ds.key for ds in chosen if sum(d.key == ds.key for d in chosen) > 1}
+    for ds in chosen:
         recid = zenodo_record_id(ds.zenodo)
+        name = f'{ds.key} (Zenodo {recid})' if ds.key in twice else ds.key
         if recid not in newest:
             try:
                 newest[recid] = latest(recid)
             except Exception as exc:  # noqa: BLE001 -- reported per dataset, never raised
                 newest[recid] = exc
         if isinstance(newest[recid], Exception):
-            group = report.unreadable if _passing(newest[recid]) else report.gone
-            group[ds.key] = f'Zenodo {recid}: {newest[recid]}'
+            group = report.gone if _gone(newest[recid]) else report.unreadable
+            group[name] = f'Zenodo {recid}: {newest[recid]}'
         elif newest[recid] != recid:
-            report.stale[ds.key] = f'pins Zenodo {recid}, newest version is {newest[recid]}'
+            report.stale[name] = f'pins Zenodo {recid}, newest version is {newest[recid]}'
         else:
-            report.ok.append(ds.key)
+            report.ok.append(name)
     return report
 
 
-def _passing(exc: Exception) -> bool:
-    """Whether a read failure can clear on a later try: a connection fault, a timeout, a
-    server error or a rate limit (or an HTTP error without its status)."""
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+def _gone(exc: Exception) -> bool:
+    """Whether a read failure says Zenodo does not serve the record: a reply without a
+    record id, or HTTP 4xx other than 401, 403, 408 and 429. Every other failure can clear."""
+    if isinstance(exc, RecordWithoutId):
         return True
-    if isinstance(exc, requests.HTTPError):
-        code = getattr(exc.response, 'status_code', None)
-        return code is None or code in (408, 429) or code >= 500
-    return False
+    code = getattr(getattr(exc, 'response', None), 'status_code', None)
+    return (
+        isinstance(exc, requests.HTTPError)
+        and isinstance(code, int)
+        and 400 <= code < 500
+        and code not in (401, 403, 408, 429)
+    )
 
 
 def latest_exit_code(report: StatusReport) -> int:
