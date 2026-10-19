@@ -348,8 +348,49 @@ def test_latest_reports_a_manifest_left_out(monkeypatch, capsys):
     )
 
 
-def test_a_key_in_two_manifests_is_counted_once():
-    """A dataset key that two manifests declare is one dataset."""
-    report = status.newer_versions('p.', [_ds('p.a', 1), _ds('p.a', 1)], latest=lambda r: r)
-    assert report.ok == ['p.a']
-    assert report.exit_code == 0
+def test_each_declaration_of_a_key_is_read(monkeypatch):
+    """Two declarations of one key with two pins are both read: no pin is hidden."""
+    asked = []
+
+    def latest(recid):
+        asked.append(recid)
+        return recid
+
+    status.newer_versions('p.', [_ds('p.a', 1), _ds('p.a', 2)], latest=latest)
+    assert sorted(asked) == ['1', '2']
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        requests.HTTPError(response=type('R', (), {'status_code': 404})()),
+        requests.HTTPError(response=type('R', (), {'status_code': 410})()),
+        requests.HTTPError(response=type('R', (), {'status_code': 403})()),
+        KeyError('id'),
+        ValueError('not json'),
+    ],
+    ids=['404', '410', '403', 'no id', 'not json'],
+)
+def test_a_record_that_is_gone_fails_with_exit_4(monkeypatch, capsys, error):
+    """A pinned record Zenodo no longer serves, or a reply of another shape, is no passing fault:
+    exit 4, also when the other record is read."""
+    ds = [_ds('p.a', 1), _ds('p.b', 2)]
+    assert _latest_cli(monkeypatch, ds, {'1': '1', '2': error}) == 4
+    assert 'GONE p.b' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        requests.ConnectionError('down'),
+        requests.Timeout('slow'),
+        requests.HTTPError(response=type('R', (), {'status_code': 503})()),
+        requests.HTTPError(response=type('R', (), {'status_code': 429})()),
+    ],
+    ids=['connection', 'timeout', '503', '429'],
+)
+def test_a_passing_fault_on_one_record_warns_with_exit_3(monkeypatch, capsys, error):
+    """A connection fault, a timeout, a 5xx or a rate limit on one record warns: exit 3."""
+    ds = [_ds('p.a', 1), _ds('p.b', 2)]
+    assert _latest_cli(monkeypatch, ds, {'1': '1', '2': error}) == 3
+    assert 'UNREADABLE p.b' in capsys.readouterr().out
