@@ -241,12 +241,21 @@ def _cmd_mirror_status(args: argparse.Namespace) -> int:
 
 def _cmd_latest(args: argparse.Namespace) -> int:
     from fwl_io import mirror_status
+    from fwl_io.pins import manifest_lines
 
     report = mirror_status.newer_versions(args.prefix, latest=mirror_status.latest_record_id)
     if not (report.ok or report.stale or report.unreadable or report.manifest_errors):
         print(f'fwl-io: no dataset key starts with {args.prefix}', file=sys.stderr)
         return 1
-    print(report.summary())
+    lines = manifest_lines(report.manifest_errors)
+    lines += [f'STALE {key}: {why}' for key, why in sorted(report.stale.items())]
+    lines += [f'UNREADABLE {key}: {why}' for key, why in sorted(report.unreadable.items())]
+    lines.append(
+        f'newest version pinned: {len(report.ok)}, '
+        f'with a newer Zenodo version: {len(report.stale)}, '
+        f'not checked (Zenodo could not be read): {len(report.unreadable)}'
+    )
+    print('\n'.join(lines))
     return report.exit_code
 
 
