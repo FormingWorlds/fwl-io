@@ -275,25 +275,81 @@ def test_the_paleos_prefix_selects_the_four_shipped_paleos_datasets():
     """The prefix the scheduled check uses selects every PALEOS dataset of the shipped manifest."""
     from fwl_io.manifest import load_manifest, shared_manifest_path
 
-    keys = sorted(
-        ds.key
-        for ds in load_manifest(shared_manifest_path())
-        if ds.key.startswith('interior.eos.paleos')
-    )
-    assert keys == [
+    keys = [ds.key for ds in load_manifest(shared_manifest_path())]
+    paleos = [k for k in keys if k.startswith('interior.eos.paleos')]
+    assert sorted(paleos) == [
         'interior.eos.paleos_h2o',
         'interior.eos.paleos_iron',
         'interior.eos.paleos_mgsio3',
         'interior.eos.paleos_mgsio3_unified',
     ]
-    assert all('paleos' not in k for k in _other_keys())
+    assert all('paleos' not in k for k in keys if k not in paleos)
 
 
-def _other_keys():
-    from fwl_io.manifest import load_manifest, shared_manifest_path
+def _latest_cli(monkeypatch, datasets, newest):
+    """Run fwl-io latest over ``datasets``, Zenodo answered by ``newest`` (an id or an error)."""
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({'m': datasets}, {}))
 
-    return [
-        ds.key
-        for ds in load_manifest(shared_manifest_path())
-        if not ds.key.startswith('interior.eos.paleos')
+    def latest(recid):
+        if isinstance(newest.get(recid), Exception):
+            raise newest[recid]
+        return newest[recid]
+
+    monkeypatch.setattr(status, 'latest_record_id', latest)
+    return main(['latest', '--prefix', 'p.'])
+
+
+def test_the_latest_count_line_counts_each_group(monkeypatch, capsys):
+    """2 current, 3 stale and 4 unread datasets give their own count each, and exit 5."""
+    ds = [_ds(f'p.{i}', i) for i in range(1, 10)]
+    newest = {str(i): str(i) for i in (1, 2)}
+    newest.update({str(i): str(i + 100) for i in (3, 4, 5)})
+    newest.update({str(i): requests.ConnectionError('down') for i in (6, 7, 8, 9)})
+    assert _latest_cli(monkeypatch, ds, newest) == 5
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        'newest version pinned: 2, with a newer Zenodo version: 3, '
+        'not checked (Zenodo could not be read): 4'
+    )
+
+
+def test_latest_with_one_record_unread_warns_with_exit_3(monkeypatch, capsys):
+    """One record read and current, one not read: UNREADABLE line, exit 3."""
+    ds = [_ds('p.a', 1), _ds('p.b', 2)]
+    assert _latest_cli(monkeypatch, ds, {'1': '1', '2': requests.ConnectionError('down')}) == 3
+    out = capsys.readouterr().out
+    assert 'UNREADABLE p.b: Zenodo 2: down' in out and 'STALE' not in out
+
+
+def test_latest_with_no_record_read_fails_with_exit_4(monkeypatch, capsys):
+    """Zenodo read for no record: the check saw nothing, exit 4, so the daily job fails."""
+    ds = [_ds('p.a', 1), _ds('p.b', 2)]
+    err = requests.HTTPError('404')
+    assert _latest_cli(monkeypatch, ds, {'1': err, '2': err}) == 4
+    assert capsys.readouterr().out.count('UNREADABLE') == 2
+
+
+def test_latest_with_every_pin_current_prints_only_the_count(monkeypatch, capsys):
+    """The daily steady state: one count line, exit 0."""
+    assert _latest_cli(monkeypatch, [_ds('p.a', 1), _ds('p.b', 2)], {'1': '1', '2': '2'}) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        'newest version pinned: 2, with a newer Zenodo version: 0, '
+        'not checked (Zenodo could not be read): 0'
     ]
+
+
+def test_latest_reports_a_manifest_left_out(monkeypatch, capsys):
+    """A manifest that fails to load prints its FAIL line and exits 1."""
+    broken = {'broken': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({'m': [_ds('p.a', 1)]}, broken))
+    monkeypatch.setattr(status, 'latest_record_id', lambda recid: recid)
+    assert main(['latest', '--prefix', 'p.']) == 1
+    assert capsys.readouterr().out.splitlines()[0] == (
+        'FAIL broken: MANIFEST FAILED TO LOAD, cannot load'
+    )
+
+
+def test_a_key_in_two_manifests_is_counted_once():
+    """A dataset key that two manifests declare is one dataset."""
+    report = status.newer_versions('p.', [_ds('p.a', 1), _ds('p.a', 1)], latest=lambda r: r)
+    assert report.ok == ['p.a']
+    assert report.exit_code == 0
