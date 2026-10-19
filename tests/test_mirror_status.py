@@ -184,3 +184,112 @@ def test_the_newest_version_is_read_from_the_versions_endpoint(monkeypatch):
     assert seen == ['https://zenodo.example/api/records/3/versions/latest']
     with pytest.raises(requests.HTTPError):
         latest_record_id('3', api_base='https://zenodo.bad/api/records')
+
+
+def test_newer_versions_reads_each_record_of_the_prefix_once():
+    """Only datasets under the prefix are checked; three datasets of one record cost one read,
+    and a record with a newer version is stale while the current one is in order."""
+    asked = []
+
+    def latest(recid):
+        asked.append(recid)
+        return {'22776069': '22776069', '19680050': '29680050'}[recid]
+
+    datasets = [
+        _ds('interior.eos.paleos_iron', 22776069),
+        _ds('interior.eos.paleos_h2o', 22776069),
+        _ds('interior.eos.paleos_mgsio3_unified', 22776069),
+        _ds('interior.eos.paleos_mgsio3', 19680050),
+        _ds('interior.eos.seager_2007', 15727878),
+    ]
+    report = status.newer_versions('interior.eos.paleos', datasets, latest=latest)
+    assert sorted(asked) == ['19680050', '22776069']
+    assert report.stale == {
+        'interior.eos.paleos_mgsio3': 'pins Zenodo 19680050, newest version is 29680050'
+    }
+    assert sorted(report.ok) == [
+        'interior.eos.paleos_h2o',
+        'interior.eos.paleos_iron',
+        'interior.eos.paleos_mgsio3_unified',
+    ]
+    assert report.exit_code == 5
+
+
+def test_newer_versions_reports_an_unread_record_without_a_retry():
+    """A Zenodo record that cannot be read is named once, not retried, and exits 3."""
+    asked = []
+
+    def latest(recid):
+        asked.append(recid)
+        raise requests.ConnectionError('down')
+
+    datasets = [_ds('interior.eos.paleos_iron', 1), _ds('interior.eos.paleos_h2o', 1)]
+    report = status.newer_versions('interior.eos.paleos', datasets, latest=latest)
+    assert asked == ['1']
+    assert set(report.unreadable) == {'interior.eos.paleos_iron', 'interior.eos.paleos_h2o'}
+    assert report.exit_code == 3 and not report.stale
+
+
+def test_newer_versions_with_every_pin_current_exits_zero():
+    """All pins at their newest version: in order, exit 0."""
+    datasets = [_ds('a.one', 5), _ds('a.two', 6)]
+    report = status.newer_versions('a.', datasets, latest=lambda recid: recid)
+    assert report.ok == ['a.one', 'a.two']
+    assert report.exit_code == 0
+
+
+def test_newer_versions_keeps_a_manifest_left_out(monkeypatch):
+    """A manifest that fails to load fails the check, as in mirror-status."""
+    broken = {'broken': ProviderError(ErrorKind.LOAD_FAILURE, 'cannot load')}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({}, broken))
+    report = status.newer_versions('', latest=lambda recid: recid)
+    assert report.manifest_errors == broken
+    assert report.exit_code == 1
+
+
+def test_the_latest_command_fails_on_a_newer_version(monkeypatch, capsys):
+    """fwl-io latest prints the stale pin and exits 5 so a scheduled run fails."""
+    found = {'m': [_ds('interior.eos.paleos_iron', 1), _ds('other.key', 2)]}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery(found, {}))
+    monkeypatch.setattr(status, 'latest_record_id', lambda recid: '9')
+    assert main(['latest', '--prefix', 'interior.eos.paleos']) == 5
+    out = capsys.readouterr().out
+    assert 'STALE interior.eos.paleos_iron: pins Zenodo 1, newest version is 9' in out
+    assert 'other.key' not in out
+
+
+def test_the_latest_command_refuses_a_prefix_that_selects_nothing(monkeypatch, capsys):
+    """A prefix no dataset key starts with exits 1 without a Zenodo read, so a typo never passes."""
+    found = {'m': [_ds('interior.eos.paleos_iron', 1)]}
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery(found, {}))
+    monkeypatch.setattr(status, 'latest_record_id', lambda recid: pytest.fail('read Zenodo'))
+    assert main(['latest', '--prefix', 'interior.eos.paleo_']) == 1
+    assert 'no dataset key starts with interior.eos.paleo_' in capsys.readouterr().err
+
+
+def test_the_paleos_prefix_selects_the_four_shipped_paleos_datasets():
+    """The prefix the scheduled check uses selects every PALEOS dataset of the shipped manifest."""
+    from fwl_io.manifest import load_manifest, shared_manifest_path
+
+    keys = sorted(
+        ds.key
+        for ds in load_manifest(shared_manifest_path())
+        if ds.key.startswith('interior.eos.paleos')
+    )
+    assert keys == [
+        'interior.eos.paleos_h2o',
+        'interior.eos.paleos_iron',
+        'interior.eos.paleos_mgsio3',
+        'interior.eos.paleos_mgsio3_unified',
+    ]
+    assert all('paleos' not in k for k in _other_keys())
+
+
+def _other_keys():
+    from fwl_io.manifest import load_manifest, shared_manifest_path
+
+    return [
+        ds.key
+        for ds in load_manifest(shared_manifest_path())
+        if not ds.key.startswith('interior.eos.paleos')
+    ]
