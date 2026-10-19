@@ -254,7 +254,11 @@ def test_the_latest_command_fails_on_a_newer_version(monkeypatch, capsys):
     monkeypatch.setattr(status, 'latest_record_id', lambda recid: '9')
     assert main(['latest', '--prefix', 'interior.eos.paleos']) == 5
     out = capsys.readouterr().out
-    assert 'STALE interior.eos.paleos_iron: pins Zenodo 1, newest version is 9' in out
+    assert out.splitlines() == [
+        'STALE interior.eos.paleos_iron: pins Zenodo 1, newest version is 9',
+        'newest version pinned: 0, with a newer Zenodo version: 1, '
+        'not checked (Zenodo could not be read): 0',
+    ]
     assert 'other.key' not in out
 
 
