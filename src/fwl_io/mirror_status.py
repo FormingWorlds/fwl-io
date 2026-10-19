@@ -29,6 +29,7 @@ class StatusReport:
     stale: dict[str, str] = field(default_factory=dict)
     outside: dict[str, str] = field(default_factory=dict)
     unreadable: dict[str, str] = field(default_factory=dict)
+    gone: dict[str, str] = field(default_factory=dict)
     manifest_errors: dict[str, ProviderError] = field(default_factory=dict)
 
     @property
@@ -131,7 +132,8 @@ def newer_versions(
     """Sort the datasets whose key starts with ``prefix`` into in order, stale or unreadable.
 
     Each Zenodo record is read once, with no retry, so a scheduled check costs one API call
-    per pinned record; a key that several manifests declare is checked once.
+    per pinned record. A record that Zenodo does not serve (HTTP 4xx other than 408 and 429,
+    or a reply of another shape) is gone; any other read failure is unreadable.
 
     Parameters
     ----------
@@ -147,7 +149,8 @@ def newer_versions(
     Returns
     -------
     StatusReport
-        Only ``ok``, ``stale``, ``unreadable`` and ``manifest_errors`` are filled.
+        Only ``ok``, ``stale``, ``unreadable``, ``gone`` and ``manifest_errors`` are filled;
+        :func:`latest_exit_code` gives its exit status.
     """
     report, latest = StatusReport(), latest or latest_record_id
     if datasets is None:
@@ -155,11 +158,7 @@ def newer_versions(
         datasets = [ds for group in discovery.found.values() for ds in group]
         report.manifest_errors.update(discovery.errors)
     newest: dict[str, str | Exception] = {}
-    seen: set[str] = set()
-    for ds in datasets:
-        if not ds.key.startswith(prefix) or ds.key in seen:
-            continue
-        seen.add(ds.key)
+    for ds in (ds for ds in datasets if ds.key.startswith(prefix)):
         recid = zenodo_record_id(ds.zenodo)
         if recid not in newest:
             try:
@@ -167,9 +166,36 @@ def newer_versions(
             except Exception as exc:  # noqa: BLE001 -- reported per dataset, never raised
                 newest[recid] = exc
         if isinstance(newest[recid], Exception):
-            report.unreadable[ds.key] = f'Zenodo {recid}: {newest[recid]}'
+            group = report.unreadable if _passing(newest[recid]) else report.gone
+            group[ds.key] = f'Zenodo {recid}: {newest[recid]}'
         elif newest[recid] != recid:
             report.stale[ds.key] = f'pins Zenodo {recid}, newest version is {newest[recid]}'
         else:
             report.ok.append(ds.key)
     return report
+
+
+def _passing(exc: Exception) -> bool:
+    """Whether a read failure can clear on a later try: a connection fault, a timeout, a
+    server error or a rate limit (or an HTTP error without its status)."""
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        code = getattr(exc.response, 'status_code', None)
+        return code is None or code in (408, 429) or code >= 500
+    return False
+
+
+def latest_exit_code(report: StatusReport) -> int:
+    """Return the exit status of ``fwl-io latest`` for a :func:`newer_versions` report.
+
+    1 for a manifest left out, 5 for a newer version, 4 for a record that is gone or when
+    no record was read, 3 when only a passing read failure is left, else 0.
+    """
+    if report.manifest_errors:
+        return 1
+    if report.stale:
+        return 5
+    if report.gone or (report.unreadable and not report.ok):
+        return 4
+    return 3 if report.unreadable else 0

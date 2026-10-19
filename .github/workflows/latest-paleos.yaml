@@ -1,8 +1,8 @@
 name: PALEOS pins at their newest Zenodo version
 
 # Reads Zenodo only: one API call per pinned PALEOS record, no retry, no token. A newer
-# version, or no record read at all, fails the run, so the scheduled run sends its failure
-# notice; a single record that could not be read leaves a warning and passes.
+# version, a pinned record that is gone, or no record read at all fails the run, so the
+# scheduled run sends its failure notice; a passing read fault on one record warns.
 
 on:
   schedule:
@@ -31,12 +31,12 @@ jobs:
         run: |
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
           set +e
-          fwl-io latest --prefix interior.eos.paleos | tee -a "${GITHUB_STEP_SUMMARY}"
+          fwl-io latest --prefix interior.eos.paleos 2>&1 | tee -a "${GITHUB_STEP_SUMMARY}"
           code=${PIPESTATUS[0]}
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
           case "${code}" in
             5) echo "::error title=Newer PALEOS tables on Zenodo::pin the newest version in the shared manifest; see the summary"; exit 1 ;;
-            4) echo "::error title=Zenodo not read::no PALEOS record could be read; see the summary"; exit 1 ;;
+            4) echo "::error title=PALEOS record gone or not read::a pinned PALEOS record is gone, or none could be read; see the summary"; exit 1 ;;
             3) echo "::warning title=Zenodo not fully read::a PALEOS record could not be read; see the summary"; exit 0 ;;
             *) exit "${code}" ;;
           esac
