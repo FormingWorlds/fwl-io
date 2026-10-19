@@ -239,6 +239,17 @@ def _cmd_mirror_status(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _cmd_latest(args: argparse.Namespace) -> int:
+    from fwl_io import mirror_status
+
+    report = mirror_status.newer_versions(args.prefix, latest=mirror_status.latest_record_id)
+    if not (report.ok or report.stale or report.unreadable or report.manifest_errors):
+        print(f'fwl-io: no dataset key starts with {args.prefix}', file=sys.stderr)
+        return 1
+    print(report.summary())
+    return report.exit_code
+
+
 def _cmd_mirror_sync(args: argparse.Namespace) -> int:
     from fwl_io.mirror_sync import mirror_sync
 
@@ -473,6 +484,16 @@ def main(argv: list[str] | None = None) -> int:
         '(exit 5 when one needs work, 3 when Zenodo could not be read)',
     )
     p_mirror_status.set_defaults(func=_cmd_mirror_status)
+
+    p_latest = sub.add_parser(
+        'latest',
+        help='check that each pinned Zenodo record is its newest version, one request per '
+        'record (exit 5 when a newer version exists, 3 when Zenodo could not be read)',
+    )
+    p_latest.add_argument(
+        '--prefix', default='', help='check only datasets whose key starts with this'
+    )
+    p_latest.set_defaults(func=_cmd_latest)
 
     args = parser.parse_args(argv)
     try:

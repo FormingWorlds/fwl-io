@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has thirteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has fourteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -130,6 +130,14 @@ fwl-io mirror-status
 ```
 
 Lists the datasets of the installed manifests whose Dataverse mirror needs work: one without a `dataverse` pin (UNPINNED, with its Zenodo DOI), and one whose Zenodo record has a newer version than the one pinned (STALE: the manifest needs a new pin, and that version a mirror). A dataset can be both. A dataset without a pin whose record is not an accepted record of a Zenodo community of the framework ([the rule](../How-to/add_dataset.md#1-bring-the-files-into-the-proteus-framework-community-on-zenodo)) is also listed as OUTSIDE: no mirror is created for it. The command reads only Zenodo: `<record>/versions/latest` once per record, and the record itself for a dataset without a pin; a record that cannot be read is listed as UNREADABLE. A manifest left out of discovery is a FAIL line, reported as `MANIFEST FAILED TO LOAD` or `MANIFEST NOT USED` as `fwl-io check-mirrors` reports it. Exit is 1 when a manifest is left out, 5 when a dataset needs work, 3 when the only problem is a record that could not be read, and 0 otherwise.
+
+## fwl-io latest
+
+```bash
+fwl-io latest [--prefix PREFIX]
+```
+
+Checks that the Zenodo record each dataset pins is the newest version of that record, for every dataset of the installed manifests whose key starts with `PREFIX` (all datasets without it). It reads `<record>/versions/latest` once per pinned record, with no retry, and nothing else. A dataset with a newer version is a STALE line (the manifest needs a new pin), and a record that cannot be read is an UNREADABLE line. A prefix that no dataset key starts with exits 1, so a mistyped prefix never passes. Exit is 1 when a manifest is left out of discovery, 5 when a newer version exists, 3 when the only problem is a record that could not be read, and 0 otherwise. The workflow `latest-paleos.yaml` runs `fwl-io latest --prefix interior.eos.paleos` each day and fails on exit 5.
 
 ## fwl-io mirror-sync
 

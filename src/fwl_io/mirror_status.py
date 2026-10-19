@@ -123,3 +123,49 @@ def mirror_status(
         if ds.key not in report.unreadable | report.stale | report.unpinned:
             report.ok.append(ds.key)
     return report
+
+
+def newer_versions(
+    prefix: str = '', datasets: list[Dataset] | None = None, latest=None
+) -> StatusReport:
+    """Sort the datasets whose key starts with ``prefix`` into in order, stale or unreadable.
+
+    Each Zenodo record is read once, with no retry, so a scheduled check costs one request
+    per pinned record.
+
+    Parameters
+    ----------
+    prefix : str
+        Start of the dataset keys to check; the empty string checks every dataset.
+    datasets : list of Dataset, optional
+        Datasets to choose from; defaults to those of every installed manifest, and a
+        manifest left out of discovery is reported in ``manifest_errors``.
+    latest : callable, optional
+        Returns the newest record id of a Zenodo record id; :func:`latest_record_id` by
+        default.
+
+    Returns
+    -------
+    StatusReport
+        Only ``ok``, ``stale``, ``unreadable`` and ``manifest_errors`` are filled.
+    """
+    report, latest = StatusReport(), latest or latest_record_id
+    if datasets is None:
+        discovery = _discover_all()
+        datasets = [ds for group in discovery.found.values() for ds in group]
+        report.manifest_errors.update(discovery.errors)
+    newest: dict[str, str | Exception] = {}
+    for ds in (ds for ds in datasets if ds.key.startswith(prefix)):
+        recid = zenodo_record_id(ds.zenodo)
+        if recid not in newest:
+            try:
+                newest[recid] = latest(recid)
+            except Exception as exc:  # noqa: BLE001 -- reported per dataset, never raised
+                newest[recid] = exc
+        if isinstance(newest[recid], Exception):
+            report.unreadable[ds.key] = f'Zenodo {recid}: {newest[recid]}'
+        elif newest[recid] != recid:
+            report.stale[ds.key] = f'pins Zenodo {recid}, newest version is {newest[recid]}'
+        else:
+            report.ok.append(ds.key)
+    return report

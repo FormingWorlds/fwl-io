@@ -1,0 +1,45 @@
+name: PALEOS pins at their newest Zenodo version
+
+# Reads Zenodo only: one request per pinned PALEOS record, no retry, no token. A newer
+# version fails the run, so the scheduled run sends its failure notice; a Zenodo record
+# that could not be read leaves a warning and passes.
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    name: PALEOS pins are the newest versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install fwl-io
+        run: pip install -e .
+
+      - name: Compare each PALEOS pin with its newest Zenodo version
+        shell: bash
+        run: |
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          set +e
+          fwl-io latest --prefix interior.eos.paleos | tee -a "${GITHUB_STEP_SUMMARY}"
+          code=${PIPESTATUS[0]}
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${code}" -eq 5 ]; then
+            echo "::error title=Newer PALEOS tables on Zenodo::pin the newest version in the shared manifest; see the summary"
+            exit 1
+          fi
+          if [ "${code}" -eq 3 ]; then
+            echo "::warning title=Zenodo not fully read::a PALEOS record could not be read; see the summary"
+            exit 0
+          fi
+          exit "${code}"
