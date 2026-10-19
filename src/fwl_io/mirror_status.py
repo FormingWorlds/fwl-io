@@ -130,8 +130,8 @@ def newer_versions(
 ) -> StatusReport:
     """Sort the datasets whose key starts with ``prefix`` into in order, stale or unreadable.
 
-    Each Zenodo record is read once, with no retry, so a scheduled check costs one request
-    per pinned record.
+    Each Zenodo record is read once, with no retry, so a scheduled check costs one API call
+    per pinned record; a key that several manifests declare is checked once.
 
     Parameters
     ----------
@@ -155,7 +155,11 @@ def newer_versions(
         datasets = [ds for group in discovery.found.values() for ds in group]
         report.manifest_errors.update(discovery.errors)
     newest: dict[str, str | Exception] = {}
-    for ds in (ds for ds in datasets if ds.key.startswith(prefix)):
+    seen: set[str] = set()
+    for ds in datasets:
+        if not ds.key.startswith(prefix) or ds.key in seen:
+            continue
+        seen.add(ds.key)
         recid = zenodo_record_id(ds.zenodo)
         if recid not in newest:
             try:

@@ -27,6 +27,7 @@ A dataset is pinned to one version of a Zenodo record and to a committed list of
 | Maintainer of the framework | Accepts or refuses a dataset request. Uploads data to Zenodo on request, and accepts a record that is submitted to the PROTEUS Framework community. Runs the workflows that hold the DataverseNL token (the mirror, the publish, and the draft job of the weekly report workflow), and approves their runs. For the shared manifest, also the row above. | Two rights, which the maintainers hold together: membership of the GitHub team `proteus-maintainer` for the workflows, and the curator role in the Zenodo community for the acceptance |
 | The **Nightly** workflow, once a week | Compares the committed registries of the shared manifest with Zenodo, checks that each of its records is in a Zenodo community of the framework, and checks every `dataverse` pin of the shared manifest. Reports a difference; changes nothing. | Nothing |
 | The weekly report | Lists the datasets without a mirror and the records with a newer version. Changes nothing. | Nothing |
+| The daily PALEOS check (`latest-paleos.yaml`) | Runs `fwl-io latest --prefix interior.eos.paleos`: fails when a PALEOS record has a newer version on Zenodo than its pin, or when no PALEOS record could be read; warns when one could not be read. Changes nothing. | Nothing |
 
 The shared manifest is `src/fwl_io/data/shared_manifest.toml` in the fwl-io repository; its package is fwl-io. A dataset that one model reads is declared in that model's own manifest, and its pull request goes to that model's repository, where the maintainers of the model review it.
 
@@ -182,7 +183,7 @@ A code can hold Zenodo record ids outside any manifest. AGNI's `src/get_data.sh`
 
 ## What the weekly job checks
 
-Two things run every week, and neither changes anything: the workflow named **Nightly**, which this section describes, and the weekly report of datasets without a mirror ([The weekly report, the draft and the pin](mirror_dataset.md#the-weekly-report-the-draft-and-the-pin)).
+Two things run every week, and neither changes anything: the workflow named **Nightly**, which this section describes, and the weekly report of datasets without a mirror ([The weekly report, the draft and the pin](mirror_dataset.md#the-weekly-report-the-draft-and-the-pin)). A third runs every day and changes nothing either: the PALEOS check `latest-paleos.yaml`, which fails when a PALEOS record has a newer version than its pin ([fwl-io latest](../Reference/cli.md#fwl-io-latest)).
 
 The **Nightly** workflow runs every Monday, in two steps.
 
