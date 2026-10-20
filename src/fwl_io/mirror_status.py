@@ -72,14 +72,15 @@ def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
     Raises
     ------
     RecordWithoutId
-        If the reply is a JSON object without ``id``.
+        If the reply is no JSON object, or its ``id`` is not an integer or a string of digits.
     """
     response = requests.get(f'{api_base}/{recid}/versions/latest', timeout=30)
     response.raise_for_status()
     body = response.json()
-    if not isinstance(body, dict) or 'id' not in body:
+    rid = body.get('id') if isinstance(body, dict) else None
+    if isinstance(rid, bool) or not isinstance(rid, int | str) or not str(rid).isdigit():
         raise RecordWithoutId(f'no record id in the reply for Zenodo {recid}')
-    return str(body['id'])
+    return str(rid)
 
 
 def accepted(doi: str) -> bool:
