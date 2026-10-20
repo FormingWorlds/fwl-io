@@ -239,6 +239,28 @@ def _cmd_mirror_status(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _cmd_latest(args: argparse.Namespace) -> int:
+    from fwl_io.mirror_status import latest_exit_code, newer_versions
+    from fwl_io.pins import manifest_lines
+
+    report = newer_versions(args.prefix)
+    groups = (report.ok, report.stale, report.unreadable, report.gone, report.manifest_errors)
+    if not any(groups):
+        print(f'fwl-io: no dataset key starts with {args.prefix}', file=sys.stderr)
+        return 1
+    lines = manifest_lines(report.manifest_errors)
+    lines += [f'STALE {key}: {why}' for key, why in sorted(report.stale.items())]
+    lines += [f'GONE {key}: {why}' for key, why in sorted(report.gone.items())]
+    lines += [f'UNREADABLE {key}: {why}' for key, why in sorted(report.unreadable.items())]
+    lines.append(
+        f'newest version pinned: {len(report.ok)}, '
+        f'with a newer Zenodo version: {len(report.stale)}, '
+        f'not checked (Zenodo could not be read): {len(report.unreadable) + len(report.gone)}'
+    )
+    print('\n'.join(lines))
+    return latest_exit_code(report)
+
+
 def _cmd_mirror_sync(args: argparse.Namespace) -> int:
     from fwl_io.mirror_sync import mirror_sync
 
@@ -473,6 +495,17 @@ def main(argv: list[str] | None = None) -> int:
         '(exit 5 when one needs work, 3 when Zenodo could not be read)',
     )
     p_mirror_status.set_defaults(func=_cmd_mirror_status)
+
+    p_latest = sub.add_parser(
+        'latest',
+        help='check that each pinned Zenodo record is its newest version, one API call per '
+        'record (exit 5 when a newer version exists, 4 when a record is gone or none could be '
+        'read, 3 when a record could not be read for now)',
+    )
+    p_latest.add_argument(
+        '--prefix', default='', help='check only datasets whose key starts with this'
+    )
+    p_latest.set_defaults(func=_cmd_latest)
 
     args = parser.parse_args(argv)
     try:
