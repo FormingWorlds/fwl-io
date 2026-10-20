@@ -457,6 +457,31 @@ def test_a_reply_without_an_id_is_a_record_without_id(monkeypatch):
         latest_record_id('3')
 
 
+@pytest.mark.parametrize('body', [['id'], 'id', 7, None], ids=['list', 'string', 'int', 'null'])
+def test_a_reply_that_is_no_object_is_a_record_without_id(monkeypatch, body):
+    """A JSON reply that is no object, even one holding the text 'id', is a record without id."""
+    monkeypatch.setattr(status.requests, 'get', lambda url, timeout: _Reply(body))
+    with pytest.raises(Exception) as info:
+        latest_record_id('3')
+    assert type(info.value) is status.RecordWithoutId
+
+
+def test_the_prefix_matches_only_the_start_of_a_key(monkeypatch, capsys):
+    """A key that holds the prefix after its start is not checked."""
+    ds = [_ds('p.a', 1), _ds('x.p.b', 2)]
+    assert _latest_cli(monkeypatch, ds, {'1': '1', '2': '9'}) == 0
+    assert 'x.p.b' not in capsys.readouterr().out
+
+
+def test_a_4xx_status_on_an_error_other_than_httperror_is_a_passing_fault(monkeypatch, capsys):
+    """Only an HTTPError carries a status that makes a record gone; another error that holds a
+    404 reply warns with exit 3."""
+    error = requests.ConnectionError(response=type('R', (), {'status_code': 404})())
+    ds = [_ds('p.a', 1), _ds('p.b', 2)]
+    assert _latest_cli(monkeypatch, ds, {'1': '1', '2': error}) == 3
+    assert 'UNREADABLE p.b' in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     'groups, code',
     [
