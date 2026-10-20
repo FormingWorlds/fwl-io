@@ -78,7 +78,7 @@ def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
     response.raise_for_status()
     body = response.json()
     rid = body.get('id') if isinstance(body, dict) else None
-    if not isinstance(rid, int | str) or not str(rid).isdigit():
+    if not str(rid).isdigit():
         raise RecordWithoutId(f'no record id in the reply for Zenodo {recid}')
     return str(rid)
 
