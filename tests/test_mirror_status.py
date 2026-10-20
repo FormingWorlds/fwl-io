@@ -535,3 +535,33 @@ def test_two_declarations_of_a_key_are_named_by_their_record():
     )
     assert report.ok == ['p.a (Zenodo 1)']
     assert list(report.stale) == ['p.a (Zenodo 2)']
+
+
+_NO_ID = [{'id': None}, {'id': ''}, {'id': {}}, {'id': 1.0}, {'id': True}]
+
+
+@pytest.mark.parametrize('body', _NO_ID, ids=['null', 'empty', 'object', 'float', 'bool'])
+def test_an_id_that_is_no_record_id_makes_the_record_gone(monkeypatch, capsys, body):
+    """An id that is null, empty, an object, a float or a bool is no record id: GONE, exit 4."""
+    monkeypatch.setattr(status.requests, 'get', lambda url, timeout: _Reply(body))
+    with pytest.raises(Exception) as info:
+        latest_record_id('1')
+    assert type(info.value) is status.RecordWithoutId
+    monkeypatch.setattr(status, '_discover_all', lambda: _Discovery({'m': [_ds('p.a', 1)]}, {}))
+    assert main(['latest', '--prefix', 'p.']) == 4
+    assert 'GONE p.a: Zenodo 1: no record id' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('body', [{'id': 22776069}, {'id': '22776069'}], ids=['int', 'digits'])
+def test_an_integer_or_digit_id_is_read_as_the_record_id(monkeypatch, body):
+    """An id given as an integer or as a string of digits is the record id."""
+    monkeypatch.setattr(status.requests, 'get', lambda url, timeout: _Reply(body))
+    assert latest_record_id('22776069') == '22776069'
+
+
+def test_latest_with_every_record_gone_reports_them_with_exit_4(monkeypatch, capsys):
+    """A prefix whose only record is gone prints its GONE line and exits 4, not exit 1."""
+    assert _latest_cli(monkeypatch, [_ds('p.a', 1)], {'1': _http(404)}) == 4
+    out, err = capsys.readouterr()
+    assert 'GONE p.a' in out
+    assert 'no dataset key starts with' not in err
