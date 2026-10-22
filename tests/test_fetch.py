@@ -560,6 +560,21 @@ def test_archive_refetch_uses_the_stamp_and_does_not_redownload(http_server, tmp
     assert (tmp_path / VERSIONED / 'm0p1.txt').read_bytes() == b'0.1\n'
 
 
+def test_an_archive_tree_stamped_with_other_checksums_is_fetched_again(http_server, tmp_path):
+    """A tree extracted from another archive under the same record (a restored cache, a
+    re-synced registry) is not current: the new archive is downloaded and extracted."""
+    base_url, root = http_server
+    old = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, old, tmp_path, 'tar').fetch_all()
+    new = _serve_archive(root, 'tracks.tar', [('m0p1.txt', b'0.2\n')], 'tar')
+    assert new != old
+
+    _archive_fetcher(base_url, new, tmp_path, 'tar').fetch_all()
+    assert (tmp_path / VERSIONED / 'm0p1.txt').read_bytes() == b'0.2\n'
+    stamp = json.loads((tmp_path / VERSIONED / '.fwl-io.json').read_text())
+    assert stamp['files'] == new
+
+
 def test_archive_offline_serves_extracted_tree_and_errors_when_absent(http_server, tmp_path):
     """Offline mode returns an already-extracted dataset and errors when it is missing."""
     base_url, root = http_server
