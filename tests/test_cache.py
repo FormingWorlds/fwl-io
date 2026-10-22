@@ -126,7 +126,7 @@ def test_the_key_command_names_an_unversioned_dataset(tmp_path, monkeypatch, cap
         'fwl_io.cli._select', lambda args: [Dataset(key='g.bare', name='', dataverse='10.34894/X')]
     )
     monkeypatch.setattr(
-        'fwl_io.cache._material', lambda ds: ['dir\tg/bare', 'file\tb.dat\tsha256:0']
+        'fwl_io.cache._material', lambda ds: (['dir\tg/bare', 'file\tb.dat\tsha256:0'], False)
     )
     out = tmp_path / 'github_output'
     monkeypatch.setenv('GITHUB_OUTPUT', str(out))
@@ -174,7 +174,7 @@ def test_a_selection_that_resolves_nothing_or_twice_exits_1(providers, capsys, a
 def test_a_prefix_is_kept_verbatim_or_refused(monkeypatch, prefix, ok):
     """A prefix of key characters starts the key; anything else (empty, white space,
     non-ASCII, a newline that would split GITHUB_OUTPUT) is refused."""
-    monkeypatch.setattr(ck, '_material', lambda ds: ['dir\tg/demo/r1', 'file\ta\tsha256:0'])
+    monkeypatch.setattr(ck, '_material', lambda ds: (['dir\tg/demo/r1', 'file\ta\tsha256:0'], True))
     datasets = [Dataset(key='g.demo', name='', zenodo='10.5281/zenodo.1')]
     if ok:
         key = cache_key(datasets, prefix).key

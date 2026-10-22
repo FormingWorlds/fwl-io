@@ -87,6 +87,7 @@ _LOCK_TIMEOUT_S = 300.0
 _STAGING_DIRNAME = '.fwl-io-staging'
 _STAGING_MAX_AGE_S = 24 * 3600
 _STAMP_FILENAME = '.fwl-io.json'
+# A tree stamped under another schema is fetched again: bump it when extraction changes.
 _STAMP_SCHEMA = 1
 
 #: Directories under the data root that fwl-io owns; a walk over the tree never enters
@@ -751,7 +752,7 @@ class Fetcher:
         return True
 
     def _stamp_is_current(self, directory: Path) -> bool:
-        """True when a valid stamp for this exact record id already exists.
+        """True when a valid stamp for this exact record id and registry already exists.
 
         A missing, unreadable, malformed, or mismatched stamp is not current,
         so it is rewritten (healed) rather than trusted forever. It asks less
@@ -763,7 +764,11 @@ class Fetcher:
         existing = self._read_stamp(directory)
         if existing is None:
             return False
-        return existing.get('record_id') == self.record_id and existing.get('zenodo') == self.zenodo
+        return (
+            existing.get('record_id') == self.record_id
+            and existing.get('zenodo') == self.zenodo
+            and existing.get('files') == self.registry
+        )
 
     def _write_stamp(self) -> None:
         """Write a self-describing provenance stamp into the version directory.

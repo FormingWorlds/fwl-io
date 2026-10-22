@@ -185,7 +185,7 @@ def _cmd_cache_check(args: argparse.Namespace) -> int:
     for ds in _select(args):
         fetcher = _fetcher_of(ds, root)
         result = check_dataset(fetcher, key=ds.key)
-        state = 'ok' if result.verifiable else 'present'
+        state = 'faulty' if result.faults else 'ok' if result.verifiable else 'present'
         found = len(result.files) - len(result.faults)
         print(f'{fetcher.rel_dir}: {found}/{len(result.files)} files {state}')
         faulty = faulty or bool(result.faults)
