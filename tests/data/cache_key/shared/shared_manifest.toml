@@ -1,0 +1,11 @@
+# The two shared datasets the JANUS nightly reads, as declared in fwl-io 26.10.16.
+
+[atmos_clim.spectral_files.oak.318]
+name = "SOCRATES spectral files Oak, 318 bands"
+zenodo = "10.5281/zenodo.15743843"
+dataverse = "10.34894/K3UKBX"
+
+[star.spectra.named]
+name = "Stellar spectra of named stars"
+zenodo = "10.5281/zenodo.23197931"
+dataverse = "10.34894/URD02X"
