@@ -407,3 +407,21 @@ def test_a_restored_archive_tree_of_another_registry_is_not_accepted(tmp_path):
     assert not check_dataset(old).faults
     assert not new.is_fetched() and new.recorded_members() is None
     assert check_dataset(new).faults
+
+
+@pytest.mark.unit
+def test_cache_key_refuses_a_dataset_key_given_twice(tmp_path):
+    """Two datasets of one key, say two pins of it, would collapse into one block and hash
+    as the last one alone, so a direct call refuses them as select_datasets does."""
+    (tmp_path / 'g.demo.registry.txt').write_text(f'a.dat sha256:{"a" * 64}\n')
+    pins = [
+        Dataset(
+            key='g.demo',
+            name='',
+            zenodo=f'10.5281/zenodo.{record}',
+            registry_path=tmp_path / 'g.demo.registry.txt',
+        )
+        for record in (1, 2)
+    ]
+    with pytest.raises(ValueError, match=r"dataset\(s\) selected twice: \['g.demo'\]"):
+        cache_key(pins, 'k-')
