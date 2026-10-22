@@ -90,13 +90,18 @@ def select_datasets(providers: Iterable[str] = (), keys: Iterable[str] = ()) -> 
             unused = f'; {n} manifest(s) not used, see fwl-io list' if n else ''
             raise LookupError(f'no installed manifest declares the dataset {key!r}{unused}')
         selected.append(declared[key])
-    names = [ds.key for ds in selected]
-    twice = sorted({name for name in names if names.count(name) > 1})
-    if twice:
-        raise ValueError(f'dataset(s) selected twice: {twice}')
+    _refuse_twice(selected)
     if not selected:
         raise ValueError('no dataset selected: pass --provider or --key')
     return selected
+
+
+def _refuse_twice(datasets: list[Dataset]) -> None:
+    """Raise ValueError when two datasets share a key."""
+    names = [ds.key for ds in datasets]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ValueError(f'dataset(s) selected twice: {twice}')
 
 
 def _material(ds: Dataset) -> tuple[list[str], bool]:
@@ -132,13 +137,14 @@ def cache_key(datasets: Iterable[Dataset], prefix: str) -> CacheKey:
     ------
     ValueError
         The prefix is empty, longer than 100 or holds any other character, or the
-        selection is empty.
+        selection is empty or names a dataset key twice.
     """
     if not _PREFIX.fullmatch(prefix):
         raise ValueError(
             f'cache key prefix {prefix!r} must be 1 to 100 letters, digits, ".", "_" or "-"'
         )
     datasets = list(datasets)
+    _refuse_twice(datasets)
     if not datasets:
         raise ValueError('no dataset selected: pass --provider or --key')
     blocks = {ds.key: _material(ds) for ds in datasets}
