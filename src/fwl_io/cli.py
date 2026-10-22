@@ -1,5 +1,5 @@
-"""Command-line interface for ``fwl-io``: sync, list, fetch, path, check, relocate, prune,
-mirror, mirror-publish, check-mirrors.
+"""Command-line interface for ``fwl-io``: sync, list, fetch, path, check, cache, relocate,
+prune, mirror, mirror-publish, check-mirrors.
 
 Failures from the package's own error types exit with status 1 and a
 one-line message on stderr instead of a traceback.
@@ -136,6 +136,66 @@ def _cmd_check(args: argparse.Namespace) -> int:
     # find out what is wrong needs the detail, not just the exit code.
     print(report.summary())
     return 0 if report.ok else 1
+
+
+def _select(args: argparse.Namespace) -> list:
+    from fwl_io.cache import select_datasets
+
+    return select_datasets(args.provider or (), args.key or ())
+
+
+def _cmd_cache_key(args: argparse.Namespace) -> int:
+    from fwl_io.cache import cache_key
+
+    result = cache_key(_select(args), args.prefix)
+    print(f'Cache key: {result.key}', file=sys.stderr)
+    if result.unversioned:
+        print(
+            f'no restore-keys: {", ".join(result.unversioned)} has no version folder, so a '
+            'prefix restore could leave the files of an older pin in place',
+            file=sys.stderr,
+        )
+    lines = f'key={result.key}\nrestore-keys={result.restore_keys}\n'
+    output = os.environ.get('GITHUB_OUTPUT')
+    if output:
+        with open(output, 'a', encoding='utf-8') as handle:
+            handle.write(lines)
+    else:
+        print(lines, end='')
+    return 0
+
+
+def _cmd_cache_fetch(args: argparse.Namespace) -> int:
+    from fwl_io.manifest import _fetcher_of
+
+    for ds in _select(args):
+        fetcher = _fetcher_of(ds, args.data_root)
+        fetcher.fetch_all()
+        print(f'{fetcher.rel_dir}: fetched')
+    return 0
+
+
+def _cmd_cache_check(args: argparse.Namespace) -> int:
+    from fwl_io.check import check_dataset
+    from fwl_io.manifest import _fetcher_of
+    from fwl_io.paths import existing_data_root
+
+    root = existing_data_root(args.data_root)
+    faulty = False
+    for ds in _select(args):
+        fetcher = _fetcher_of(ds, root)
+        result = check_dataset(fetcher, key=ds.key)
+        state = 'ok' if result.verifiable else 'present'
+        found = len(result.files) - len(result.faults)
+        print(f'{fetcher.rel_dir}: {found}/{len(result.files)} files {state}')
+        faulty = faulty or bool(result.faults)
+    if faulty:
+        print(
+            'The data tree does not match its cache key. If it was restored on an exact-key '
+            'hit, delete that cache entry: an exact hit is never saved again.',
+            file=sys.stderr,
+        )
+    return 1 if faulty else 0
 
 
 def _cmd_relocate(args: argparse.Namespace) -> int:
@@ -358,6 +418,28 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument('model', help='model name matched against required_by')
     p_check.add_argument('--data-root', default=None, help='override the FWL_DATA root')
     p_check.set_defaults(func=_cmd_check)
+
+    p_cache = sub.add_parser(
+        'cache', help='key, fetch and check the data tree an actions/cache entry holds'
+    )
+    cache_sub = p_cache.add_subparsers(dest='cache_command', required=True)
+    selection = argparse.ArgumentParser(add_help=False)
+    selection.add_argument(
+        '--provider', action='append', help='all datasets of an installed manifest provider'
+    )
+    selection.add_argument('--key', action='append', help='one dataset by its dotted key')
+    p_cache_key = cache_sub.add_parser(
+        'key', parents=[selection], help='print key= and restore-keys= for GITHUB_OUTPUT'
+    )
+    p_cache_key.add_argument('--prefix', required=True, help='leading part of the key')
+    p_cache_key.set_defaults(func=_cmd_cache_key)
+    for name, func, text in (
+        ('fetch', _cmd_cache_fetch, 'fetch every selected dataset'),
+        ('check', _cmd_cache_check, 'check every selected dataset without downloading'),
+    ):
+        p_cache_cmd = cache_sub.add_parser(name, parents=[selection], help=text)
+        p_cache_cmd.add_argument('--data-root', default=None, help='override the FWL_DATA root')
+        p_cache_cmd.set_defaults(func=func)
 
     p_relocate = sub.add_parser(
         'relocate', help='move data left by the previous layout into the current one'

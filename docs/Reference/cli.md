@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has fourteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has fifteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -52,6 +52,32 @@ The report goes to stdout whatever the verdict, so a caller running this to find
 Checking reads and hashes every file a plain dataset declares, so for those the cost is one full pass over the data: on a multi-gigabyte tree, or a shared cluster filesystem, expect it to take as long as reading that data once. An archive dataset costs far less, since its members have no digests to check and are only tested for presence.
 
 Nothing is downloaded and no dataset directory or file is written, which makes this safe to run against a tree another process is reading. Resolving the data root creates that root if it does not exist, as it does for every other subcommand. The equivalent Python entry point is `fwl_io.check_for`, whose `CheckReport.ok` is false when nothing was checked, so a model that matches no dataset can never read as a clean tree. `CheckReport.verified` is the stricter question, false whenever any part of the tree was checked by presence alone.
+
+## fwl-io cache
+
+```bash
+fwl-io cache key   --prefix PREFIX [--provider NAME ...] [--key DOTTED.KEY ...]
+fwl-io cache fetch [--provider NAME ...] [--key DOTTED.KEY ...] [--data-root PATH]
+fwl-io cache check [--provider NAME ...] [--key DOTTED.KEY ...] [--data-root PATH]
+```
+
+Keys, fills and checks the data tree an `actions/cache` entry holds in a CI workflow. All three take the same selection: `--provider` adds every dataset of an installed manifest provider (the entry-point name `fwl-io list` prints in brackets, for example `mors`), sorted by key, and `--key` adds one dataset; both repeat, and the keys follow the providers in the order given. A selection that is empty, names a dataset twice, or names a provider or key no usable manifest declares exits 1.
+
+`key` writes `key=<prefix><sha256>` and `restore-keys=<value>` to the file `GITHUB_OUTPUT` names, or to stdout when it is unset, and prints the key on stderr. The digest covers, per dataset in selection order, its folder below the data root, its extract kind and the checksums its registry pins, plus the fwl-io release (year.month) that lays out the tree, so the key moves when the data or its layout moves and stays put otherwise. The prefix may hold letters, digits, `.`, `_` and `-` only. `restore-keys` is the prefix when every selected dataset resolves into a version folder `r<record-id>`, and empty otherwise, with a line on stderr naming the datasets without one: their files sit at the same path whatever the pin, so a tree restored from an older entry could leave stale files where a reader that trusts presence uses them. A workflow passes both outputs on:
+
+```yaml
+- id: cachekey
+  run: fwl-io cache key --prefix mors-fwl-data- --provider mors
+- uses: actions/cache@v4
+  with:
+    path: ${{ github.workspace }}/fwl_data
+    key: ${{ steps.cachekey.outputs.key }}
+    restore-keys: ${{ steps.cachekey.outputs.restore-keys }}
+- run: fwl-io cache fetch --provider mors --data-root ${{ github.workspace }}/fwl_data
+- run: fwl-io cache check --provider mors --data-root ${{ github.workspace }}/fwl_data
+```
+
+`actions/cache` saves an entry only on an exact-key miss and never saves over one it hit, so `fetch` runs every time: on a complete tree it downloads nothing, and after a restore from an older entry it completes the tree before the save. `check` then reports each dataset as `<folder>: <found>/<expected> files ok` (`present` for an archive dataset, whose members are checked for presence only) and exits 1 when any file is missing or differs; a data root that does not exist exits 1 and is not created.
 
 ## fwl-io relocate
 
