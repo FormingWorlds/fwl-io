@@ -560,6 +560,60 @@ def test_archive_refetch_uses_the_stamp_and_does_not_redownload(http_server, tmp
     assert (tmp_path / VERSIONED / 'm0p1.txt').read_bytes() == b'0.1\n'
 
 
+def test_an_archive_tree_stamped_with_other_checksums_is_fetched_again(http_server, tmp_path):
+    """A tree extracted from another archive under the same record (a restored cache, a
+    re-synced registry) is not current: the new archive is downloaded and extracted."""
+    base_url, root = http_server
+    old = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, old, tmp_path, 'tar').fetch_all()
+    new = _serve_archive(root, 'tracks.tar', [('m0p1.txt', b'0.2\n')], 'tar')
+    assert new != old
+
+    _archive_fetcher(base_url, new, tmp_path, 'tar').fetch_all()
+    assert (tmp_path / VERSIONED / 'm0p1.txt').read_bytes() == b'0.2\n'
+    stamp = json.loads((tmp_path / VERSIONED / '.fwl-io.json').read_text())
+    assert stamp['files'] == new
+
+
+def _stale_archive_tree(http_server, data_root):
+    """Extract an archive under registry A into data_root; serve another archive under the
+    same name and record, and return its registry B and the base URL."""
+    base_url, root = http_server
+    old = _serve_archive(root, 'tracks.tar', ARCHIVE_MEMBERS, 'tar')
+    _archive_fetcher(base_url, old, data_root, 'tar').fetch_all()
+    new = _serve_archive(root, 'tracks.tar', [('m0p1.txt', b'0.2\n')], 'tar')
+    assert new != old
+    return base_url, new
+
+
+def test_an_archive_tree_stamped_with_other_checksums_is_not_fetched(http_server, tmp_path):
+    """A fetcher for another registry under the same record finds no fetched tree."""
+    base_url, new = _stale_archive_tree(http_server, tmp_path)
+    assert not _archive_fetcher(base_url, new, tmp_path, 'tar').is_fetched()
+
+
+def test_the_check_faults_an_archive_tree_stamped_with_other_checksums(http_server, tmp_path):
+    """The check reports that tree as missing for the new registry, not as present."""
+    from fwl_io.check import check_dataset
+
+    base_url, new = _stale_archive_tree(http_server, tmp_path)
+    assert check_dataset(_archive_fetcher(base_url, new, tmp_path, 'tar')).faults
+
+
+def test_a_cached_archive_tree_with_other_checksums_is_not_copied(
+    http_server, tmp_path, monkeypatch
+):
+    """An archive tree in FWL_DATA_CACHE stamped with another registry is not copied into
+    the data root and restamped as current: offline, the fetch fails instead."""
+    cache_root = tmp_path / 'cache'
+    base_url, new = _stale_archive_tree(http_server, cache_root)
+    monkeypatch.setenv('FWL_DATA_CACHE', str(cache_root))
+    data_root = tmp_path / 'data'
+    with pytest.raises(OfflineDataError):
+        _archive_fetcher(base_url, new, data_root, 'tar').fetch_all(offline=True)
+    assert not (data_root / VERSIONED / 'm0p1.txt').exists()
+
+
 def test_archive_offline_serves_extracted_tree_and_errors_when_absent(http_server, tmp_path):
     """Offline mode returns an already-extracted dataset and errors when it is missing."""
     base_url, root = http_server

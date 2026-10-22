@@ -101,6 +101,7 @@ def _write_stamp(fetcher, members, record_id=RECID, zenodo=ZENODO, directory=Non
                 'extract': 'tar',
                 'record_id': record_id,
                 'zenodo': zenodo,
+                'files': dict(fetcher.registry),
                 'members': members,
             }
         )
@@ -614,6 +615,7 @@ def test_a_stamp_written_to_an_unknown_schema_is_not_read(tmp_path):
                 'extract': 'tar',
                 'record_id': RECID,
                 'zenodo': ZENODO,
+                'files': dict(fetcher.registry),
                 'members': ['inner/one.dat'],
             }
         )

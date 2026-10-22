@@ -10,6 +10,7 @@ from fwl_io import (
     check_for, check_dataset,           # validate-only checking
     relocate_all, plan_relocations,         # moving a legacy tree into the current layout
     plan_prune, apply_prune, prune_versions,  # removing unreferenced version directories
+    select_datasets, cache_key, CacheKey,     # actions/cache keys of a data tree
     CheckReport, DatasetCheck, FileCheck,
     resolve_data_root, resolve_cache_root,
     DownloadError, OfflineDataError, MissingDataRootError,
@@ -26,6 +27,7 @@ Per-module reference pages:
 - [Checking](check.md): `check_for`, `check_dataset`, `CheckReport`, `DatasetCheck`, `FileCheck`
 - [Relocating](relocate.md): `relocate_all`, `plan_relocations`, `RelocationReport`, `Relocation`
 - [Pruning](prune.md): `plan_prune`, `apply_prune`, `prune_versions`, `PruneReport`, `PruneCandidate`
+- [Cache keys](cache.md): `select_datasets`, `cache_key`, `CacheKey`
 - [Manifests](manifest.md): `Dataset`, `load_manifest`, `discover_manifests`, `fetch_for`, `ManifestSchemaError`, `ProviderError`, `ErrorKind`
 - [Registries](registry.md): registry file reading and writing
 - [Sync](sync.md): registry generation from the Zenodo API

@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has fourteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has fifteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 
@@ -52,6 +52,32 @@ The report goes to stdout whatever the verdict, so a caller running this to find
 Checking reads and hashes every file a plain dataset declares, so for those the cost is one full pass over the data: on a multi-gigabyte tree, or a shared cluster filesystem, expect it to take as long as reading that data once. An archive dataset costs far less, since its members have no digests to check and are only tested for presence.
 
 Nothing is downloaded and no dataset directory or file is written, which makes this safe to run against a tree another process is reading. Resolving the data root creates that root if it does not exist, as it does for every other subcommand. The equivalent Python entry point is `fwl_io.check_for`, whose `CheckReport.ok` is false when nothing was checked, so a model that matches no dataset can never read as a clean tree. `CheckReport.verified` is the stricter question, false whenever any part of the tree was checked by presence alone.
+
+## fwl-io cache
+
+```bash
+fwl-io cache key   --prefix PREFIX [--provider NAME ...] [--key DOTTED.KEY ...]
+fwl-io cache fetch [--provider NAME ...] [--key DOTTED.KEY ...] [--data-root PATH]
+fwl-io cache check [--provider NAME ...] [--key DOTTED.KEY ...] [--data-root PATH]
+```
+
+Keys, fills and checks the data tree an `actions/cache` entry holds in a CI workflow. All three take the same selection: `--provider` adds every dataset of an installed manifest provider (the entry-point name `fwl-io list` prints in brackets, for example `mors`), sorted by key, and `--key` adds one dataset; both repeat, and their order does not change the key. A selection that is empty, names a dataset twice, or names a provider or key no usable manifest declares exits 1.
+
+`key` writes `key=<prefix><sha256>` and `restore-keys=<value>` to the file `GITHUB_OUTPUT` names, or to stdout when it is unset, and prints the key on stderr. The digest covers, per dataset in folder order, its folder below the data root, its extract kind and the checksums its registry pins, plus the fwl-io release that lays out the tree (the local version part after `+` left out), so the key moves when the data or its layout may have moved and stays put otherwise. The prefix holds 1 to 100 letters, digits, `.`, `_` and `-`, which keeps the key well below the 512 characters `actions/cache` takes; two selections cached in one repository need prefixes of which neither starts the other, or a restore can pick up the other selection's tree. `restore-keys` is the prefix: every manifest dataset has a Zenodo pin and so a version folder `r<record-id>`, a re-pinned dataset lands in a folder an older tree does not hold, and a fetch keeps a restored file only when its checksum matches, or an extracted archive tree only when its stamp records the same registry. Through the Python API (`fwl_io.cache_key`) a `Dataset` built without a Zenodo pin can be passed; its files would sit at the same path whatever the pin, so such a selection gets an empty `restore-keys` and a line on stderr naming the dataset. A workflow passes both outputs on:
+
+```yaml
+- id: cachekey
+  run: fwl-io cache key --prefix mors-fwl-data- --provider mors
+- uses: actions/cache@v4
+  with:
+    path: ${{ github.workspace }}/fwl_data
+    key: ${{ steps.cachekey.outputs.key }}
+    restore-keys: ${{ steps.cachekey.outputs.restore-keys }}
+- run: fwl-io cache fetch --provider mors --data-root ${{ github.workspace }}/fwl_data
+- run: fwl-io cache check --provider mors --data-root ${{ github.workspace }}/fwl_data
+```
+
+`actions/cache` saves an entry only on an exact-key miss and never saves over one it hit, so `fetch` runs every time: on a complete tree it downloads nothing, and after a restore from an older entry it completes the tree before the save. A restored tree keeps the version folders of older pins beside the new ones until `fwl-io prune` removes them. `check` then reports each dataset as `<folder>: <found>/<expected> files ok` (`present` for an archive dataset, whose members are checked for presence only, and `faulty` when a file is missing or differs) and exits 1 on any fault; a data root that does not exist exits 1 and is not created.
 
 ## fwl-io relocate
 
