@@ -368,3 +368,42 @@ def test_the_order_of_the_selection_does_not_move_the_key(providers):
     keys = ['star.tracks.spada_2013', *JANUS_SHARED, 'star.tracks.baraffe_2015']
     forward = cache_key(ck.select_datasets(keys=keys), 'k-')
     assert cache_key(ck.select_datasets(keys=keys[::-1]), 'k-') == forward
+
+
+@pytest.mark.unit
+def test_a_restored_archive_tree_of_another_registry_is_not_accepted(tmp_path):
+    """A tree a prefix restore brought back, stamped under registry A, is fetched, read and
+    checked as complete by a fetcher for A only; for registry B under the same record it is
+    not fetched, has no members and fails the check."""
+    import json
+
+    from fwl_io.check import check_dataset
+    from fwl_io.fetch import _STAMP_SCHEMA, create_fetcher
+
+    def fetcher(digest):
+        return create_fetcher(
+            subdir='g/arc',
+            registry={'a.tar': f'sha256:{digest * 64}'},
+            zenodo='10.5281/zenodo.7',
+            base_urls=['http://127.0.0.1:9/'],
+            data_root=tmp_path,
+            extract='tar',
+        )
+
+    old, new = fetcher('a'), fetcher('b')
+    (old.target_dir / 'm.dat').parent.mkdir(parents=True)
+    (old.target_dir / 'm.dat').write_bytes(b'x')
+    stamp = {
+        'schema': _STAMP_SCHEMA,
+        'subdir': 'g/arc',
+        'zenodo': '10.5281/zenodo.7',
+        'record_id': '7',
+        'extract': 'tar',
+        'files': old.registry,
+        'members': ['m.dat'],
+    }
+    (old.target_dir / '.fwl-io.json').write_text(json.dumps(stamp))
+    assert old.is_fetched() and old.recorded_members() == ['m.dat']
+    assert not check_dataset(old).faults
+    assert not new.is_fetched() and new.recorded_members() is None
+    assert check_dataset(new).faults
