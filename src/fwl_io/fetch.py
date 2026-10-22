@@ -765,8 +765,8 @@ class Fetcher:
         so it is rewritten (healed) rather than trusted forever. It asks less
         than :meth:`_stamp_members`, which also has to agree about the archive
         kind and the member list; both read the file through
-        :meth:`_read_stamp` and test it with :meth:`_stamp_describes`, so
-        neither can accept a stamp the other would have refused.
+        :meth:`_read_stamp` and test it with :meth:`_stamp_describes`, so they
+        agree on the deposit and the registry.
         """
         return self._stamp_describes(self._read_stamp(directory))
 
