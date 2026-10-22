@@ -600,14 +600,12 @@ class Fetcher:
         The single reader for both the dataset's own tree and a copy of it in
         the shared cache. They are held to one standard on purpose: a cache
         stamp is no more trustworthy than a local one, and two readers with
-        their own qualifying rules drift apart.
+        their own qualifying rules drift apart. The stamp must describe this
+        deposit and registry (:meth:`_stamp_describes`, as for
+        :meth:`_stamp_is_current`) and this archive kind.
         """
         record = self._read_stamp(directory)
-        if record is None:
-            return None
-        if record.get('extract') != self.extract:
-            return None
-        if record.get('record_id') != self.record_id or record.get('zenodo') != self.zenodo:
+        if not self._stamp_describes(record) or record.get('extract') != self.extract:
             return None
         members = record.get('members')
         if not isinstance(members, list) or not members:
@@ -751,6 +749,15 @@ class Fetcher:
         log.info('copied dataset from shared cache %s', cache_root)
         return True
 
+    def _stamp_describes(self, record: dict | None) -> bool:
+        """True when a stamp record names this record id, DOI and registry checksums."""
+        return (
+            record is not None
+            and record.get('record_id') == self.record_id
+            and record.get('zenodo') == self.zenodo
+            and record.get('files') == self.registry
+        )
+
     def _stamp_is_current(self, directory: Path) -> bool:
         """True when a valid stamp for this exact record id and registry already exists.
 
@@ -758,17 +765,10 @@ class Fetcher:
         so it is rewritten (healed) rather than trusted forever. It asks less
         than :meth:`_stamp_members`, which also has to agree about the archive
         kind and the member list; both read the file through
-        :meth:`_read_stamp`, so neither can be broken by a stamp the other
-        would have refused.
+        :meth:`_read_stamp` and test it with :meth:`_stamp_describes`, so
+        neither can accept a stamp the other would have refused.
         """
-        existing = self._read_stamp(directory)
-        if existing is None:
-            return False
-        return (
-            existing.get('record_id') == self.record_id
-            and existing.get('zenodo') == self.zenodo
-            and existing.get('files') == self.registry
-        )
+        return self._stamp_describes(self._read_stamp(directory))
 
     def _write_stamp(self) -> None:
         """Write a self-describing provenance stamp into the version directory.

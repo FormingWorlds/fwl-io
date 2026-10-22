@@ -375,6 +375,7 @@ def test_check_exits_zero_and_says_which_verdict_it_reached(tmp_path, capsys, mo
                 'extract': 'tar',
                 'record_id': '7654321',
                 'zenodo': '10.5281/zenodo.7654321',
+                'files': {'bundle.tar': 'sha256:' + 'a' * 64},
                 'members': ['inner.dat'],
             }
         )
