@@ -225,3 +225,22 @@ def test_check_never_creates_the_data_root(providers, tmp_path, capsys):
     assert main(['cache', 'check', '--provider', 'mors', '--data-root', str(root)]) == 1
     assert not root.exists()
     assert 'does not exist' in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_an_empty_selection_has_no_key():
+    """A key over no dataset would be the digest of the release line alone, shared by
+    every empty selection, so it is refused."""
+    with pytest.raises(ValueError, match='no dataset selected'):
+        cache_key([], 'k-')
+
+
+@pytest.mark.integration
+def test_the_key_command_prints_both_lines_without_github_output(providers, monkeypatch, capsys):
+    """Outside a workflow the two output lines go to stdout and the key to stderr."""
+    monkeypatch.delenv('GITHUB_OUTPUT', raising=False)
+    assert main(['cache', 'key', '--prefix', 'k-', '--key', 'star.tracks.spada_2013']) == 0
+    out, err = capsys.readouterr()
+    key, restore = out.splitlines()
+    assert key.startswith('key=k-') and restore == 'restore-keys=k-'
+    assert f'Cache key: {key[4:]}' in err
