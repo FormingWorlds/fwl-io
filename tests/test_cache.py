@@ -243,11 +243,12 @@ def test_check_never_creates_the_data_root(providers, tmp_path, capsys):
 
 
 @pytest.mark.unit
-def test_an_empty_selection_has_no_key():
+@pytest.mark.parametrize('empty', [[], iter(())], ids=['list', 'iterator'])
+def test_an_empty_selection_has_no_key(empty):
     """A key over no dataset would be the digest of the release line alone, shared by
-    every empty selection, so it is refused."""
+    every empty selection, so it is refused, also when it comes as an iterator."""
     with pytest.raises(ValueError, match='no dataset selected'):
-        cache_key([], 'k-')
+        cache_key(empty, 'k-')
 
 
 @pytest.mark.integration
