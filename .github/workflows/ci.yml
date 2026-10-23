@@ -43,3 +43,5 @@ jobs:
         run: |
           ruff check src tests
           ruff format --check src tests
+      - name: Check agent instruction files
+        run: python tools/agents/check_agents_md.py
