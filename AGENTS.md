@@ -2,8 +2,8 @@
 
 fwl-io downloads, verifies and places the reference data of the PROTEUS ecosystem: manifests declare the datasets, committed registries hold their checksums, and files come from Zenodo with a DataverseNL mirror as fallback. It holds no physics. Before a first edit:
 
-- Run every command from the repository root. Tests for `src/fwl_io/<file>.py` go in `tests/test_<file>.py` where that file exists (`doi.py`, `fs_guard.py` and `transient.py` are tested through their callers); the test rules are in `tests/AGENTS.md`.
-- These commands decide whether a change is ready (CI runs the tests on Python 3.11 to 3.14 and macOS, and the lint job; Python uses single quotes and lines up to 100 characters, as `pyproject.toml` sets for ruff):
+- Run every command from the repository root. Tests for `src/fwl_io/<file>.py` go in `tests/test_<file>.py` where that file exists; `doi.py`, `fs_guard.py` and `transient.py` have none, and their tests are in `test_sync.py`, `test_prune.py` and `test_fetch.py`; the test rules are in `tests/AGENTS.md`.
+- These commands decide whether a change is ready (CI runs the tests on Python 3.11 to 3.14 and macOS, and the lint job):
 
 ```bash
 pip install -e ".[develop]"
@@ -13,7 +13,7 @@ ruff format --check src tests
 python tools/agents/check_agents_md.py
 ```
 
-One test file: `pytest tests/test_registry.py -q`. A pull request that changes `shared_manifest.toml`, `sync.py` or `test_live.py` also runs one live test (`community.yaml`): every record of the shared manifest must be in a Zenodo community. The weekly nightly runs `pytest -m slow` (live Zenodo reads) and `fwl-io check-mirrors` (live DataverseNL pins); run them by hand only when a change touches those paths, and not in a loop. Docs: `pip install -e ".[docs]"`, then `zensical build --clean`.
+One test file: `pytest tests/test_registry.py -q`. A pull request that changes `shared_manifest.toml`, `sync.py`, `test_live.py` or `community.yaml` also runs one live test (`community.yaml`): every record of the shared manifest must be in a Zenodo community. The weekly nightly runs `pytest -m slow` (live Zenodo reads) and `fwl-io check-mirrors` (live DataverseNL pins); run them by hand only when a change touches those paths, and not in a loop. Docs: `pip install -e ".[docs]"`, then `zensical build --clean`.
 
 <!-- fwl-core:begin sha256=1adfa510a4f117ec -->
 ## PROTEUS ecosystem rules
@@ -74,11 +74,13 @@ The command `fwl-io` (`cli.py`, entry point `fwl_io.cli:main`) covers each opera
 - A registry holds one `<name> <algorithm>:<hash>` line per file (`md5:` as Zenodo reports it, or `sha256:`). It is written by `fwl-io sync <manifest>` and committed with the manifest change; never edit it by hand. The checksums always come from the Zenodo record.
 - Manifests name Zenodo version DOIs only, never a concept DOI. Zenodo is required; a `dataverse` line adds a mirror that holds byte-identical copies.
 - `FWL_DATA` is required (or `data_root` in code, `--data-root` on the command line); there is no default location. `FWL_DATA_CACHE` is a read-only copy, searched after the data root and before any download, and never written. `FWL_IO_OFFLINE=1` makes a fetch raise an error in place of a download; the other commands (`sync`, the `mirror` commands, `check-mirrors`, `mirror-status`, `latest`) do not read it.
-- A fetch resolves each file in this order: the data root with a matching checksum, the shared cache, an error in offline mode, then a download from Zenodo and then the mirror. Each file and each extracted archive tree is placed atomically, so no file is partial; `fetch_all` writes the `.fwl-io.json` stamp last, so a version directory without the stamp can be incomplete.
+- A fetch resolves each file in this order: the data root with a matching checksum, the shared cache, an error in offline mode, then a download from Zenodo and then the mirror. Each file is replaced atomically, and an archive tree is staged and then moved in; `fetch_all` writes the `.fwl-io.json` stamp last, so a per-file version directory without the stamp can be incomplete. For an `extract` dataset the data-root test is the current stamp plus every recorded member, not a checksum.
+- A dataset lives at `<data_root>/<key-as-path>/r<record-id>`, so a new deposit lands beside the old one. `.fwl-io-locks` and `.fwl-io-staging` under the data root are reserved. A model's own manifest keeps its registries next to it in that model's repository.
 - Raising `manifest_schema` breaks every manifest that declares the old number; do it only with a change that old manifests cannot load.
-- `mirror`, `mirror-publish` and `mirror-sync` write to DataverseNL and change a public service, and so do the workflows `mirror.yaml`, `mirror-publish.yaml` and `mirror-sync.yaml` that run them: run or dispatch them only when the task says so. `mirror --dry-run` needs no token; `mirror-sync` needs `DATAVERSE_TOKEN` even with `--dry-run`; `mirror-publish` has no dry run. `mirror-pin` (and `mirror-pin.yaml`) writes the pin into a manifest, by default the shared one.
-- `fwl-io prune` is a dry run unless `--delete` is given, and `--delete` asks for a confirmation unless `--yes` is given; `--include-orphans` also removes directories that no installed manifest knows. `fwl-io relocate --dry-run` reports without a move.
-- The workflows read the exit codes and output lines of `check-mirrors` (`nightly.yml`), `mirror-status` (`mirror-sync.yaml`, weekly) and `latest` (`latest-paleos.yaml`, daily); change these only together with the workflow.
+- `mirror`, `mirror-publish` and `mirror-sync` write to DataverseNL and change a public service, and so do the workflows `mirror.yaml`, `mirror-publish.yaml` and a `mirror-sync.yaml` dispatch with `dry_run` false: run or dispatch them only when the task says so. `mirror` publishes unless `--no-publish` is given; `mirror-sync` and `mirror --into` never publish. `mirror --dry-run` needs no token; `mirror-sync` needs `DATAVERSE_TOKEN` even with `--dry-run`; `mirror-publish` has no dry run. `mirror-pin` writes the pin into a manifest, by default the shared one; `mirror-pin.yaml` commits it and pushes a `tl/pin-*` branch to this repository.
+- `fwl-io prune` is a dry run unless `--delete` is given, and `--delete` asks for a confirmation unless `--yes` is given; `--include-orphans` also removes stamped version directories under a subdirectory that no installed manifest knows, and refuses an empty reference set without `--allow-empty-reference-set`; on a shared data tree such a directory can be the data of another environment. `fwl-io relocate --dry-run` reports without a move.
+- The workflows read exit codes: `check-mirrors` 1, 3 and 4 and its `UNREACHABLE` lines (`nightly.yml`), `mirror-status` 3 and 5 and `mirror-sync` 3 (`mirror-sync.yaml`), `latest` 3, 4 and 5 (`latest-paleos.yaml`, daily); change these only together with the workflow.
+- Python uses single quotes and lines up to 100 characters (`pyproject.toml`, ruff).
 - Consumers: PROTEUS (`src/proteus/utils/data.py` and others), MORS, Zalmoxis, JANUS and ZEPHYRUS read data through fwl-io, and several register their own manifests under `fwl_io.manifests`. A change to the manifest schema, the registry format, the data layout or a command breaks them; name the affected repositories in the pull request.
 - Releases are CalVer tags on `main`, `YY.MM.DD`, with `.N` for a second release on one day; setuptools-scm derives the version from the tag, and publishing a GitHub release runs the PyPI upload (`publish.yaml`).
 
