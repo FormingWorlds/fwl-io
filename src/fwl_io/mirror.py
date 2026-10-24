@@ -1135,7 +1135,10 @@ def mirror_to_dataverse(
         propagated from ``fetch_zenodo_record`` before any Dataverse write.
         (Dataverse-side request failures, including an unparseable response body,
         are wrapped as DataverseError.)
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'mirroring {zenodo_doi}')
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
     # The subject is validated by the server when the dataset is created: an
@@ -1395,7 +1398,10 @@ def publish_existing_dataverse_draft(
         If the dataset is not RELEASED after the wait that follows the publish
         request, or every attempt got the bot-check page or a 429; check the
         dataset's state before trying again.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'publishing {persistent_id}')
     if version_type not in ('major', 'minor'):
         raise ValueError(
             f"{version_type!r} is not a valid Dataverse version type: use 'major' or 'minor'"

@@ -178,7 +178,7 @@ def mirror_sync(
     OfflineModeError
         If ``FWL_IO_OFFLINE`` is set.
     """
-    require_online('creating mirror drafts')
+    require_online(f'the mirror sync of {collection}')
     discovery = _discover_all()
     if discovery.errors:
         return manifest_lines(discovery.errors), 1
@@ -329,7 +329,13 @@ def mirror_pin(
     tuple
         The report lines, and the exit code: 0 when every dataset of the record is served,
         1 otherwise.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'pinning {persistent_id}')
     pin = persistent_id.removeprefix('doi:')
     client = client or DataverseClient(dataverse_server(pin), '')
     body = client._retry(
