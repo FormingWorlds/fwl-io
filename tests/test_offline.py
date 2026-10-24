@@ -144,6 +144,16 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
     _assert_refused(call, blocked_net, subject)
 
 
+def test_a_known_dataverse_prefix_resolves_in_offline_mode(blocked_net):
+    """A DOI under a prefix in DATAVERSE_SERVERS names its server with no lookup."""
+    try:
+        server = pins.dataverse_server('doi:10.34894/ZGZA6I')
+    except Exception as exc:
+        pytest.fail(f'a known prefix raised {exc!r}')
+    assert server == 'https://dataverse.nl'
+    assert blocked_net == []
+
+
 @pytest.mark.parametrize(
     'argv',
     [
