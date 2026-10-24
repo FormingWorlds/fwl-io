@@ -78,11 +78,12 @@ def _manifest(tmp_path):
     return path
 
 
-def _assert_refused(call, calls):
-    """Call ``call`` and require the offline refusal before any socket call."""
+def _assert_refused(call, calls, subject):
+    """Call ``call`` and require the offline refusal naming ``subject`` before any socket call."""
     with pytest.raises(Exception) as info:  # another type fails the assert below
         call()
-    assert info.type is fwl_io.OfflineModeError and REFUSAL in str(info.value), repr(info.value)
+    refusal = f'{subject} {REFUSAL}'
+    assert info.type is fwl_io.OfflineModeError and refusal in str(info.value), repr(info.value)
     assert calls == []
 
 
@@ -111,17 +112,36 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
     """Each function that opens a connection refuses before it, naming the variable."""
     client = mirror.DataverseClient('https://dataverse.example', '')
     calls = {
-        'fetch_zenodo_record': lambda: sync.fetch_zenodo_record(ZENODO_DOI),
-        'latest_record_id': lambda: mirror_status.latest_record_id('15727899'),
-        'dataverse_server': lambda: pins.dataverse_server('10.9999/not-a-known-prefix'),
-        'zenodo_record_rights': lambda: mirror._zenodo_record_rights('15727899', sync.ZENODO_API),
-        'dataverse_request': lambda: client._request('GET', '/api/info/version'),
-        'dataverse_download': lambda: mirror_sync._download(client, 1),
-        'mirror_status': lambda: mirror_status.mirror_status(datasets=[]),
-        'newer_versions': lambda: mirror_status.newer_versions(datasets=[]),
-        'check_mirrors': lambda: pins.check_mirrors(datasets=[]),
+        'fetch_zenodo_record': (
+            lambda: sync.fetch_zenodo_record(ZENODO_DOI),
+            'reading Zenodo record 15727899',
+        ),
+        'latest_record_id': (
+            lambda: mirror_status.latest_record_id('15727899'),
+            'reading the newest version of Zenodo record 15727899',
+        ),
+        'dataverse_server': (
+            lambda: pins.dataverse_server('10.9999/not-a-known-prefix'),
+            'the doi.org lookup of doi:10.9999/not-a-known-prefix',
+        ),
+        'zenodo_record_rights': (
+            lambda: mirror._zenodo_record_rights('15727899', sync.ZENODO_API),
+            'reading the license of Zenodo record 15727899',
+        ),
+        'dataverse_request': (
+            lambda: client._request('GET', '/api/info/version'),
+            'Dataverse GET /api/info/version',
+        ),
+        'dataverse_download': (
+            lambda: mirror_sync._download(client, 1),
+            'downloading Dataverse file 1',
+        ),
+        'mirror_status': (lambda: mirror_status.mirror_status(datasets=[]), 'mirror-status'),
+        'newer_versions': (lambda: mirror_status.newer_versions(datasets=[]), 'latest'),
+        'check_mirrors': (lambda: pins.check_mirrors(datasets=[]), 'check-mirrors'),
     }
-    _assert_refused(calls[name], blocked_net)
+    call, subject = calls[name]
+    _assert_refused(call, blocked_net, subject)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +149,7 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
     [
         ['sync', 'MANIFEST'],
         ['mirror', ZENODO_DOI, '--collection', 'c', '--no-publish'],
+        ['mirror', ZENODO_DOI, '--collection', 'c', '--dry-run'],
         ['mirror-publish', 'doi:10.34894/ZGZA6I'],
         ['mirror-sync', '--collection', 'c', '--dry-run'],
         ['mirror-pin', 'doi:10.34894/ZGZA6I', '--manifest', 'MANIFEST'],
@@ -136,7 +157,7 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
         ['mirror-status'],
         ['latest'],
     ],
-    ids=lambda argv: argv[0],
+    ids=lambda argv: '-'.join(a for a in argv if not a.startswith(('10.', 'doi:'))),
 )
 @pytest.mark.parametrize('setup', ['plain', 'no-token', 'broken-provider'])
 def test_maintainer_commands_exit_1_with_the_refusal(
@@ -164,48 +185,58 @@ def test_sync_of_an_empty_manifest_is_refused(blocked_net, tmp_path, capsys):
     empty.write_text('')
     assert main(['sync', str(empty)]) == 1
     assert f'the sync command {REFUSAL}' in capsys.readouterr().err
-    _assert_refused(lambda: sync.sync_manifest(empty), blocked_net)
+    _assert_refused(lambda: sync.sync_manifest(empty), blocked_net, f'syncing {empty}')
 
 
 def test_library_entry_points_refuse_with_the_error_type(blocked_net, tmp_path, monkeypatch):
     """sync_manifest and mirror_sync raise OfflineModeError, not an aggregate or a FAIL line."""
-    _assert_refused(lambda: sync.sync_manifest(_manifest(tmp_path)), blocked_net)
+    manifest = _manifest(tmp_path)
+    _assert_refused(lambda: sync.sync_manifest(manifest), blocked_net, f'syncing {manifest}')
     eps = [SimpleNamespace(name='broken', load=_broken)]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
     options = {'dataverse_url': 'https://dataverse.example', 'token': 't'}
     options.update(contact_name='n', contact_email='e@example.org', dry_run=True)
-    _assert_refused(lambda: mirror_sync.mirror_sync('c', **options), blocked_net)
+    _assert_refused(
+        lambda: mirror_sync.mirror_sync('c', **options), blocked_net, 'the mirror sync of c'
+    )
 
 
-class _UnpublishedClient:
-    def _retry(self, call, what):
-        return {'data': {'latestVersion': {'versionState': 'DRAFT'}}}
+def _unused(*args):
+    raise AssertionError('the client was used in offline mode')
 
 
 @pytest.mark.parametrize('name', ['mirror_pin', 'mirror_to_dataverse', 'publish_draft'])
 def test_mirror_entry_points_refuse_before_their_checks(blocked_net, name):
     """A pin with its own client, a mirror without an email and a bad publish all refuse."""
+    client = SimpleNamespace(_retry=_unused, _request=_unused)
     calls = {
-        'mirror_pin': lambda: mirror_sync.mirror_pin(
-            'doi:10.34894/ZGZA6I', client=_UnpublishedClient()
+        'mirror_pin': (
+            lambda: mirror_sync.mirror_pin('doi:10.34894/ZGZA6I', client=client),
+            'pinning doi:10.34894/ZGZA6I',
         ),
-        'mirror_to_dataverse': lambda: mirror.mirror_to_dataverse(
-            ZENODO_DOI,
-            dataverse_url='https://dataverse.example',
-            collection='c',
-            token='t',
-            contact_name='n',
-            contact_email='',
-            publish=False,
+        'mirror_to_dataverse': (
+            lambda: mirror.mirror_to_dataverse(
+                ZENODO_DOI,
+                dataverse_url='https://dataverse.example',
+                collection='c',
+                token='t',
+                contact_name='n',
+                contact_email='',
+            ),
+            f'mirroring {ZENODO_DOI}',
         ),
-        'publish_draft': lambda: mirror.publish_existing_dataverse_draft(
-            'doi:10.34894/ZGZA6I',
-            dataverse_url='https://dataverse.example',
-            token='t',
-            version_type='patch',
+        'publish_draft': (
+            lambda: mirror.publish_existing_dataverse_draft(
+                'doi:10.34894/ZGZA6I',
+                dataverse_url='https://dataverse.example',
+                token='t',
+                version_type='patch',
+            ),
+            'publishing doi:10.34894/ZGZA6I',
         ),
     }
-    _assert_refused(calls[name], blocked_net)
+    call, subject = calls[name]
+    _assert_refused(call, blocked_net, subject)
 
 
 def test_cli_and_texts_list_the_same_network_commands():
@@ -231,6 +262,8 @@ def test_cli_and_texts_list_the_same_network_commands():
         (['cache', 'check', '--key', 'g.demo'], 'g/demo/r15727899: 1/1 files ok'),
         (['relocate', '--dry-run'], 'no dataset declares a legacy location'),
         (['prune'], '1 referenced kept'),
+        (['fetch', 'demo'], 'g.demo: 1 file(s)'),
+        (['cache', 'fetch', '--key', 'g.demo'], 'g/demo/r15727899: fetched'),
     ],
     ids=lambda v: '-'.join(v) if isinstance(v, list) else None,
 )
