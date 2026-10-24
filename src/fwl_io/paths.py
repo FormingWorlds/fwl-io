@@ -16,9 +16,11 @@ tree (for example a group-shared directory on a cluster). It is searched
 before any download is attempted and is never written to.
 
 ``FWL_IO_OFFLINE`` disables all network access when set to a truthy value
-(``1``, ``true``, ``yes``, ``on``). In offline mode a missing or corrupt file
-raises ``OfflineDataError`` instead of triggering a download, and a command
-that needs the network (sync, mirror, mirror-publish, mirror-sync, mirror-pin,
+(``1``, ``true``, ``yes``, ``on``). In offline mode a file fetch
+(``Fetcher.fetch``, ``Fetcher.fetch_all``) raises ``OfflineDataError`` for a
+missing or corrupt data file instead of a download, a model fetch (``fetch_for``,
+``fwl-io fetch <model>``) reports each failed dataset in one ``RuntimeError``,
+and a command that needs the network (sync, mirror, mirror-publish, mirror-sync, mirror-pin,
 check-mirrors, mirror-status, latest) raises :class:`OfflineModeError` before
 it connects.
 """

@@ -16,6 +16,7 @@ from fwl_io import (
     DownloadError, OfflineDataError, OfflineModeError, MissingDataRootError,
     ManifestSchemaError,
     ProviderError, ErrorKind,           # why a manifest was left out of a report
+    __version__,                        # the installed version
 )
 ```
 
