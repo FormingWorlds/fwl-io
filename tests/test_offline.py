@@ -40,6 +40,11 @@ TEXTS = (
     'src/fwl_io/paths.py',
 )
 ROOT = Path(__file__).resolve().parents[1]
+DATA_CLAUSE = (
+    'a file fetch (`Fetcher.fetch`, `Fetcher.fetch_all`) raises `OfflineDataError` for a missing'
+    ' or corrupt data file instead of a download, a model fetch (`fetch_for`,'
+    ' `fwl-io fetch <model>`) reports each failed dataset in one `RuntimeError`,'
+)
 
 
 def _broken():
@@ -263,6 +268,60 @@ def test_cli_and_texts_list_the_same_network_commands():
             assert re.findall(r'[a-z-]+', found) == list(NETWORK_COMMANDS), name
 
 
+def test_texts_name_the_error_of_each_fetch_route():
+    """Every text that documents offline mode gives the same error for each fetch route."""
+    for name in TEXTS:
+        if name == 'docs/Reference/cli.md':
+            continue
+        text = re.sub(r'\s+', ' ', (ROOT / name).read_text()).replace('``', '`')
+        assert text.count(DATA_CLAUSE) == (2 if name == 'README.md' else 1), name
+
+
+def test_the_api_index_lists_every_public_name():
+    """docs/Reference/api/index.md names every entry of fwl_io.__all__."""
+    text = (ROOT / 'docs' / 'Reference' / 'api' / 'index.md').read_text()
+    missing = [n for n in fwl_io.__all__ if not re.search(rf'\b{re.escape(n)}\b', text)]
+    assert missing == []
+
+
+def _demo_provider(tmp_path, monkeypatch):
+    """Install one manifest provider for the model demo, with a one-file registry."""
+    body = b'offline payload\n'
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[g.demo]\nzenodo = "{ZENODO_DOI}"\nrequired_by = ["demo"]\n')
+    digest = hashlib.sha256(body).hexdigest()
+    (tmp_path / 'g.demo.registry.txt').write_text(f'a.txt sha256:{digest}\n')
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points',
+        lambda group: [SimpleNamespace(name='demo', load=lambda: lambda: manifest)],
+    )
+    return body
+
+
+def test_each_fetch_route_raises_its_documented_error(blocked_net, tmp_path, monkeypatch):
+    """Offline with an empty tree, a file fetch raises OfflineDataError and a model fetch one
+    RuntimeError that names the dataset."""
+    _demo_provider(tmp_path, monkeypatch)
+    with pytest.raises(Exception) as info:  # another type fails the assert below
+        fetcher_for_key('g.demo', tmp_path / 'data').fetch_all()
+    assert info.type is fwl_io.OfflineDataError, repr(info.value)
+    with pytest.raises(Exception) as info:  # another type fails the assert below
+        fwl_io.fetch_for('demo', tmp_path / 'data')
+    assert info.type is RuntimeError and 'g.demo: ' in str(info.value), repr(info.value)
+    assert blocked_net == []
+
+
+def test_a_dry_run_mirror_refuses_in_offline_mode(blocked_net):
+    """mirror_to_dataverse refuses in offline mode with dry_run too."""
+    options = {'dataverse_url': 'https://dataverse.example', 'collection': 'c', 'token': 't'}
+    options.update(contact_name='n', contact_email='e@example.org', dry_run=True)
+    _assert_refused(
+        lambda: mirror.mirror_to_dataverse(ZENODO_DOI, **options),
+        blocked_net,
+        f'mirroring {ZENODO_DOI}',
+    )
+
+
 @pytest.mark.parametrize(
     ('argv', 'expected'),
     [
@@ -281,15 +340,7 @@ def test_local_commands_still_run_in_offline_mode(
     blocked_net, tmp_path, capsys, monkeypatch, argv, expected
 ):
     """Commands that only read a populated tree exit 0 in offline mode and open no socket."""
-    body = b'offline payload\n'
-    manifest = tmp_path / 'manifest.toml'
-    manifest.write_text(f'[g.demo]\nzenodo = "{ZENODO_DOI}"\nrequired_by = ["demo"]\n')
-    digest = hashlib.sha256(body).hexdigest()
-    (tmp_path / 'g.demo.registry.txt').write_text(f'a.txt sha256:{digest}\n')
-    monkeypatch.setattr(
-        'fwl_io.manifest.entry_points',
-        lambda group: [SimpleNamespace(name='demo', load=lambda: lambda: manifest)],
-    )
+    body = _demo_provider(tmp_path, monkeypatch)
     target = tmp_path / 'data' / 'g' / 'demo' / 'r15727899'
     target.mkdir(parents=True)
     (target / 'a.txt').write_bytes(body)
