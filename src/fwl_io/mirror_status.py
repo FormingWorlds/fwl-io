@@ -113,6 +113,11 @@ def mirror_status(
     -------
     StatusReport
         A dataset can be both unpinned and stale.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
     require_online('mirror-status')
     report, latest, community = StatusReport(), latest or latest_record_id, community or accepted
@@ -175,6 +180,11 @@ def newer_versions(
     StatusReport
         Only ``ok``, ``stale``, ``unreadable``, ``gone`` and ``manifest_errors`` are filled;
         :func:`latest_exit_code` gives its exit status.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
     require_online('latest')
     report, latest = StatusReport(), latest or latest_record_id

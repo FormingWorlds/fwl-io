@@ -317,6 +317,11 @@ def check_mirrors(
     MirrorReport
         Passed, failed and unreachable pins (with the reason), unpinned dataset keys, and a
         warning per pin whose read recovered from a certificate error.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
     require_online('check-mirrors')
     report = MirrorReport()
