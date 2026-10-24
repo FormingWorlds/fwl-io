@@ -10,7 +10,7 @@ Set
 export FWL_IO_OFFLINE=1
 ```
 
-and fwl-io never touches the network: files resolve from the local tree (and the shared cache, below) or fail with an error naming the missing file and the resolved data root. Populate `FWL_DATA` from a login node or a transfer job before submitting.
+and fwl-io forbids all network access: files resolve from the local tree (and the shared cache, below), a missing or corrupt data file raises `OfflineDataError` instead of a download, and a command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) raises `OfflineModeError` before it connects. The `OfflineDataError` message names the missing file and the resolved data root. Populate `FWL_DATA` from a login node or a transfer job before submitting.
 
 ## Read-only group cache
 

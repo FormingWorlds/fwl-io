@@ -45,4 +45,4 @@ fwl-io fetch mors    # fetch everything MORS requires
 
 ## Offline machines
 
-Set `FWL_IO_OFFLINE=1` to forbid all network access; files then resolve from the local tree or fail with an actionable error. On clusters, point `FWL_DATA_CACHE` at a read-only, pre-populated group share and fwl-io copies from it instead of downloading. See [Run on clusters](How-to/clusters.md).
+Set `FWL_IO_OFFLINE=1` to forbid all network access: files resolve from the local tree, a missing or corrupt data file raises `OfflineDataError` instead of a download, and a command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) raises `OfflineModeError` before it connects. On clusters, point `FWL_DATA_CACHE` at a read-only, pre-populated group share and fwl-io copies from it instead of downloading. See [Run on clusters](How-to/clusters.md).

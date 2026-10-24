@@ -37,6 +37,7 @@ from pathlib import Path
 
 import requests
 
+from fwl_io.paths import require_online
 from fwl_io.sync import (
     ZENODO_API,
     ZENODO_COMMUNITIES,
@@ -269,6 +270,7 @@ def _zenodo_record_rights(recid: str, api_base: str) -> dict:
     ValueError
         If the record lists no license or more than one.
     """
+    require_online(f'reading the license of Zenodo record {recid}')
     response = requests.get(
         f'{api_base}/{recid}',
         headers={'Accept': 'application/vnd.inveniordm.v1+json'},
@@ -396,6 +398,7 @@ class DataverseClient:
             fails to parse as JSON or parses to something other than a JSON
             object.
         """
+        require_online(f'Dataverse {method} {path}')
         try:
             response = requests.request(
                 method,

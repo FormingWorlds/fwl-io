@@ -1,6 +1,6 @@
 # CLI reference
 
-The `fwl-io` command has fifteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
+The `fwl-io` command has fifteen subcommands. Failures are reported as concise messages on stderr (never a traceback) and exit with status 1; success exits 0. `check-mirrors`, `latest`, `mirror-status` and `mirror-sync` have further exit codes, which their sections give. With `FWL_IO_OFFLINE` set, every command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) exits 1 with the offline message before it connects. `sync` and `fetch <model>` aggregate per-dataset failures into a multi-line report, and a download failure lists every mirror attempt.
 
 ## fwl-io sync
 

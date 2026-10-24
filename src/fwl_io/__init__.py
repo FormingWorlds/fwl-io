@@ -21,7 +21,12 @@ from fwl_io.manifest import (
     fetch_for,
     load_manifest,
 )
-from fwl_io.paths import MissingDataRootError, resolve_cache_root, resolve_data_root
+from fwl_io.paths import (
+    MissingDataRootError,
+    OfflineModeError,
+    resolve_cache_root,
+    resolve_data_root,
+)
 from fwl_io.prune import (
     PruneCandidate,
     PruneReport,
@@ -48,6 +53,7 @@ __all__ = [
     'ManifestSchemaError',
     'MissingDataRootError',
     'OfflineDataError',
+    'OfflineModeError',
     'ProviderError',
     'PruneCandidate',
     'PruneReport',

@@ -17,7 +17,9 @@ before any download is attempted and is never written to.
 
 ``FWL_IO_OFFLINE`` disables all network access when set to a truthy value
 (``1``, ``true``, ``yes``, ``on``). In offline mode a missing or corrupt file
-raises an error instead of triggering a download.
+raises ``OfflineDataError`` instead of triggering a download, and a command
+that needs the network (sync, the mirror commands, check-mirrors,
+mirror-status, latest) raises :class:`OfflineModeError` before it connects.
 """
 
 from __future__ import annotations
@@ -30,6 +32,10 @@ _TRUTHY = frozenset({'1', 'true', 'yes', 'on'})
 
 class MissingDataRootError(RuntimeError):
     """No data root is configured: FWL_DATA is unset and no path was given."""
+
+
+class OfflineModeError(RuntimeError):
+    """An operation needs the network while offline mode is active."""
 
 
 def resolve_data_root(explicit: str | Path | None = None, *, create: bool = True) -> Path:
@@ -101,3 +107,11 @@ def resolve_cache_root() -> Path | None:
 def is_offline() -> bool:
     """Return True when ``FWL_IO_OFFLINE`` requests fully offline operation."""
     return os.environ.get('FWL_IO_OFFLINE', '').strip().lower() in _TRUTHY
+
+
+def require_online(what: str) -> None:
+    """Raise :class:`OfflineModeError` naming ``what`` when offline mode is active."""
+    if is_offline():
+        raise OfflineModeError(
+            f'{what} needs the network and offline mode is active; unset FWL_IO_OFFLINE'
+        )

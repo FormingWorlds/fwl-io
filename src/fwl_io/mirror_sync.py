@@ -28,6 +28,7 @@ from fwl_io.mirror import (
     source_record,
 )
 from fwl_io.mirror_status import mirror_status
+from fwl_io.paths import require_online
 from fwl_io.pins import Unreachable, dataverse_server, manifest_lines, pin_problem
 from fwl_io.sync import ZENODO_API, fetch_zenodo_registry, select_files
 
@@ -69,6 +70,7 @@ def collection_mirrors(
 def _download(client: DataverseClient, file_id) -> requests.Response:
     """Open the download of a Dataverse file. The token goes to the Dataverse server only: a
     redirect (DataverseNL answers with a signed storage URL) is followed without it."""
+    require_online(f'downloading Dataverse file {file_id}')
     url = f'{client.base_url}/api/access/datafile/{file_id}'
     options = {'stream': True, 'timeout': client.timeout}
     response = requests.get(url, headers=client._headers, allow_redirects=False, **options)
