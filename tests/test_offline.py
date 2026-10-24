@@ -1,20 +1,53 @@
 """Offline mode refuses every network call: data fetches and the maintainer commands."""
 
 import hashlib
+import re
 import socket
 import time
+from pathlib import Path
 
 import pytest
 
 import fwl_io
-from fwl_io import mirror, mirror_status, mirror_sync, paths, pins, sync
+from fwl_io import cli, mirror, mirror_status, mirror_sync, paths, pins, sync
 from fwl_io.cli import main
 from fwl_io.fetch import create_fetcher
+from fwl_io.manifest import fetcher_for_key
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
 
 REFUSAL = 'needs the network and offline mode is active; unset FWL_IO_OFFLINE'
 ZENODO_DOI = '10.5281/zenodo.15727899'
+NETWORK_COMMANDS = (
+    'sync',
+    'mirror',
+    'mirror-publish',
+    'mirror-sync',
+    'mirror-pin',
+    'check-mirrors',
+    'mirror-status',
+    'latest',
+)
+TEXTS = (
+    'AGENTS.md',
+    'README.md',
+    'docs/Explanations/design.md',
+    'docs/How-to/clusters.md',
+    'docs/Reference/cli.md',
+    'docs/Reference/environment.md',
+    'docs/getting_started.md',
+    'src/fwl_io/paths.py',
+)
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class _EP:
+    def __init__(self, name, load):
+        self.name, self.load = name, load
+
+
+def _broken():
+    raise RuntimeError('provider failed to import')
 
 
 @pytest.fixture()
@@ -39,6 +72,7 @@ def blocked_net(monkeypatch, tmp_path):
     (tmp_path / 'data').mkdir()
     monkeypatch.setenv('FWL_DATA', str(tmp_path / 'data'))
     monkeypatch.setenv('DATAVERSE_TOKEN', 'test-token')
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: [])
     return calls
 
 
@@ -110,34 +144,95 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
     ],
     ids=lambda argv: argv[0],
 )
-def test_maintainer_commands_exit_1_with_the_refusal(blocked_net, tmp_path, capsys, argv):
-    """A maintainer command exits 1 with the refusal, never 3 or 4, and opens no socket."""
+@pytest.mark.parametrize('setup', ['plain', 'no-token', 'broken-provider'])
+def test_maintainer_commands_exit_1_with_the_refusal(
+    blocked_net, tmp_path, capsys, monkeypatch, argv, setup
+):
+    """A maintainer command exits 1 with a refusal naming it, before any other check."""
+    if setup == 'no-token':
+        monkeypatch.delenv('DATAVERSE_TOKEN')
+    elif setup == 'broken-provider':
+        eps = [_EP('broken', _broken)]
+        monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
     manifest = _manifest(tmp_path)
     before = manifest.read_text()
     code = main([str(manifest) if a == 'MANIFEST' else a for a in argv])
     out = capsys.readouterr()
     assert code == 1
-    assert REFUSAL in out.err
+    assert f'the {argv[0]} command {REFUSAL}' in out.err
     assert blocked_net == []
     assert manifest.read_text() == before
 
 
+def test_mirror_refuses_before_the_contact_email_check(blocked_net, capsys):
+    """A mirror without a contact email still reports offline mode, not the missing email."""
+    assert main(['mirror', ZENODO_DOI, '--collection', 'c', '--no-publish']) == 1
+    assert f'the mirror command {REFUSAL}' in capsys.readouterr().err
+    assert blocked_net == []
+
+
+def test_sync_of_an_empty_manifest_is_refused(blocked_net, tmp_path, capsys):
+    """A sync with no dataset to read is refused too, in the CLI and in Python."""
+    empty = tmp_path / 'empty.toml'
+    empty.write_text('')
+    assert main(['sync', str(empty)]) == 1
+    assert f'the sync command {REFUSAL}' in capsys.readouterr().err
+    _assert_refused(lambda: sync.sync_manifest(empty), blocked_net)
+
+
+def test_library_entry_points_refuse_with_the_error_type(blocked_net, tmp_path, monkeypatch):
+    """sync_manifest and mirror_sync raise OfflineModeError, not an aggregate or a FAIL line."""
+    _assert_refused(lambda: sync.sync_manifest(_manifest(tmp_path)), blocked_net)
+    eps = [_EP('broken', _broken)]
+    monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
+    options = {'dataverse_url': 'https://dataverse.example', 'token': 't'}
+    options.update(contact_name='n', contact_email='e@example.org', dry_run=True)
+    _assert_refused(lambda: mirror_sync.mirror_sync('c', **options), blocked_net)
+
+
+def test_cli_and_texts_list_the_same_network_commands():
+    """The CLI guard and every text that documents offline mode name the same 8 commands."""
+    assert getattr(cli, 'NETWORK_COMMANDS', None) == frozenset(NETWORK_COMMANDS)
+    for name in TEXTS:
+        lists = re.findall(r'needs the network \(([^)]*)\)', (ROOT / name).read_text())
+        assert lists, f'{name} names no network command list'
+        for found in lists:
+            assert re.findall(r'[a-z-]+', found) == list(NETWORK_COMMANDS), name
+
+
 @pytest.mark.parametrize(
-    ('argv', 'code'),
+    ('argv', 'expected'),
     [
-        (['list'], 0),
-        (['path', 'interior.mass_radius.zeng_2019'], 1),
-        (['check', 'zalmoxis'], 1),
-        (['cache', 'check', '--key', 'interior.mass_radius.zeng_2019'], 1),
-        (['relocate', '--dry-run'], 0),
-        (['prune'], 0),
+        (['list'], 'g.demo'),
+        (['path', 'g.demo'], 'r15727899'),
+        (['check', 'demo'], 'g.demo: ok'),
+        (['cache', 'check', '--key', 'g.demo'], 'g/demo/r15727899: 1/1 files ok'),
+        (['relocate', '--dry-run'], ''),
+        (['prune'], ''),
     ],
-    ids=lambda v: v[0] if isinstance(v, list) else str(v),
+    ids=lambda v: '-'.join(v) if isinstance(v, list) else None,
 )
-def test_local_commands_still_run_in_offline_mode(blocked_net, capsys, argv, code):
-    """Commands that only read the local tree keep their exit code and open no socket."""
-    assert main(argv) == code
-    assert REFUSAL not in capsys.readouterr().err
+def test_local_commands_still_run_in_offline_mode(
+    blocked_net, tmp_path, capsys, monkeypatch, argv, expected
+):
+    """Commands that only read a populated tree exit 0 in offline mode and open no socket."""
+    body = b'offline payload\n'
+    manifest = tmp_path / 'manifest.toml'
+    manifest.write_text(f'[g.demo]\nzenodo = "{ZENODO_DOI}"\nrequired_by = ["demo"]\n')
+    digest = hashlib.sha256(body).hexdigest()
+    (tmp_path / 'g.demo.registry.txt').write_text(f'a.txt sha256:{digest}\n')
+    monkeypatch.setattr(
+        'fwl_io.manifest.entry_points', lambda group: [_EP('demo', lambda: lambda: manifest)]
+    )
+    target = tmp_path / 'data' / 'g' / 'demo' / 'r15727899'
+    target.mkdir(parents=True)
+    (target / 'a.txt').write_bytes(body)
+    fetcher_for_key('g.demo', tmp_path / 'data').fetch_all()
+    code = main(argv)
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    assert expected in out.out
+    assert REFUSAL not in out.err
     assert blocked_net == []
 
 
