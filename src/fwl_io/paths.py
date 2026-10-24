@@ -18,8 +18,9 @@ before any download is attempted and is never written to.
 ``FWL_IO_OFFLINE`` disables all network access when set to a truthy value
 (``1``, ``true``, ``yes``, ``on``). In offline mode a missing or corrupt file
 raises ``OfflineDataError`` instead of triggering a download, and a command
-that needs the network (sync, the mirror commands, check-mirrors,
-mirror-status, latest) raises :class:`OfflineModeError` before it connects.
+that needs the network (sync, mirror, mirror-publish, mirror-sync, mirror-pin,
+check-mirrors, mirror-status, latest) raises :class:`OfflineModeError` before
+it connects.
 """
 
 from __future__ import annotations

@@ -74,6 +74,8 @@ def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
     ------
     RecordWithoutId
         If the reply is no JSON object, or its ``id`` is not an integer or a string of digits.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
     require_online(f'reading the newest version of Zenodo record {recid}')
     response = requests.get(f'{api_base}/{recid}/versions/latest', timeout=30)

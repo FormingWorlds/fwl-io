@@ -84,11 +84,8 @@ def _manifest(tmp_path):
 
 def _assert_refused(call, calls):
     """Call ``call`` and require the offline refusal before any socket call."""
-    with pytest.raises(Exception) as info:
+    with pytest.raises(fwl_io.OfflineModeError, match=REFUSAL):
         call()
-    assert type(info.value).__name__ == 'OfflineModeError', repr(info.value)
-    assert isinstance(info.value, fwl_io.OfflineModeError)
-    assert REFUSAL in str(info.value)
     assert calls == []
 
 
@@ -192,7 +189,7 @@ def test_library_entry_points_refuse_with_the_error_type(blocked_net, tmp_path, 
 
 def test_cli_and_texts_list_the_same_network_commands():
     """The CLI guard and every text that documents offline mode name the same 8 commands."""
-    assert getattr(cli, 'NETWORK_COMMANDS', None) == frozenset(NETWORK_COMMANDS)
+    assert frozenset(NETWORK_COMMANDS) == cli.NETWORK_COMMANDS
     for name in TEXTS:
         lists = re.findall(r'needs the network \(([^)]*)\)', (ROOT / name).read_text())
         assert lists, f'{name} names no network command list'
@@ -265,11 +262,9 @@ def test_fetch_from_a_populated_tree_runs_in_offline_mode(blocked_net, tmp_path)
 )
 def test_require_online_follows_the_offline_spellings(monkeypatch, value, refused):
     """The guard refuses for exactly the truthy spellings of FWL_IO_OFFLINE."""
-    guard = getattr(paths, 'require_online', None)
-    assert guard is not None, 'fwl_io.paths.require_online is missing'
     monkeypatch.setenv('FWL_IO_OFFLINE', value)
     if refused:
         with pytest.raises(fwl_io.OfflineModeError, match='a Zenodo read needs the network'):
-            guard('a Zenodo read')
+            paths.require_online('a Zenodo read')
     else:
-        assert guard('a Zenodo read') is None
+        assert paths.require_online('a Zenodo read') is None

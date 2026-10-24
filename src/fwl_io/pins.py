@@ -274,6 +274,8 @@ def dataverse_server(doi: str) -> str:
         If doi.org fails in transit.
     UnknownServer
         If doi.org does not know the DOI or gives no landing page.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set and the DOI prefix is not a known server.
     """
     doi = doi.removeprefix('doi:')
     if server := DATAVERSE_SERVERS.get(doi.partition('/')[0]):

@@ -126,7 +126,15 @@ def sync_manifest(manifest_path: str | Path, api_base: str = ZENODO_API) -> list
 
     Every dataset is attempted; if any fail, the successful registries are
     still written and a single aggregated error is raised at the end.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
+    RuntimeError
+        If any dataset fails to sync.
     """
+    require_online(f'syncing {manifest_path}')
     written: list[Path] = []
     failures: dict[str, str] = {}
     for ds in load_manifest(manifest_path):

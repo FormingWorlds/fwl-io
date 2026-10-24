@@ -269,6 +269,8 @@ def _zenodo_record_rights(recid: str, api_base: str) -> dict:
     ------
     ValueError
         If the record lists no license or more than one.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
     require_online(f'reading the license of Zenodo record {recid}')
     response = requests.get(
@@ -397,6 +399,8 @@ class DataverseClient:
             the token stays on this server), or a non-empty successful body
             fails to parse as JSON or parses to something other than a JSON
             object.
+        OfflineModeError
+            If ``FWL_IO_OFFLINE`` is set.
         """
         require_online(f'Dataverse {method} {path}')
         try:

@@ -172,7 +172,13 @@ def mirror_sync(
         draft is verified, 1 when a manifest was left out, the listing or the creation
         failed, or the draft is not verified, 3 when nothing failed but a Zenodo record
         could not be read.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online('creating mirror drafts')
     discovery = _discover_all()
     if discovery.errors:
         return manifest_lines(discovery.errors), 1
