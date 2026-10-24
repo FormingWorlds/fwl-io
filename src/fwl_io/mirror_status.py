@@ -15,6 +15,7 @@ import requests
 
 from fwl_io.doi import zenodo_record_id
 from fwl_io.manifest import Dataset, ProviderError, _discover_all
+from fwl_io.paths import require_online
 from fwl_io.pins import manifest_lines
 from fwl_io.sync import ZENODO_API, fetch_zenodo_record, in_community
 
@@ -73,7 +74,10 @@ def latest_record_id(recid: str, api_base: str = ZENODO_API) -> str:
     ------
     RecordWithoutId
         If the reply is no JSON object, or its ``id`` is not an integer or a string of digits.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'reading the newest version of Zenodo record {recid}')
     response = requests.get(f'{api_base}/{recid}/versions/latest', timeout=30)
     response.raise_for_status()
     body = response.json()
@@ -109,7 +113,13 @@ def mirror_status(
     -------
     StatusReport
         A dataset can be both unpinned and stale.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online('mirror-status')
     report, latest, community = StatusReport(), latest or latest_record_id, community or accepted
     member: dict[str, bool | Exception] = {}
     if datasets is None:
@@ -170,7 +180,13 @@ def newer_versions(
     StatusReport
         Only ``ok``, ``stale``, ``unreadable``, ``gone`` and ``manifest_errors`` are filled;
         :func:`latest_exit_code` gives its exit status.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online('latest')
     report, latest = StatusReport(), latest or latest_record_id
     if datasets is None:
         discovery = _discover_all()

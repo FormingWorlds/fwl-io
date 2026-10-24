@@ -18,7 +18,7 @@ Models in the PROTEUS framework depend on reference data hosted on Zenodo (with 
 - **Version DOIs only**: manifests pin the DOI of a specific deposit, and every dataset requires a Zenodo version DOI (Dataverse serves as a download mirror). `fwl-io sync` rejects concept DOIs, which resolve to the newest deposit and would let data drift underneath pinned code.
 - **Mirrored downloads**: every file is fetched with [pooch](https://www.fatiando.org/pooch/), verified against its checksum, tried against Zenodo first and the Dataverse mirror second, and moved into place atomically (staged on the same filesystem, `os.replace` into place) so an interrupted download can never leave a corrupt file behind. Local placement failures such as a read-only tree or a full disk are reported as themselves, never as mirror failures. A deposit packaged as a single archive (`extract = "tar"` / `"zip"`) is downloaded, checksum-verified, and unpacked into the dataset directory, with the archive itself discarded.
 - **Concurrent-safe**: when many processes start together and all need the same missing file, a per-file inter-process lock lets only one download it while the others wait and reuse the result, so a batch of runs cannot stampede Zenodo/Dataverse into rate-limiting the collaboration. The lock is coherent across cluster nodes where the shared filesystem supports it, and best-effort: if locking is unavailable or a holder stalls, waiters fall back to fetching unguarded rather than failing.
-- **Offline-first**: with `FWL_IO_OFFLINE=1` no network access is attempted; files resolve from the local tree or fail with an actionable error. A read-only, pre-populated group cache (`FWL_DATA_CACHE`) is consulted before any download, which serves cluster nodes without internet access.
+- **Offline-first**: `FWL_IO_OFFLINE=1` forbids all network access: files resolve from the local tree, a file fetch (`Fetcher.fetch`, `Fetcher.fetch_all`) raises `OfflineDataError` for a missing or corrupt data file instead of a download, a model fetch (`fetch_for`, `fwl-io fetch <model>`) reports each failed dataset in one `RuntimeError`, and a command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) raises `OfflineModeError` before it connects. A read-only, pre-populated group cache (`FWL_DATA_CACHE`) is consulted before any download, which serves cluster nodes without internet access.
 
 ## Installation
 
@@ -58,7 +58,7 @@ fwl-io sync manifest.toml       # regenerate committed registries from Zenodo
 |---|---|
 | `FWL_DATA` | Root of the writable data tree. Required unless an explicit `data_root` is passed; there is no silent default location. |
 | `FWL_DATA_CACHE` | Optional read-only, pre-populated copy of the tree (for example a group share on a cluster); consulted before any download, never written. |
-| `FWL_IO_OFFLINE` | Set to `1` to forbid all network access. |
+| `FWL_IO_OFFLINE` | Set to `1` (or `true`, `yes`, `on`) to forbid all network access: a file fetch (`Fetcher.fetch`, `Fetcher.fetch_all`) raises `OfflineDataError` for a missing or corrupt data file instead of a download, a model fetch (`fetch_for`, `fwl-io fetch <model>`) reports each failed dataset in one `RuntimeError`, and a command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) raises `OfflineModeError` before it connects. |
 
 ## Adding a dataset
 

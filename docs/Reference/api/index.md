@@ -13,9 +13,10 @@ from fwl_io import (
     select_datasets, cache_key, CacheKey,     # actions/cache keys of a data tree
     CheckReport, DatasetCheck, FileCheck,
     resolve_data_root, resolve_cache_root,
-    DownloadError, OfflineDataError, MissingDataRootError,
+    DownloadError, OfflineDataError, OfflineModeError, MissingDataRootError,
     ManifestSchemaError,
     ProviderError, ErrorKind,           # why a manifest was left out of a report
+    __version__,                        # the installed version
 )
 ```
 

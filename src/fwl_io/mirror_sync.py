@@ -28,6 +28,7 @@ from fwl_io.mirror import (
     source_record,
 )
 from fwl_io.mirror_status import mirror_status
+from fwl_io.paths import require_online
 from fwl_io.pins import Unreachable, dataverse_server, manifest_lines, pin_problem
 from fwl_io.sync import ZENODO_API, fetch_zenodo_registry, select_files
 
@@ -69,6 +70,7 @@ def collection_mirrors(
 def _download(client: DataverseClient, file_id) -> requests.Response:
     """Open the download of a Dataverse file. The token goes to the Dataverse server only: a
     redirect (DataverseNL answers with a signed storage URL) is followed without it."""
+    require_online(f'downloading Dataverse file {file_id}')
     url = f'{client.base_url}/api/access/datafile/{file_id}'
     options = {'stream': True, 'timeout': client.timeout}
     response = requests.get(url, headers=client._headers, allow_redirects=False, **options)
@@ -170,7 +172,13 @@ def mirror_sync(
         draft is verified, 1 when a manifest was left out, the listing or the creation
         failed, or the draft is not verified, 3 when nothing failed but a Zenodo record
         could not be read.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'the mirror sync of {collection}')
     discovery = _discover_all()
     if discovery.errors:
         return manifest_lines(discovery.errors), 1
@@ -321,7 +329,13 @@ def mirror_pin(
     tuple
         The report lines, and the exit code: 0 when every dataset of the record is served,
         1 otherwise.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'pinning {persistent_id}')
     pin = persistent_id.removeprefix('doi:')
     client = client or DataverseClient(dataverse_server(pin), '')
     body = client._retry(

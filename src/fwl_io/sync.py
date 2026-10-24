@@ -23,6 +23,7 @@ import requests
 
 from fwl_io.doi import zenodo_record_id
 from fwl_io.manifest import Dataset, load_manifest
+from fwl_io.paths import require_online
 from fwl_io.registry import write_registry
 
 # Re-exported for backwards compatibility; the parser now lives in manifest.
@@ -59,6 +60,7 @@ def fetch_zenodo_record(doi: str, api_base: str = ZENODO_API) -> dict:
     record id), which would let the data change underneath pinned code.
     """
     recid = zenodo_record_id(doi)
+    require_online(f'reading Zenodo record {recid}')
     response = requests.get(f'{api_base}/{recid}', timeout=30)
     response.raise_for_status()
     record = response.json()
@@ -124,7 +126,15 @@ def sync_manifest(manifest_path: str | Path, api_base: str = ZENODO_API) -> list
 
     Every dataset is attempted; if any fail, the successful registries are
     still written and a single aggregated error is raised at the end.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
+    RuntimeError
+        If any dataset fails to sync.
     """
+    require_online(f'syncing {manifest_path}')
     written: list[Path] = []
     failures: dict[str, str] = {}
     for ds in load_manifest(manifest_path):

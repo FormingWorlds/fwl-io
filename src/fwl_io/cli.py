@@ -13,8 +13,21 @@ import shlex
 import sys
 
 from fwl_io import __version__
+from fwl_io.paths import require_online
 
 DEFAULT_DATAVERSE_URL = 'https://dataverse.nl'
+NETWORK_COMMANDS = frozenset(
+    {
+        'sync',
+        'mirror',
+        'mirror-publish',
+        'mirror-sync',
+        'mirror-pin',
+        'check-mirrors',
+        'mirror-status',
+        'latest',
+    }
+)
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
@@ -591,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        if args.command in NETWORK_COMMANDS:
+            require_online(f'the {args.command} command')
         return args.func(args)
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: message, not traceback
         print(f'fwl-io: {exc}', file=sys.stderr)

@@ -37,6 +37,7 @@ from pathlib import Path
 
 import requests
 
+from fwl_io.paths import require_online
 from fwl_io.sync import (
     ZENODO_API,
     ZENODO_COMMUNITIES,
@@ -268,7 +269,10 @@ def _zenodo_record_rights(recid: str, api_base: str) -> dict:
     ------
     ValueError
         If the record lists no license or more than one.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'reading the license of Zenodo record {recid}')
     response = requests.get(
         f'{api_base}/{recid}',
         headers={'Accept': 'application/vnd.inveniordm.v1+json'},
@@ -395,7 +399,10 @@ class DataverseClient:
             the token stays on this server), or a non-empty successful body
             fails to parse as JSON or parses to something other than a JSON
             object.
+        OfflineModeError
+            If ``FWL_IO_OFFLINE`` is set.
         """
+        require_online(f'Dataverse {method} {path}')
         try:
             response = requests.request(
                 method,
@@ -1128,7 +1135,10 @@ def mirror_to_dataverse(
         propagated from ``fetch_zenodo_record`` before any Dataverse write.
         (Dataverse-side request failures, including an unparseable response body,
         are wrapped as DataverseError.)
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'mirroring {zenodo_doi}')
     # Dataverse requires a point-of-contact email on every dataset, so any real
     # create (draft or published) needs one; a dry run writes nothing and is exempt.
     # The subject is validated by the server when the dataset is created: an
@@ -1388,7 +1398,10 @@ def publish_existing_dataverse_draft(
         If the dataset is not RELEASED after the wait that follows the publish
         request, or every attempt got the bot-check page or a 429; check the
         dataset's state before trying again.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online(f'publishing {persistent_id}')
     if version_type not in ('major', 'minor'):
         raise ValueError(
             f"{version_type!r} is not a valid Dataverse version type: use 'major' or 'minor'"

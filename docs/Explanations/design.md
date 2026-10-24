@@ -34,7 +34,7 @@ The data root comes from an explicit path or the `FWL_DATA` environment variable
 
 ## Offline-first
 
-`FWL_IO_OFFLINE=1` forbids all network access; `FWL_DATA_CACHE` provides a read-only, pre-populated group cache consulted before any download; every failure names the file and the resolved root.
+`FWL_IO_OFFLINE=1` forbids all network access: a file fetch (`Fetcher.fetch`, `Fetcher.fetch_all`) raises `OfflineDataError` for a missing or corrupt data file instead of a download, a model fetch (`fetch_for`, `fwl-io fetch <model>`) reports each failed dataset in one `RuntimeError`, and a command that needs the network (`sync`, `mirror`, `mirror-publish`, `mirror-sync`, `mirror-pin`, `check-mirrors`, `mirror-status`, `latest`) raises `OfflineModeError` before it connects. `FWL_DATA_CACHE` provides a read-only, pre-populated group cache consulted before any download; an `OfflineDataError` names the file and the resolved data root.
 
 *Why*: production runs happen on compute nodes without internet. Anything that only works online is not usable for the campaigns this ecosystem runs.
 

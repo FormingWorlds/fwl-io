@@ -23,6 +23,7 @@ from fwl_io.mirror import (
     descriptions,
     names_source,
 )
+from fwl_io.paths import require_online
 from fwl_io.sync import fetch_zenodo_record
 from fwl_io.transient import is_cert_failure, is_transient, is_transient_status
 
@@ -273,10 +274,13 @@ def dataverse_server(doi: str) -> str:
         If doi.org fails in transit.
     UnknownServer
         If doi.org does not know the DOI or gives no landing page.
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set and the DOI prefix is not a known server.
     """
     doi = doi.removeprefix('doi:')
     if server := DATAVERSE_SERVERS.get(doi.partition('/')[0]):
         return server
+    require_online(f'the doi.org lookup of doi:{doi}')
     try:
         response = requests.get(f'{DOI_HANDLES}/{doi}', timeout=30)
         response.raise_for_status()
@@ -313,7 +317,13 @@ def check_mirrors(
     MirrorReport
         Passed, failed and unreachable pins (with the reason), unpinned dataset keys, and a
         warning per pin whose read recovered from a certificate error.
+
+    Raises
+    ------
+    OfflineModeError
+        If ``FWL_IO_OFFLINE`` is set.
     """
+    require_online('check-mirrors')
     report = MirrorReport()
     if datasets is None:
         discovery = _discover_all()
