@@ -5,6 +5,7 @@ import re
 import socket
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,11 +40,6 @@ TEXTS = (
     'src/fwl_io/paths.py',
 )
 ROOT = Path(__file__).resolve().parents[1]
-
-
-class _EP:
-    def __init__(self, name, load):
-        self.name, self.load = name, load
 
 
 def _broken():
@@ -84,8 +80,9 @@ def _manifest(tmp_path):
 
 def _assert_refused(call, calls):
     """Call ``call`` and require the offline refusal before any socket call."""
-    with pytest.raises(fwl_io.OfflineModeError, match=REFUSAL):
+    with pytest.raises(Exception) as info:  # another type fails the assert below
         call()
+    assert info.type is fwl_io.OfflineModeError and REFUSAL in str(info.value), repr(info.value)
     assert calls == []
 
 
@@ -131,7 +128,7 @@ def test_each_network_call_refuses_in_offline_mode(blocked_net, name):
     'argv',
     [
         ['sync', 'MANIFEST'],
-        ['mirror', ZENODO_DOI, '--collection', 'c', '--dry-run'],
+        ['mirror', ZENODO_DOI, '--collection', 'c', '--no-publish'],
         ['mirror-publish', 'doi:10.34894/ZGZA6I'],
         ['mirror-sync', '--collection', 'c', '--dry-run'],
         ['mirror-pin', 'doi:10.34894/ZGZA6I', '--manifest', 'MANIFEST'],
@@ -149,7 +146,7 @@ def test_maintainer_commands_exit_1_with_the_refusal(
     if setup == 'no-token':
         monkeypatch.delenv('DATAVERSE_TOKEN')
     elif setup == 'broken-provider':
-        eps = [_EP('broken', _broken)]
+        eps = [SimpleNamespace(name='broken', load=_broken)]
         monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
     manifest = _manifest(tmp_path)
     before = manifest.read_text()
@@ -159,13 +156,6 @@ def test_maintainer_commands_exit_1_with_the_refusal(
     assert f'the {argv[0]} command {REFUSAL}' in out.err
     assert blocked_net == []
     assert manifest.read_text() == before
-
-
-def test_mirror_refuses_before_the_contact_email_check(blocked_net, capsys):
-    """A mirror without a contact email still reports offline mode, not the missing email."""
-    assert main(['mirror', ZENODO_DOI, '--collection', 'c', '--no-publish']) == 1
-    assert f'the mirror command {REFUSAL}' in capsys.readouterr().err
-    assert blocked_net == []
 
 
 def test_sync_of_an_empty_manifest_is_refused(blocked_net, tmp_path, capsys):
@@ -180,19 +170,54 @@ def test_sync_of_an_empty_manifest_is_refused(blocked_net, tmp_path, capsys):
 def test_library_entry_points_refuse_with_the_error_type(blocked_net, tmp_path, monkeypatch):
     """sync_manifest and mirror_sync raise OfflineModeError, not an aggregate or a FAIL line."""
     _assert_refused(lambda: sync.sync_manifest(_manifest(tmp_path)), blocked_net)
-    eps = [_EP('broken', _broken)]
+    eps = [SimpleNamespace(name='broken', load=_broken)]
     monkeypatch.setattr('fwl_io.manifest.entry_points', lambda group: eps)
     options = {'dataverse_url': 'https://dataverse.example', 'token': 't'}
     options.update(contact_name='n', contact_email='e@example.org', dry_run=True)
     _assert_refused(lambda: mirror_sync.mirror_sync('c', **options), blocked_net)
 
 
+class _UnpublishedClient:
+    def _retry(self, call, what):
+        return {'data': {'latestVersion': {'versionState': 'DRAFT'}}}
+
+
+@pytest.mark.parametrize('name', ['mirror_pin', 'mirror_to_dataverse', 'publish_draft'])
+def test_mirror_entry_points_refuse_before_their_checks(blocked_net, name):
+    """A pin with its own client, a mirror without an email and a bad publish all refuse."""
+    calls = {
+        'mirror_pin': lambda: mirror_sync.mirror_pin(
+            'doi:10.34894/ZGZA6I', client=_UnpublishedClient()
+        ),
+        'mirror_to_dataverse': lambda: mirror.mirror_to_dataverse(
+            ZENODO_DOI,
+            dataverse_url='https://dataverse.example',
+            collection='c',
+            token='t',
+            contact_name='n',
+            contact_email='',
+            publish=False,
+        ),
+        'publish_draft': lambda: mirror.publish_existing_dataverse_draft(
+            'doi:10.34894/ZGZA6I',
+            dataverse_url='https://dataverse.example',
+            token='t',
+            version_type='patch',
+        ),
+    }
+    _assert_refused(calls[name], blocked_net)
+
+
 def test_cli_and_texts_list_the_same_network_commands():
     """The CLI guard and every text that documents offline mode name the same 8 commands."""
     assert frozenset(NETWORK_COMMANDS) == cli.NETWORK_COMMANDS
+    clause = re.compile(
+        r'needs the network \(([^)]*)\)\s+(?:raises (?::class:)?`+OfflineModeError`+'
+        r'|exits 1 with the offline message)\s+before\s+it\s+connects'
+    )
     for name in TEXTS:
-        lists = re.findall(r'needs the network \(([^)]*)\)', (ROOT / name).read_text())
-        assert lists, f'{name} names no network command list'
+        lists = clause.findall((ROOT / name).read_text())
+        assert len(lists) == (2 if name == 'README.md' else 1), name
         for found in lists:
             assert re.findall(r'[a-z-]+', found) == list(NETWORK_COMMANDS), name
 
@@ -204,8 +229,8 @@ def test_cli_and_texts_list_the_same_network_commands():
         (['path', 'g.demo'], 'r15727899'),
         (['check', 'demo'], 'g.demo: ok'),
         (['cache', 'check', '--key', 'g.demo'], 'g/demo/r15727899: 1/1 files ok'),
-        (['relocate', '--dry-run'], ''),
-        (['prune'], ''),
+        (['relocate', '--dry-run'], 'no dataset declares a legacy location'),
+        (['prune'], '1 referenced kept'),
     ],
     ids=lambda v: '-'.join(v) if isinstance(v, list) else None,
 )
@@ -219,7 +244,8 @@ def test_local_commands_still_run_in_offline_mode(
     digest = hashlib.sha256(body).hexdigest()
     (tmp_path / 'g.demo.registry.txt').write_text(f'a.txt sha256:{digest}\n')
     monkeypatch.setattr(
-        'fwl_io.manifest.entry_points', lambda group: [_EP('demo', lambda: lambda: manifest)]
+        'fwl_io.manifest.entry_points',
+        lambda group: [SimpleNamespace(name='demo', load=lambda: lambda: manifest)],
     )
     target = tmp_path / 'data' / 'g' / 'demo' / 'r15727899'
     target.mkdir(parents=True)
