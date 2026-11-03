@@ -1,0 +1,4 @@
+Proudspire.chk md5:91d5febbb16f9428ca5d3e92093f190a
+Proudspire.chk_k md5:4b8531a464cad498e0fd7aa446753e0b
+Proudspire.sf md5:48ced221030cb67e4cdb26340a8acd45
+Proudspire.sf_k md5:f304b722db44c3ed1e65157581d6e159

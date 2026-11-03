@@ -1,0 +1,4 @@
+Sovngarde.chk md5:bbb4f6ba2d91b20fa862712d2b4e3e75
+Sovngarde.chk_k md5:7fb599526707c8218844625fc84b8a11
+Sovngarde.sf md5:a3a54fe2e6c81386ba30f0fa6bc42dc7
+Sovngarde.sf_k md5:e6c2e1052c1fa4fae72616618298bb69

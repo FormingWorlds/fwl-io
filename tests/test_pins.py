@@ -597,7 +597,7 @@ def test_spectral_file_entries_match_their_key():
     """Each spectral-file entry names its set as its key does and holds <Set>.sf and <Set>.sf_k."""
     datasets = load_manifest(shared_manifest_path())
     spectral = [ds for ds in datasets if ds.key.startswith('atmos_clim.spectral_files.')]
-    assert len(spectral) == 17
+    assert len(spectral) == 57
     for ds in spectral:
         set_name, bands = ds.key.split('.')[2:]
         stem = set_name.capitalize()
