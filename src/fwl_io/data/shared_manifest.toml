@@ -121,201 +121,241 @@ dataverse = "10.34894/YJZMFY"
 name = "SOCRATES spectral files Snowline, 32 bands"
 zenodo = "10.5281/zenodo.23806138"
 dataverse = "10.34894/WOAHQA"
+files = ["Snowline.sf", "Snowline.sf_k", "Snowline.chk", "Snowline.chk_k"]
 
 [atmos_clim.spectral_files.snowline.64]
 name = "SOCRATES spectral files Snowline, 64 bands"
 zenodo = "10.5281/zenodo.23806186"
 dataverse = "10.34894/IF2WVA"
+files = ["Snowline.sf", "Snowline.sf_k", "Snowline.chk", "Snowline.chk_k"]
 
 [atmos_clim.spectral_files.snowline.128]
 name = "SOCRATES spectral files Snowline, 128 bands"
 zenodo = "10.5281/zenodo.23806166"
 dataverse = "10.34894/5WDGHX"
+files = ["Snowline.sf", "Snowline.sf_k", "Snowline.chk", "Snowline.chk_k"]
 
 [atmos_clim.spectral_files.snowline.256]
 name = "SOCRATES spectral files Snowline, 256 bands"
 zenodo = "10.5281/zenodo.23806212"
 dataverse = "10.34894/UWN1FH"
+files = ["Snowline.sf", "Snowline.sf_k", "Snowline.chk", "Snowline.chk_k"]
 
 [atmos_clim.spectral_files.snowline.2048]
 name = "SOCRATES spectral files Snowline, 2048 bands"
 zenodo = "10.5281/zenodo.23806236"
 dataverse = "10.34894/BVDNWF"
+files = ["Snowline.sf", "Snowline.sf_k", "Snowline.chk", "Snowline.chk_k"]
 
 [atmos_clim.spectral_files.breezehome.32]
 name = "SOCRATES spectral files Breezehome, 32 bands"
 zenodo = "10.5281/zenodo.23808218"
 dataverse = "10.34894/8FMKZ1"
+files = ["Breezehome.sf", "Breezehome.sf_k", "Breezehome.chk", "Breezehome.chk_k"]
 
 [atmos_clim.spectral_files.breezehome.64]
 name = "SOCRATES spectral files Breezehome, 64 bands"
 zenodo = "10.5281/zenodo.23808200"
 dataverse = "10.34894/2NXD03"
+files = ["Breezehome.sf", "Breezehome.sf_k", "Breezehome.chk", "Breezehome.chk_k"]
 
 [atmos_clim.spectral_files.breezehome.128]
 name = "SOCRATES spectral files Breezehome, 128 bands"
 zenodo = "10.5281/zenodo.23808184"
 dataverse = "10.34894/JCQOM5"
+files = ["Breezehome.sf", "Breezehome.sf_k", "Breezehome.chk", "Breezehome.chk_k"]
 
 [atmos_clim.spectral_files.breezehome.256]
 name = "SOCRATES spectral files Breezehome, 256 bands"
 zenodo = "10.5281/zenodo.23808153"
 dataverse = "10.34894/DU1IQ4"
+files = ["Breezehome.sf", "Breezehome.sf_k", "Breezehome.chk", "Breezehome.chk_k"]
 
 [atmos_clim.spectral_files.breezehome.2048]
 name = "SOCRATES spectral files Breezehome, 2048 bands"
 zenodo = "10.5281/zenodo.23808117"
 dataverse = "10.34894/GFM4YD"
+files = ["Breezehome.sf", "Breezehome.sf_k", "Breezehome.chk", "Breezehome.chk_k"]
 
 [atmos_clim.spectral_files.cliffshade.32]
 name = "SOCRATES spectral files Cliffshade, 32 bands"
 zenodo = "10.5281/zenodo.23836927"
 dataverse = "10.34894/EUKJUR"
+files = ["Cliffshade.sf", "Cliffshade.sf_k", "Cliffshade.chk", "Cliffshade.chk_k"]
 
 [atmos_clim.spectral_files.cliffshade.64]
 name = "SOCRATES spectral files Cliffshade, 64 bands"
 zenodo = "10.5281/zenodo.23836953"
 dataverse = "10.34894/WAPYQF"
+files = ["Cliffshade.sf", "Cliffshade.sf_k", "Cliffshade.chk", "Cliffshade.chk_k"]
 
 [atmos_clim.spectral_files.cliffshade.128]
 name = "SOCRATES spectral files Cliffshade, 128 bands"
 zenodo = "10.5281/zenodo.23837412"
 dataverse = "10.34894/DHR6A2"
+files = ["Cliffshade.sf", "Cliffshade.sf_k", "Cliffshade.chk", "Cliffshade.chk_k"]
 
 [atmos_clim.spectral_files.cliffshade.256]
 name = "SOCRATES spectral files Cliffshade, 256 bands"
 zenodo = "10.5281/zenodo.23837359"
 dataverse = "10.34894/KWUDYZ"
+files = ["Cliffshade.sf", "Cliffshade.sf_k", "Cliffshade.chk", "Cliffshade.chk_k"]
 
 [atmos_clim.spectral_files.cliffshade.2048]
 name = "SOCRATES spectral files Cliffshade, 2048 bands"
 zenodo = "10.5281/zenodo.23836979"
 dataverse = "10.34894/T5PEXJ"
+files = ["Cliffshade.sf", "Cliffshade.sf_k", "Cliffshade.chk", "Cliffshade.chk_k"]
 
 [atmos_clim.spectral_files.volenfell.32]
 name = "SOCRATES spectral files Volenfell, 32 bands"
 zenodo = "10.5281/zenodo.23808230"
 dataverse = "10.34894/NSMYFR"
+files = ["Volenfell.sf", "Volenfell.sf_k", "Volenfell.chk", "Volenfell.chk_k"]
 
 [atmos_clim.spectral_files.volenfell.64]
 name = "SOCRATES spectral files Volenfell, 64 bands"
 zenodo = "10.5281/zenodo.23808244"
 dataverse = "10.34894/ZWYLPQ"
+files = ["Volenfell.sf", "Volenfell.sf_k", "Volenfell.chk", "Volenfell.chk_k"]
 
 [atmos_clim.spectral_files.volenfell.128]
 name = "SOCRATES spectral files Volenfell, 128 bands"
 zenodo = "10.5281/zenodo.23808253"
 dataverse = "10.34894/BU0CM2"
+files = ["Volenfell.sf", "Volenfell.sf_k", "Volenfell.chk", "Volenfell.chk_k"]
 
 [atmos_clim.spectral_files.volenfell.256]
 name = "SOCRATES spectral files Volenfell, 256 bands"
 zenodo = "10.5281/zenodo.23808259"
 dataverse = "10.34894/LYW4OT"
+files = ["Volenfell.sf", "Volenfell.sf_k", "Volenfell.chk", "Volenfell.chk_k"]
 
 [atmos_clim.spectral_files.volenfell.2048]
 name = "SOCRATES spectral files Volenfell, 2048 bands"
 zenodo = "10.5281/zenodo.23808275"
 dataverse = "10.34894/7IFTUX"
+files = ["Volenfell.sf", "Volenfell.sf_k", "Volenfell.chk", "Volenfell.chk_k"]
 
 [atmos_clim.spectral_files.proudspire.32]
 name = "SOCRATES spectral files Proudspire, 32 bands"
 zenodo = "10.5281/zenodo.23837929"
 dataverse = "10.34894/OKCDU3"
+files = ["Proudspire.sf", "Proudspire.sf_k", "Proudspire.chk", "Proudspire.chk_k"]
 
 [atmos_clim.spectral_files.proudspire.64]
 name = "SOCRATES spectral files Proudspire, 64 bands"
 zenodo = "10.5281/zenodo.23838157"
 dataverse = "10.34894/T3X6DU"
+files = ["Proudspire.sf", "Proudspire.sf_k", "Proudspire.chk", "Proudspire.chk_k"]
 
 [atmos_clim.spectral_files.proudspire.128]
 name = "SOCRATES spectral files Proudspire, 128 bands"
 zenodo = "10.5281/zenodo.23838187"
 dataverse = "10.34894/L2ATPX"
+files = ["Proudspire.sf", "Proudspire.sf_k", "Proudspire.chk", "Proudspire.chk_k"]
 
 [atmos_clim.spectral_files.proudspire.256]
 name = "SOCRATES spectral files Proudspire, 256 bands"
 zenodo = "10.5281/zenodo.23838213"
 dataverse = "10.34894/VPJJNM"
+files = ["Proudspire.sf", "Proudspire.sf_k", "Proudspire.chk", "Proudspire.chk_k"]
 
 [atmos_clim.spectral_files.proudspire.2048]
 name = "SOCRATES spectral files Proudspire, 2048 bands"
 zenodo = "10.5281/zenodo.23838267"
 dataverse = "10.34894/WKT7MQ"
+files = ["Proudspire.sf", "Proudspire.sf_k", "Proudspire.chk", "Proudspire.chk_k"]
 
 [atmos_clim.spectral_files.skyborn.32]
 name = "SOCRATES spectral files Skyborn, 32 bands"
 zenodo = "10.5281/zenodo.23838451"
 dataverse = "10.34894/1SICM7"
+files = ["Skyborn.sf", "Skyborn.sf_k", "Skyborn.chk", "Skyborn.chk_k"]
 
 [atmos_clim.spectral_files.skyborn.64]
 name = "SOCRATES spectral files Skyborn, 64 bands"
 zenodo = "10.5281/zenodo.23838469"
 dataverse = "10.34894/SNIUNW"
+files = ["Skyborn.sf", "Skyborn.sf_k", "Skyborn.chk", "Skyborn.chk_k"]
 
 [atmos_clim.spectral_files.skyborn.128]
 name = "SOCRATES spectral files Skyborn, 128 bands"
 zenodo = "10.5281/zenodo.23838482"
 dataverse = "10.34894/XG4C3N"
+files = ["Skyborn.sf", "Skyborn.sf_k", "Skyborn.chk", "Skyborn.chk_k"]
 
 [atmos_clim.spectral_files.skyborn.256]
 name = "SOCRATES spectral files Skyborn, 256 bands"
 zenodo = "10.5281/zenodo.23838507"
 dataverse = "10.34894/FQZ7VO"
+files = ["Skyborn.sf", "Skyborn.sf_k", "Skyborn.chk", "Skyborn.chk_k"]
 
 [atmos_clim.spectral_files.skyborn.2048]
 name = "SOCRATES spectral files Skyborn, 2048 bands"
 zenodo = "10.5281/zenodo.23838562"
 dataverse = "10.34894/G5LQIL"
+files = ["Skyborn.sf", "Skyborn.sf_k", "Skyborn.chk", "Skyborn.chk_k"]
 
 [atmos_clim.spectral_files.atmora.32]
 name = "SOCRATES spectral files Atmora, 32 bands"
 zenodo = "10.5281/zenodo.23837505"
 dataverse = "10.34894/MTXQMZ"
+files = ["Atmora.sf", "Atmora.sf_k", "Atmora.chk", "Atmora.chk_k"]
 
 [atmos_clim.spectral_files.atmora.64]
 name = "SOCRATES spectral files Atmora, 64 bands"
 zenodo = "10.5281/zenodo.23837520"
 dataverse = "10.34894/YSEQFR"
+files = ["Atmora.sf", "Atmora.sf_k", "Atmora.chk", "Atmora.chk_k"]
 
 [atmos_clim.spectral_files.atmora.128]
 name = "SOCRATES spectral files Atmora, 128 bands"
 zenodo = "10.5281/zenodo.23837548"
 dataverse = "10.34894/DAKNRA"
+files = ["Atmora.sf", "Atmora.sf_k", "Atmora.chk", "Atmora.chk_k"]
 
 [atmos_clim.spectral_files.atmora.256]
 name = "SOCRATES spectral files Atmora, 256 bands"
 zenodo = "10.5281/zenodo.23837583"
 dataverse = "10.34894/Z5PEOS"
+files = ["Atmora.sf", "Atmora.sf_k", "Atmora.chk", "Atmora.chk_k"]
 
 [atmos_clim.spectral_files.atmora.2048]
 name = "SOCRATES spectral files Atmora, 2048 bands"
 zenodo = "10.5281/zenodo.23837640"
 dataverse = "10.34894/S2OGCC"
+files = ["Atmora.sf", "Atmora.sf_k", "Atmora.chk", "Atmora.chk_k"]
 
 [atmos_clim.spectral_files.sovngarde.32]
 name = "SOCRATES spectral files Sovngarde, 32 bands"
 zenodo = "10.5281/zenodo.23838860"
 dataverse = "10.34894/H5E4KF"
+files = ["Sovngarde.sf", "Sovngarde.sf_k", "Sovngarde.chk", "Sovngarde.chk_k"]
 
 [atmos_clim.spectral_files.sovngarde.64]
 name = "SOCRATES spectral files Sovngarde, 64 bands"
 zenodo = "10.5281/zenodo.23838886"
 dataverse = "10.34894/XOXL3W"
+files = ["Sovngarde.sf", "Sovngarde.sf_k", "Sovngarde.chk", "Sovngarde.chk_k"]
 
 [atmos_clim.spectral_files.sovngarde.128]
 name = "SOCRATES spectral files Sovngarde, 128 bands"
 zenodo = "10.5281/zenodo.23838924"
 dataverse = "10.34894/TNFEMO"
+files = ["Sovngarde.sf", "Sovngarde.sf_k", "Sovngarde.chk", "Sovngarde.chk_k"]
 
 [atmos_clim.spectral_files.sovngarde.256]
 name = "SOCRATES spectral files Sovngarde, 256 bands"
 zenodo = "10.5281/zenodo.23838984"
 dataverse = "10.34894/U9MBAQ"
+files = ["Sovngarde.sf", "Sovngarde.sf_k", "Sovngarde.chk", "Sovngarde.chk_k"]
 
 [atmos_clim.spectral_files.sovngarde.2048]
 name = "SOCRATES spectral files Sovngarde, 2048 bands"
 zenodo = "10.5281/zenodo.23839054"
 dataverse = "10.34894/9PAPF8"
+files = ["Sovngarde.sf", "Sovngarde.sf_k", "Sovngarde.chk", "Sovngarde.chk_k"]
 
 [interior.eos.dk09_1tpa_elec_free.mgsio3_wolf_bower_2018]
 name = "MgSiO3 lookup tables, Wolf & Bower (2018), 1TPa-dK09-elec-free"

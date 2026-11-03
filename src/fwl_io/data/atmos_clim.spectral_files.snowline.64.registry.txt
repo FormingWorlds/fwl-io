@@ -2,10 +2,3 @@ Snowline.chk md5:21ed091b7d8865174824087dc44cc268
 Snowline.chk_k md5:1f319fb670203c922013a638236ab2ef
 Snowline.sf md5:534bf4c651cfc721a40687859b168a84
 Snowline.sf_k md5:592a996c9405017b9492bf517bbea08b
-Snowline_H2O-H2O.log md5:6b7e77fe57076fdb9d3b88812a779c94
-Snowline_H2O-H2O_mon.log md5:09dd09da6e283fda02477980bb6b1a8b
-Snowline_H2O.log md5:1649accb605eee4096f95b3d9477c677
-Snowline_H2O_mon.log md5:cadc5bdbd4930bd94aa15f9d142c3217
-Snowline_Tmake_spectralfile_20261029T142404.log md5:25692f66ab4c6bc65003fbf81bb4b6ff
-Snowline_assemble.log md5:3d4832fa53ec52f91bd0160ffbd74ac2
-Snowline_skel.log md5:8ed53edcebffbc360774c3ce16fdb738
